@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+// Package cask.v1 is the wire schema for cask's inter-node consensus RPC.
+//
+// The messages mirror the pure types in internal/caspaxos (Ballot,
+// PrepareReply, AcceptReply) exactly; the transport layer translates between
+// the two so the consensus core stays free of protobuf. This is the permanent
+// replacement for the interim HTTP/JSON transport.
+package cask.v1;
+
+// Ballot is a Paxos round number: the pair (counter, node_id) is a strict
+// total order over every ballot in the system. Mirrors caspaxos.Ballot.
+message Ballot {
+  uint64 counter = 1;
+  uint64 node_id = 2;
+}
+
+message PrepareRequest {
+  bytes key = 1;
+  Ballot ballot = 2;
+}
+
+// PrepareResponse mirrors caspaxos.PrepareReply. When promised is false the
+// prepare was rejected and conflict carries the higher ballot. accepted/value
+// report what the acceptor had already accepted (zero ballot + empty value if
+// nothing).
+message PrepareResponse {
+  bool promised = 1;
+  Ballot conflict = 2;
+  Ballot accepted = 3;
+  bytes value = 4;
+}
+
+message AcceptRequest {
+  bytes key = 1;
+  Ballot ballot = 2;
+  bytes value = 3;
+}
+
+// AcceptResponse mirrors caspaxos.AcceptReply. When accepted is false the
+// acceptor had promised a higher ballot, reported in conflict.
+message AcceptResponse {
+  bool accepted = 1;
+  Ballot conflict = 2;
+}
+
+// AcceptorService is one acceptor's phase-1/phase-2 surface, exactly the
+// methods of the caspaxos.AcceptorClient interface.
+service AcceptorService {
+  rpc Prepare(PrepareRequest) returns (PrepareResponse);
+  rpc Accept(AcceptRequest) returns (AcceptResponse);
+}

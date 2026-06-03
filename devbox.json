@@ -1,0 +1,30 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.16.0/.schema/devbox.schema.json",
+  "packages": [
+    "go@latest"
+  ],
+  "env": {
+    "GOPATH": "$PWD/.devbox/go",
+    "GOBIN": "$PWD/.devbox/go/bin",
+    "PATH": "$GOBIN:$PATH"
+  },
+  "shell": {
+    "init_hook": [
+      "go version"
+    ],
+    "scripts": {
+      "build": [
+        "go build ./..."
+      ],
+      "test": [
+        "go test ./..."
+      ],
+      "run": [
+        "go run ."
+      ],
+      "tidy": [
+        "go mod tidy"
+      ]
+    }
+  }
+}

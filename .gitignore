@@ -1,0 +1,45 @@
+# --- Go ---
+# Build output
+/bin/
+# Test binaries / profiles produced by `go test`
+*.test
+*.out
+*.prof
+coverage.txt
+coverage.html
+# Go workspace files (machine-local)
+go.work
+go.work.sum
+# Vendored deps (this project uses modules, not vendoring)
+/vendor/
+
+# --- Devbox ---
+# Generated environment state (includes the local GOPATH from devbox.json)
+.devbox/
+
+# --- Generated cluster configs & certs ---
+# `cask gen-certs` writes node configs, CA, and keys here by default
+/clusterconf/
+*.pem
+*.crt
+*.key
+
+# --- TLA+ / TLC (tla/) ---
+# TLC model-checker output and toolbox state
+*.toolbox/
+states/
+*.tlaps/
+*.dot
+MC.cfg
+MC.tla
+*.old
+
+# --- Editor / OS ---
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# --- Claude Code ---
+.claude/
