@@ -20,7 +20,8 @@ type NodeSpec struct {
 	Name       string     // node name (also the output config key)
 	OverlayIP  netip.Addr // address on the overlay, e.g. 10.42.0.1
 	Zone       string     // failure domain, emitted as the "zone:<z>" cert group
-	UDP        string     // underlay listen address, e.g. "127.0.0.1:4242"
+	UDP        string     // underlay listen (bind) address, e.g. "0.0.0.0:4242"
+	Advertise  string     // public underlay address peers dial via static_host_map; falls back to UDP when empty (lighthouses only)
 	Lighthouse bool       // whether this node is a lighthouse (bootstrap + rendezvous)
 }
 
@@ -57,13 +58,20 @@ func GenerateConfigs(nodes []NodeSpec) (map[string]string, error) {
 		return nil, fmt.Errorf("nebula: marshal ca: %w", err)
 	}
 
-	// Lighthouse rendezvous data, shared by every member.
+	// Lighthouse rendezvous data, shared by every member. Peers dial a lighthouse
+	// at its Advertise address (its public underlay address); UDP is only the bind
+	// address, so for a cloud lighthouse UDP="0.0.0.0:4242" while Advertise is the
+	// reachable "<public-ip>:4242". Advertise falls back to UDP for loopback demos.
 	var lhHosts []string
 	lhStatic := map[string][]string{}
 	for _, n := range nodes {
 		if n.Lighthouse {
+			adv := n.Advertise
+			if adv == "" {
+				adv = n.UDP
+			}
 			lhHosts = append(lhHosts, n.OverlayIP.String())
-			lhStatic[n.OverlayIP.String()] = []string{n.UDP}
+			lhStatic[n.OverlayIP.String()] = []string{adv}
 		}
 	}
 

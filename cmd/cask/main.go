@@ -47,6 +47,7 @@ func main() {
 		tport   = flag.String("transport", "connect", "inter-node transport: connect (ConnectRPC/protobuf) or http (interim JSON)")
 		nebConf = flag.String("nebula-config", "", "path to a Nebula config; when set, the cluster self-forms over the overlay instead of using --peers")
 		ovPort  = flag.Int("overlay-port", 8001, "port the node serves consensus RPC on over the Nebula overlay")
+		client  = flag.Bool("client-only", false, "join the overlay and route to the roster's replicas without joining consensus (no roster Add, no health monitor); requires --nebula-config")
 	)
 	flag.Parse()
 
@@ -76,7 +77,7 @@ func main() {
 			log.Error("read nebula config", "err", err)
 			os.Exit(1)
 		}
-		dyn, overlayLn, self, mon, err := nebulaCluster(ctx, log, string(raw), *ovPort, localAcc)
+		dyn, overlayLn, self, mon, err := nebulaCluster(ctx, log, string(raw), *ovPort, localAcc, *client)
 		if err != nil {
 			log.Error("nebula cluster", "err", err)
 			os.Exit(1)
@@ -84,7 +85,10 @@ func main() {
 		prop, nodeID = dyn, self.NodeID
 		// Peers probe this endpoint over the overlay; its reply is both a
 		// liveness heartbeat and this node's suspicion vector for cut detection.
-		mux.HandleFunc("/health", mon.serveHealth)
+		// A client-only node is never in the roster, so nothing probes it (mon is nil).
+		if mon != nil {
+			mux.HandleFunc("/health", mon.serveHealth)
+		}
 		// Consensus rides the overlay; the client API rides the host listener
 		// below so operators can still curl localhost.
 		go func() {

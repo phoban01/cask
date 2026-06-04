@@ -39,7 +39,11 @@ const reconcileInterval = 5 * time.Second
 // The returned proposer is dynamic: a background loop reconciles the roster with
 // discovery and, on a membership change, recomputes placement and swaps in a
 // fresh router — so the range's replica set tracks the cluster.
-func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, caskPort int, local *caspaxos.Acceptor) (*dynamicProposer, net.Listener, roster.Member, *healthMonitor, error) {
+// clientOnly nodes join the overlay and route KV/lock traffic to the roster's
+// replicas, but never add themselves to the consensus roster — so HRW placement
+// never selects them and no peer ever dials them. They only make outbound overlay
+// connections to the lighthouses, which is exactly what a NAT'd node can do.
+func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, caskPort int, local *caspaxos.Acceptor, clientOnly bool) (*dynamicProposer, net.Listener, roster.Member, *healthMonitor, error) {
 	network, err := nebula.New(configYAML, log)
 	if err != nil {
 		return nil, nil, roster.Member{}, nil, err
@@ -71,8 +75,9 @@ func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, cas
 	if _, err := rost.Genesis(ctx, genesis); err != nil {
 		return nil, nil, roster.Member{}, nil, fmt.Errorf("roster genesis: %w", err)
 	}
-	// A non-lighthouse node joins by adding itself to the consensus roster.
-	if !containsID(genesis, self.NodeID) {
+	// A non-lighthouse node joins by adding itself to the consensus roster. A
+	// client-only node skips this: it routes to the replicas without becoming one.
+	if !clientOnly && !containsID(genesis, self.NodeID) {
 		if _, err := rost.Add(ctx, self); err != nil {
 			return nil, nil, roster.Member{}, nil, fmt.Errorf("roster join: %w", err)
 		}
@@ -91,9 +96,45 @@ func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, cas
 		return nil, nil, roster.Member{}, nil, fmt.Errorf("overlay listen: %w", err)
 	}
 
+	// A client-only node has no peers to monitor and proposes no roster changes;
+	// it just re-reads the roster and re-places the range as membership shifts.
+	if clientOnly {
+		go reconcileLoopReadOnly(ctx, log, rost, dialer, dyn, val)
+		return dyn, ln, self, nil, nil
+	}
+
 	mon := newHealthMonitor(self.NodeID, network.HTTPClient())
 	go reconcileLoop(ctx, log, rost, dialer, dyn, mon, seeds, val)
 	return dyn, ln, self, mon, nil
+}
+
+// reconcileLoopReadOnly is the client-only counterpart to reconcileLoop: it
+// re-reads the consensus roster each tick and, when the epoch advances, learns
+// the new members' overlay addresses and re-places the range so proposals keep
+// routing to the current replica set. It never proposes Add/Remove and runs no
+// failure detector.
+func reconcileLoopReadOnly(ctx context.Context, log *slog.Logger, rost *roster.Roster, dialer *overlayDialer, dyn *dynamicProposer, val roster.Value) {
+	epoch := val.Epoch
+	t := time.NewTicker(reconcileInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			v, err := rost.Get(ctx)
+			if err != nil {
+				log.Warn("client roster get", "err", err)
+				continue
+			}
+			if v.Epoch != epoch {
+				dialer.learn(v.Members)
+				dyn.set(routerFor(dialer.self, v, dialer))
+				log.Info("client re-placed range", "epoch", v.Epoch, "members", len(v.Members))
+				epoch = v.Epoch
+			}
+		}
+	}
 }
 
 // departed returns the ids present in old but not in cur.
