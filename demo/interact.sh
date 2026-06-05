@@ -56,9 +56,15 @@ if [ "$WITH_FAILOVER" = "1" ]; then
   cask_ssh oci "sudo systemctl stop cask.service" || true
   sleep 3
   FMSG="written with Oracle down"
-  cloud_curl gcp "-XPUT $L/kv/failover -d '$FMSG'"; say "[GCP] PUT /kv/failover = '$FMSG' (succeeds on majority)"
-  sleep 1
-  say "[laptop] GET /kv/failover -> '$(laptop_curl "$L/kv/failover")'"
+  # --max-time bounds the write: a downed replica is a fast non-vote (the overlay
+  # RPC timeout), so this commits on the gcp+aws majority within a few seconds.
+  if cask_ssh gcp "curl -fsS --max-time 30 -XPUT $L/kv/failover -d '$FMSG'"; then
+    say "[GCP] PUT /kv/failover = '$FMSG' (committed on the gcp+aws majority)"
+    sleep 1
+    say "[laptop] GET /kv/failover -> '$(laptop_curl --max-time 30 "$L/kv/failover")'"
+  else
+    say "[GCP] write did not complete in time (see overlay RPC timeout)"
+  fi
   say "[Oracle] systemctl start cask  (replica rejoins, catches up)"
   cask_ssh oci "sudo systemctl start cask.service" || true
 fi

@@ -26,6 +26,13 @@ if [ "$CREATED_NET" = "1" ] && [ -n "$VCN" ]; then
     oci network subnet delete --subnet-id "$SUBNET" --force --wait-for-state TERMINATED \
       2>/dev/null || warn "oci: subnet delete failed/already gone"
   fi
+  # The default route table's rule references the IG, which blocks VCN delete with a
+  # 409 — clear the rules first, then drop the gateway.
+  RT="$(oci network vcn get --vcn-id "$VCN" --query 'data."default-route-table-id"' --raw-output 2>/dev/null)"
+  if [ -n "$RT" ]; then
+    log "oci: clearing default route table rules"
+    oci network route-table update --rt-id "$RT" --force --route-rules '[]' >/dev/null 2>&1 || true
+  fi
   log "oci: deleting internet gateways in $VCN"
   for ig in $(oci network internet-gateway list --compartment-id "$OCI_COMPARTMENT" --vcn-id "$VCN" \
                 --query 'data[].id' --raw-output 2>/dev/null | tr -d '[],"'); do

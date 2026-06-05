@@ -25,6 +25,8 @@ deploy_cloud() {
   [ -f "$CONF_DIR/$cloud.yml" ] || die "$cloud: missing $CONF_DIR/$cloud.yml"
 
   wait_for_ssh "$cloud"
+  # Stop any running instance first — can't overwrite the binary while it's executing.
+  cask_ssh "$cloud" "sudo systemctl stop cask.service 2>/dev/null || true"
   log "$cloud: pushing binary ($arch) + config"
   cask_ssh "$cloud" "sudo mkdir -p $REMOTE_DIR && sudo chown \$(id -un) $REMOTE_DIR"
   cask_scp "$cloud" "$bin" "$REMOTE_DIR/cask"
@@ -58,6 +60,13 @@ sleep 8
 
 [ -f "$CONF_DIR/laptop.yml" ] || die "missing $CONF_DIR/laptop.yml"
 LAPTOP_LOG="$STATE_DIR/laptop.log"
+# Stop a previously-started laptop node so a redeploy doesn't orphan it.
+if [ -f "$STATE_DIR/laptop.pid" ]; then
+  oldpid="$(cat "$STATE_DIR/laptop.pid")"
+  if kill "$oldpid" 2>/dev/null; then log "stopped previous laptop node (pid $oldpid)"; fi
+  rm -f "$STATE_DIR/laptop.pid"
+  sleep 1
+fi
 log "starting local client-only node (api 127.0.0.1:$API_PORT)"
 nohup "$BIN_LOCAL" --nebula-config "$CONF_DIR/laptop.yml" \
   --overlay-port "$OVERLAY_PORT" --listen "127.0.0.1:$API_PORT" --client-only \

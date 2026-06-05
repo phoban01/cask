@@ -64,14 +64,29 @@ else
 fi
 state_set oci OCI_SUBNET "$SUBNET"
 
+# Arch follows the shape: Ampere (A1/A2) is arm64, everything else (E*/Micro) x86.
+case "$OCI_SHAPE" in
+  *.A1.*|*.A2.*) OCI_ARCH="arm64" ;;
+  *)            OCI_ARCH="amd64" ;;
+esac
+# Only Flex shapes accept --shape-config; fixed shapes (E2.1.Micro) reject it.
+shape_args=(--shape "$OCI_SHAPE")
+case "$OCI_SHAPE" in
+  *.Flex) shape_args+=(--shape-config "{\"ocpus\":$OCI_OCPUS,\"memoryInGBs\":$OCI_MEM_GB}") ;;
+esac
+
+# OCI's Ubuntu image ships a restrictive host iptables (only ssh is allowed; the
+# chain ends in REJECT), so the overlay UDP port must be opened on the host itself
+# — the security list alone is not enough. cloud-init does this on first boot.
+USERDATA_B64="$(printf '#!/bin/bash\niptables -I INPUT -p udp --dport %s -j ACCEPT\nnetfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables/rules.v4 2>/dev/null || true\n' "$NEBULA_UDP_PORT" | base64 | tr -d '\n')"
+
 # --- launch instance ---------------------------------------------------------
-log "oci: launching $NAME ($OCI_SHAPE ${OCI_OCPUS}ocpu/${OCI_MEM_GB}GB)"
+log "oci: launching $NAME ($OCI_SHAPE, $OCI_ARCH)"
 Q='data.id' INST="$(oci compute instance launch --compartment-id "$C" \
-  --availability-domain "$AD" --shape "$OCI_SHAPE" \
-  --shape-config "{\"ocpus\":$OCI_OCPUS,\"memoryInGBs\":$OCI_MEM_GB}" \
+  --availability-domain "$AD" "${shape_args[@]}" \
   --image-id "$IMG" --subnet-id "$SUBNET" --assign-public-ip true \
   --display-name "$NAME" \
-  --metadata "{\"ssh_authorized_keys\":\"$(ssh_pubkey)\"}" \
+  --metadata "{\"ssh_authorized_keys\":\"$(ssh_pubkey)\",\"user_data\":\"$USERDATA_B64\"}" \
   --query "$Q" --raw-output --wait-for-state RUNNING)"
 state_set oci OCI_INSTANCE "$INST"
 
@@ -80,7 +95,7 @@ Q='data[0]."public-ip"' IP="$(oci compute instance list-vnics --instance-id "$IN
 
 state_set oci PUBLIC_IP  "$IP"
 state_set oci SSH_USER   "$OCI_SSH_USER"
-state_set oci ARCH       "arm64"
+state_set oci ARCH       "$OCI_ARCH"
 state_set oci ZONE_TAG   "$OCI_ZONE_TAG"
 state_set oci OVERLAY_IP "$OCI_OVERLAY_IP"
-ok "oci: $NAME up at $IP"
+ok "oci: $NAME up at $IP ($OCI_ARCH)"

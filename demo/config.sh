@@ -35,8 +35,9 @@ OCI_OVERLAY_IP="$OVERLAY_PREFIX.2";  OCI_ZONE_TAG="oci"
 AWS_OVERLAY_IP="$OVERLAY_PREFIX.3";  AWS_ZONE_TAG="aws"
 LAPTOP_OVERLAY_IP="$OVERLAY_PREFIX.100"; LAPTOP_ZONE_TAG="edge"
 
-# Clouds we provision. Loops iterate this list.
-CLOUDS=(gcp oci aws)
+# Clouds we provision. Loops iterate this list. Override with a space-separated
+# subset for a staged run, e.g. CASK_CLOUDS="gcp" for a single-cloud shakeout.
+read -ra CLOUDS <<< "${CASK_CLOUDS:-gcp oci aws}"
 
 # ---- naming + ssh -----------------------------------------------------------
 NAME="${CASK_DEMO_NAME:-cask-demo}"          # instance / firewall / SG / tag name
@@ -53,15 +54,18 @@ GCP_IMAGE_FAMILY="${GCP_IMAGE_FAMILY:-ubuntu-2404-lts-amd64}"
 GCP_IMAGE_PROJECT="${GCP_IMAGE_PROJECT:-ubuntu-os-cloud}"
 GCP_SSH_USER="${GCP_SSH_USER:-cask}"
 
-# ---- Oracle (arm64 Ampere A1 — FREE tier) -----------------------------------
+# ---- Oracle (Always Free) ----------------------------------------------------
+# Default is the AMD E2.1.Micro (x86) — the reliably-available Always-Free shape.
+# The arm64 A1.Flex is also Always-Free but its capacity is frequently exhausted;
+# use it when available with: OCI_SHAPE=VM.Standard.A1.Flex (arch is auto-detected).
 OCI_COMPARTMENT="${OCI_COMPARTMENT:-}"       # REQUIRED: compartment OCID
 OCI_AD="${OCI_AD:-}"                         # availability domain name; empty => first in region
-OCI_SHAPE="${OCI_SHAPE:-VM.Standard.A1.Flex}"
-OCI_OCPUS="${OCI_OCPUS:-1}"
-OCI_MEM_GB="${OCI_MEM_GB:-6}"
+OCI_SHAPE="${OCI_SHAPE:-VM.Standard.E2.1.Micro}"
+OCI_OCPUS="${OCI_OCPUS:-1}"                  # Flex shapes only (ignored for fixed shapes)
+OCI_MEM_GB="${OCI_MEM_GB:-6}"               # Flex shapes only (ignored for fixed shapes)
 OCI_SUBNET="${OCI_SUBNET:-}"                 # optional: existing public subnet OCID; empty => create a VCN
 OCI_SSH_USER="${OCI_SSH_USER:-ubuntu}"
-# Canonical Ubuntu 24.04 arm64 image is resolved at launch via `oci compute image list`.
+# The Ubuntu 24.04 image matching the shape's arch is resolved via `oci compute image list`.
 
 # ---- AWS (arm64 Graviton t4g.small — FREE trial, 750h/mo through 2026) -------
 AWS_REGION="${AWS_REGION:-us-east-1}"
