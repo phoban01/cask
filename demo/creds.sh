@@ -34,12 +34,18 @@ _v="$(_cv .aws.secret_access_key)"; [ -n "$_v" ] && export AWS_SECRET_ACCESS_KEY
 _v="$(_cv .aws.region)"
 if [ -n "$_v" ]; then export AWS_REGION="$_v"; export AWS_DEFAULT_REGION="$_v"; fi
 
-# --- OCI: synthesize a config file and point the CLI at it ---------------------
+# --- OCI ids: exported regardless of how you authenticate ---------------------
+_v="$(_cv .oci.compartment)"; [ -n "$_v" ] && export OCI_COMPARTMENT="$_v"
+_v="$(_cv .oci.subnet)";      [ -n "$_v" ] && export OCI_SUBNET="$_v"
+_v="$(_cv .oci.region)";      [ -n "$_v" ] && { export OCI_REGION="$_v"; export OCI_CLI_REGION="$_v"; }
+
+# --- OCI api-key auth: synthesize a config file only when key creds are present.
+# Leave the key fields blank to use ambient auth (e.g. `oci setup bootstrap`).
 _tenancy="$(_cv .oci.tenancy)"
-if [ -n "$_tenancy" ]; then
+_okey="$(_abs "$(_cv .oci.key_file)")"
+if [ -n "$_tenancy" ] && [ -n "$_okey" ]; then
   mkdir -p "$STATE_DIR"
   _ocfg="$STATE_DIR/oci_config"
-  _okey="$(_abs "$(_cv .oci.key_file)")"
   ( umask 077
     {
       printf '[DEFAULT]\n'
@@ -51,9 +57,7 @@ if [ -n "$_tenancy" ]; then
     } > "$_ocfg" )
   export OCI_CLI_CONFIG_FILE="$_ocfg"
   export OCI_CLI_PROFILE="DEFAULT"
-  _v="$(_cv .oci.compartment)"; [ -n "$_v" ] && export OCI_COMPARTMENT="$_v"
-  _v="$(_cv .oci.region)";      [ -n "$_v" ] && export OCI_REGION="$_v"
-  _v="$(_cv .oci.subnet)";      [ -n "$_v" ] && export OCI_SUBNET="$_v"
 fi
 
-unset _cv _abs _v _tenancy _okey _ocfg 2>/dev/null || true
+unset -f _cv _abs 2>/dev/null || true
+unset _v _tenancy _okey _ocfg 2>/dev/null || true
