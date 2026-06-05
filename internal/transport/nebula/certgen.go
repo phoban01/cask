@@ -111,6 +111,20 @@ func GenerateConfigs(nodes []NodeSpec) (map[string]string, error) {
 		static := map[string][]string{}
 		if n.Lighthouse {
 			lighthouse["am_lighthouse"] = true
+			// Peer lighthouses (every lighthouse except self). cask derives the genesis
+			// roster from lighthouse.hosts, so each lighthouse MUST enumerate the others
+			// here — otherwise it bootstraps a one-member cluster of just itself and the
+			// lighthouses never form a single consensus group.
+			var peers []string
+			for _, h := range lhHosts {
+				if h != n.OverlayIP.String() {
+					peers = append(peers, h)
+				}
+			}
+			if len(peers) > 0 {
+				lighthouse["hosts"] = peers
+				lighthouse["interval"] = 10
+			}
 			for ip, addr := range lhStatic {
 				if ip != n.OverlayIP.String() {
 					static[ip] = addr

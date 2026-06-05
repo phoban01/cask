@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"net"
 	"net/http"
 	"sync"
@@ -18,6 +20,42 @@ import (
 	"github.com/phoban01/cask/internal/transport"
 	"github.com/phoban01/cask/internal/transport/nebula"
 )
+
+// bootstrapAttempts bounds how long a node retries a contended roster write while
+// the lighthouses concurrently seed genesis.
+const bootstrapAttempts = 20
+
+// genesisEpoch is the configuration epoch the roster starts at; it must match the
+// value roster.Genesis installs so non-seeders can adopt the genesis value locally.
+const genesisEpoch = 1
+
+// errRosterPending signals the roster register has not been seeded yet; a node
+// that reaches Get before any lighthouse has installed genesis retries until it has.
+var errRosterPending = errors.New("roster pending")
+
+// retryBootstrap retries fn while it is preempted (concurrent lighthouses dueling
+// to seed the one roster register) or the roster is not yet present, backing off
+// with jitter so the contenders desynchronise and one wins. Genesis/Add/Get are
+// all idempotent, so retrying is safe. Backoff/jitter live here in the impure
+// command layer, keeping the consensus core free of time and randomness.
+func retryBootstrap(ctx context.Context, fn func() error) error {
+	var err error
+	for attempt := 0; attempt < bootstrapAttempts; attempt++ {
+		if err = fn(); err == nil {
+			return nil
+		}
+		if !errors.Is(err, caspaxos.ErrPreempted) && !errors.Is(err, errRosterPending) {
+			return err
+		}
+		d := time.Duration((25<<min(attempt, 5))+rand.Intn(50)) * time.Millisecond
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(d):
+		}
+	}
+	return err
+}
 
 // rangeKey identifies the single full-keyspace range this binary serves.
 // Range splitting exists in internal/ranges but is not yet driven from cmd/cask;
@@ -72,19 +110,39 @@ func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, cas
 	// The roster register lives on the lighthouse (genesis) acceptor set; every
 	// node proposes to it through that same set, so the bootstrap is consistent.
 	rost := roster.New(caspaxos.NewProposer(self.NodeID, dialer.clients(memberIDs(genesis))))
-	if _, err := rost.Genesis(ctx, genesis); err != nil {
-		return nil, nil, roster.Member{}, nil, fmt.Errorf("roster genesis: %w", err)
-	}
-	// A non-lighthouse node joins by adding itself to the consensus roster. A
-	// client-only node skips this: it routes to the replicas without becoming one.
-	if !clientOnly && !containsID(genesis, self.NodeID) {
-		if _, err := rost.Add(ctx, self); err != nil {
-			return nil, nil, roster.Member{}, nil, fmt.Errorf("roster join: %w", err)
+	// Bootstrap the roster with NO read contention. The genesis member set is
+	// deterministic and already known locally (every node derived the same set from
+	// its config), so only ONE node writes it — the highest node id, a choice all
+	// agree on — and everyone else adopts the identical value directly. This is the
+	// crux: write-imposing CASPaxos reads (even a linearizable Get) would escalate
+	// ballots and perpetually preempt the lone seeder, so the cluster would never
+	// converge. Post-genesis membership changes are picked up by the reconcile loop
+	// once the register is quiescent.
+	val := roster.Value{Epoch: genesisEpoch, Members: genesis} // matches roster.Genesis
+	if self.NodeID == highestID(genesis) {
+		if err := retryBootstrap(ctx, func() error {
+			v, e := rost.Genesis(ctx, genesis)
+			if e == nil {
+				val = v
+			}
+			return e
+		}); err != nil {
+			return nil, nil, roster.Member{}, nil, fmt.Errorf("roster genesis: %w", err)
 		}
 	}
-	val, err := rost.Get(ctx)
-	if err != nil {
-		return nil, nil, roster.Member{}, nil, fmt.Errorf("roster get: %w", err)
+	// A non-lighthouse node joins by adding itself to the consensus roster (a write,
+	// but it runs after the seeder has quiesced). A client-only node skips this: it
+	// routes to the replicas without becoming one.
+	if !clientOnly && !containsID(genesis, self.NodeID) {
+		if err := retryBootstrap(ctx, func() error {
+			v, e := rost.Add(ctx, self)
+			if e == nil {
+				val = v
+			}
+			return e
+		}); err != nil {
+			return nil, nil, roster.Member{}, nil, fmt.Errorf("roster join: %w", err)
+		}
 	}
 	dialer.learn(val.Members)
 
@@ -150,6 +208,20 @@ func departed(old, cur []roster.Member) []uint64 {
 		}
 	}
 	return gone
+}
+
+// highestID returns the largest node id among members — the deterministic, agreed
+// choice of sole genesis seeder. The highest id matters: CASPaxos breaks ballot
+// ties by node id, so the seeder's ballots dominate the (write-imposing) Get rounds
+// other nodes run while awaiting genesis, letting it install the register and win.
+func highestID(members []roster.Member) uint64 {
+	var hi uint64
+	for _, m := range members {
+		if m.NodeID > hi {
+			hi = m.NodeID
+		}
+	}
+	return hi
 }
 
 func containsID(members []roster.Member, id uint64) bool {

@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	nebula "github.com/slackhq/nebula"
@@ -80,8 +81,22 @@ func (n *Network) Listen(ctx context.Context, address string) (net.Listener, err
 func (n *Network) HTTPClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{DialContext: n.svc.DialContext},
+		// Bound each consensus RPC: a dead peer's overlay tunnel keeps retrying the
+		// Nebula handshake forever, so without this a prepare/accept to a downed
+		// replica would hang indefinitely instead of counting as a fast non-vote —
+		// which is exactly what must happen for the cluster to keep serving on a
+		// majority when a node fails. Comfortably above any healthy cross-cloud RPC.
+		Timeout: overlayRPCTimeout,
 	}
 }
+
+// overlayRPCTimeout caps a single consensus RPC over the overlay. The proposer
+// contacts acceptors sequentially, so a dead replica adds this to BOTH the prepare
+// and accept phases; it is kept low enough that an operation still completes on the
+// live majority within a few seconds of a failure, while staying above a healthy
+// steady-state cross-cloud round trip (tunnels are already up, so no handshake).
+// (Parallelising the proposer's per-acceptor RPCs would remove this trade-off.)
+const overlayRPCTimeout = 4 * time.Second
 
 // Close tears down the overlay and all tunnels.
 func (n *Network) Close() error { return n.svc.Close() }
