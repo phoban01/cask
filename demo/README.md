@@ -33,11 +33,23 @@ devbox shell        # puts gcloud / aws / oci / yq + go on PATH
 You also need `ssh`/`scp`/`curl` (standard) and accounts that can create a VM +
 firewall/security rules on each cloud.
 
-**Credentials.** Copy the template and fill it in (it's gitignored):
+**Credentials.** Easiest: log in to each CLI in the browser, then **generate**
+`credentials.yaml` from your authenticated sessions:
+
+```sh
+gcloud auth login && gcloud config set project <id>
+oci setup bootstrap                  # browser auth; auto-creates + uploads the api key
+aws configure                        # after creating one IAM access key
+
+demo/init-credentials.sh             # reads the ids from your logged-in CLIs
+```
+
+It fills the ids and leaves secret fields blank (ambient auth). Re-run with
+`--force` to refresh after authenticating another cloud. Or do it by hand:
 
 ```sh
 cp demo/credentials.example.yaml demo/credentials.yaml
-$EDITOR demo/credentials.yaml        # GCP project + SA key, OCI api key, AWS keys
+$EDITOR demo/credentials.yaml        # fill ids; keys optional (see template)
 ```
 
 [creds.sh](creds.sh) loads this into per-CLI env overrides at runtime **without
@@ -88,6 +100,7 @@ underlay (UDP `4242`) is exposed publicly; consensus rides the encrypted overlay
 
 | file | role |
 |------|------|
+| `init-credentials.sh` | generate `credentials.yaml` from logged-in CLIs |
 | `credentials.example.yaml` | template → copy to `credentials.yaml` (gitignored) |
 | `creds.sh` | load `credentials.yaml` into per-CLI env (no global state) |
 | `preflight.sh` | check tools + creds + live cloud auth before provisioning |
