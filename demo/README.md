@@ -23,15 +23,35 @@ the matching binary. Tear down with `down.sh` when finished so nothing lingers.
 
 ## Prerequisites
 
-- Authenticated CLIs on your PATH: **`gcloud`**, **`oci`**, **`aws`** (each logged in
-  to an account with permission to create a VM + firewall/security rules).
-- Go toolchain (to build the binaries), `ssh`/`scp`, `curl`.
-- Set the account-specific values in [config.sh](config.sh) (or via the environment):
-  - `GCP_PROJECT` — your gcloud project id (**required**)
-  - `OCI_COMPARTMENT` — Oracle compartment OCID (**required**); optionally `OCI_SUBNET`
-    to reuse an existing public subnet instead of creating a throwaway VCN
-  - `AWS_REGION` (default `us-east-1`); AWS uses the default VPC
-  - Optional overrides: zones/regions, instance types, overlay ports.
+The cloud CLIs come from **devbox** — `gcloud`, `aws`, `oci`, and `yq` are in
+[devbox.json](../devbox.json), so just work inside the project shell:
+
+```sh
+devbox shell        # puts gcloud / aws / oci / yq + go on PATH
+```
+
+You also need `ssh`/`scp`/`curl` (standard) and accounts that can create a VM +
+firewall/security rules on each cloud.
+
+**Credentials.** Copy the template and fill it in (it's gitignored):
+
+```sh
+cp demo/credentials.example.yaml demo/credentials.yaml
+$EDITOR demo/credentials.yaml        # GCP project + SA key, OCI api key, AWS keys
+```
+
+[creds.sh](creds.sh) loads this into per-CLI env overrides at runtime **without
+touching your global `gcloud`/`aws`/`oci` config**. Key material (SA JSON, OCI PEM)
+goes under `demo/secrets/` (also gitignored). Any platform you leave blank falls
+back to your ambient CLI auth. Account-specific knobs (zones, instance types,
+overlay ports) live in [config.sh](config.sh) and can also come from the env.
+
+**Preflight.** Validate tools, credentials, and live cloud auth before anything is
+created (`up.sh` runs this automatically, but you can run it alone):
+
+```sh
+demo/preflight.sh
+```
 
 ## Run
 
@@ -68,7 +88,10 @@ underlay (UDP `4242`) is exposed publicly; consensus rides the encrypted overlay
 
 | file | role |
 |------|------|
-| `config.sh` | shared config; **set the REQUIRED account values here** |
+| `credentials.example.yaml` | template → copy to `credentials.yaml` (gitignored) |
+| `creds.sh` | load `credentials.yaml` into per-CLI env (no global state) |
+| `preflight.sh` | check tools + creds + live cloud auth before provisioning |
+| `config.sh` | shared config (sources `creds.sh`); non-secret knobs |
 | `lib.sh` | logging, state files, ssh/scp helpers |
 | `build.sh` | host + `linux/{amd64,arm64}` binaries |
 | `clouds/<c>-up.sh` / `-down.sh` | provision / destroy one cloud (gcp, oci, aws) |

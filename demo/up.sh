@@ -9,6 +9,9 @@ source "$HERE/config.sh"; source "$HERE/lib.sh"
 
 mkdir -p "$STATE_DIR"
 
+# Fail fast before creating anything if tools/creds/config aren't ready.
+"$HERE/preflight.sh"
+
 # Generate the demo ssh keypair once; it's injected into every VM at create time.
 if [ ! -f "$SSH_KEY" ]; then
   log "generating demo ssh key $SSH_KEY"

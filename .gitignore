@@ -27,6 +27,9 @@ go.work.sum
 # --- Multi-cloud demo runtime state (demo/) ---
 # Generated ssh keypair, per-cloud .env (public IPs / resource ids), laptop pid+log
 /demo/state/
+# Filled-in cloud credentials + key material — NEVER commit these
+/demo/credentials.yaml
+/demo/secrets/
 
 # --- TLA+ / TLC (tla/) ---
 # TLC model-checker output and toolbox state

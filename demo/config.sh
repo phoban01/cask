@@ -19,6 +19,10 @@ CONF_DIR="$REPO_DIR/clusterconf"     # gen-certs output (gitignored)
 BIN_LOCAL="$REPO_DIR/bin/cask"               # laptop binary (host arch)
 BIN_CLOUD="$REPO_DIR/bin/cask-linux-arm64"   # cloud binary (arm64)
 
+# Load credentials.yaml (if present) into per-CLI env BEFORE the defaults below, so
+# values from it win via the ${VAR:-default} fallbacks. No-op if the file is absent.
+source "$DEMO_DIR/creds.sh"
+
 # ---- overlay layout ---------------------------------------------------------
 NEBULA_UDP_PORT="${NEBULA_UDP_PORT:-4242}"   # underlay UDP (must be open in cloud firewalls)
 OVERLAY_PORT="${OVERLAY_PORT:-8001}"         # consensus RPC port on each node's overlay IP

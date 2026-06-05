@@ -1,12 +1,16 @@
 {
   "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.16.0/.schema/devbox.schema.json",
   "packages": [
-    "go@latest"
+    "go@latest",
+    "google-cloud-sdk@latest",
+    "awscli2@latest",
+    "oci-cli@latest",
+    "yq-go@latest"
   ],
   "env": {
     "GOPATH": "$PWD/.devbox/go",
-    "GOBIN": "$PWD/.devbox/go/bin",
-    "PATH": "$GOBIN:$PATH"
+    "GOBIN":  "$PWD/.devbox/go/bin",
+    "PATH":   "$GOBIN:$PATH"
   },
   "shell": {
     "init_hook": [
