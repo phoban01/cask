@@ -19,25 +19,36 @@ import (
 	"flag"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/phoban01/cask/internal/caspaxos"
+	"github.com/phoban01/cask/internal/discovery"
 	"github.com/phoban01/cask/internal/hlc"
 	"github.com/phoban01/cask/internal/lease"
 	"github.com/phoban01/cask/internal/mvcc"
+	"github.com/phoban01/cask/internal/roster"
 	"github.com/phoban01/cask/internal/store"
 	"github.com/phoban01/cask/internal/transport"
+	"github.com/phoban01/cask/internal/transport/nebula"
 )
 
 func main() {
 	// Subcommands are dispatched before flag parsing.
-	if len(os.Args) > 1 && os.Args[1] == "gen-certs" {
-		genCerts(os.Args[2:])
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "gen-certs":
+			genCerts(os.Args[2:])
+			return
+		case "mint":
+			runMint(os.Args[2:])
+			return
+		}
 	}
 
 	var (
@@ -48,6 +59,13 @@ func main() {
 		nebConf = flag.String("nebula-config", "", "path to a Nebula config; when set, the cluster self-forms over the overlay instead of using --peers")
 		ovPort  = flag.Int("overlay-port", 8001, "port the node serves consensus RPC on over the Nebula overlay")
 		client  = flag.Bool("client-only", false, "join the overlay and route to the roster's replicas without joining consensus (no roster Add, no health monitor); requires --nebula-config")
+		boot    = flag.Bool("bootstrap", false, "found a new cluster as the single initial roster member (exactly one node; every other node joins an existing cluster)")
+		discSRV = flag.String("discovery-srv", "", "DNS-SRV name for dynamic peer discovery, e.g. _cask._tcp.cask.svc.cluster.local; unioned into the reconcile loop")
+		seed    = flag.String("seed", "", "comma-separated overlay addresses of known cask members to bootstrap discovery from, e.g. 10.42.0.7:8001")
+		mintURL = flag.String("mint", "", "URL of a `cask mint` endpoint; enroll for an identity instead of reading --nebula-config")
+		token   = flag.String("token", "", "enrollment token presented to --mint")
+		zone    = flag.String("zone", "", "this node's failure domain (zone), sent at enrollment")
+		role    = flag.String("role", "replica", "enrollment role: replica or client")
 	)
 	flag.Parse()
 
@@ -71,13 +89,36 @@ func main() {
 		mux.Handle(transport.ConnectHandler(localAcc))
 	}
 
-	if *nebConf != "" {
+	// The overlay path gets its config either from a file (--nebula-config) or by
+	// enrolling at a `cask mint` endpoint (--mint).
+	var configYAML string
+	useOverlay := false
+	clientOnly := *client
+	srvName := *discSRV
+	switch {
+	case *mintURL != "":
+		cfg, co, srv, err := enroll(ctx, *mintURL, *token, *zone, *role)
+		if err != nil {
+			log.Error("enroll", "err", err)
+			os.Exit(1)
+		}
+		configYAML, useOverlay = cfg, true
+		clientOnly = co || *client
+		if srvName == "" {
+			srvName = srv
+		}
+	case *nebConf != "":
 		raw, err := os.ReadFile(*nebConf)
 		if err != nil {
 			log.Error("read nebula config", "err", err)
 			os.Exit(1)
 		}
-		dyn, overlayLn, self, mon, err := nebulaCluster(ctx, log, string(raw), *ovPort, localAcc, *client)
+		configYAML, useOverlay = string(raw), true
+	}
+
+	if useOverlay {
+		disco := buildDisco(log, srvName, *seed)
+		dyn, overlayLn, self, mon, snap, err := nebulaCluster(ctx, log, configYAML, *ovPort, localAcc, clientOnly, *boot, disco)
 		if err != nil {
 			log.Error("nebula cluster", "err", err)
 			os.Exit(1)
@@ -89,6 +130,10 @@ func main() {
 		if mon != nil {
 			mux.HandleFunc("/health", mon.serveHealth)
 		}
+		// Joining peers read the current roster acceptor core from here, and
+		// register through the driver here (the driver is the sole register writer).
+		mux.HandleFunc("/roster", snap.serve)
+		mux.HandleFunc("/roster/join", snap.serveJoin)
 		// Consensus rides the overlay; the client API rides the host listener
 		// below so operators can still curl localhost.
 		go func() {
@@ -155,6 +200,65 @@ func buildClients(mode, self, peers string, local *caspaxos.Acceptor, hc *http.C
 		}
 	}
 	return out
+}
+
+// buildDisco assembles the reconcile-loop discovery from explicit seed members
+// and/or a DNS-SRV name (unioned, seeds first). Returns nil when neither is set.
+func buildDisco(log *slog.Logger, srvName, seedCSV string) roster.Discovery {
+	var sources []roster.Discovery
+	if seeds := parseSeedMembers(seedCSV); len(seeds) > 0 {
+		sources = append(sources, roster.SeedDiscovery(seeds))
+	}
+	if srvName != "" {
+		service, proto, domain, ok := parseSRVName(srvName)
+		if !ok {
+			log.Error("bad --discovery-srv (want _service._proto.domain)", "value", srvName)
+			os.Exit(1)
+		}
+		sources = append(sources, discovery.SRVDiscovery{Service: service, Proto: proto, Domain: domain})
+	}
+	switch len(sources) {
+	case 0:
+		return nil
+	case 1:
+		return sources[0]
+	default:
+		return discovery.Union(sources)
+	}
+}
+
+// parseSeedMembers turns "10.42.0.7:8001,10.42.0.9:8001" into roster members,
+// deriving each NodeID from its overlay IP (the cluster-wide identity rule).
+func parseSeedMembers(csv string) []roster.Member {
+	var out []roster.Member
+	for _, addr := range strings.Split(csv, ",") {
+		addr = strings.TrimSpace(addr)
+		if addr == "" {
+			continue
+		}
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			continue
+		}
+		ip, err := netip.ParseAddr(host)
+		if err != nil {
+			continue
+		}
+		out = append(out, roster.Member{NodeID: nebula.NodeIDFromIP(ip.Unmap()), Addr: addr})
+	}
+	return out
+}
+
+// parseSRVName splits a DNS-SRV name "_service._proto.domain" into its parts.
+func parseSRVName(s string) (service, proto, domain string, ok bool) {
+	parts := strings.SplitN(s, ".", 3)
+	if len(parts) != 3 {
+		return "", "", "", false
+	}
+	service = strings.TrimPrefix(parts[0], "_")
+	proto = strings.TrimPrefix(parts[1], "_")
+	domain = parts[2]
+	return service, proto, domain, service != "" && proto != "" && domain != ""
 }
 
 // httpHost turns a ":8002" or "host:8002" listen address into a dialable host.

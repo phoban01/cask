@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 706" font-family="'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#1b2733" flood-opacity="0.16"/>
+    </filter>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#8aa0b3"/>
+    </marker>
+    <marker id="arrS" markerWidth="9" markerHeight="9" refX="0" refY="3" orient="auto">
+      <path d="M6,0 L0,3 L6,6 Z" fill="#8aa0b3"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1160" height="706" fill="#f7f9fb"/>
+
+  <!-- title -->
+  <text x="40" y="50" font-size="27" font-weight="700" fill="#16222e">cask — one coordination cluster across three clouds + a laptop</text>
+  <text x="40" y="80" font-size="15" fill="#5b6b7b">Leaderless CASPaxos over an encrypted Nebula overlay · no VPN · a single public UDP port · the same binary everywhere</text>
+
+  <!-- replica-set caption -->
+  <text x="580" y="104" font-size="13" font-weight="600" fill="#0e7c86" text-anchor="middle">RF = 3 replica set — the coordinated state lives here · every write commits on 2 of 3</text>
+
+  <!-- ================= GCP card ================= -->
+  <g filter="url(#sh)">
+    <rect x="40" y="116" width="320" height="190" rx="14" fill="#ffffff" stroke="#e3e8ee"/>
+    <path d="M40,160 L40,130 Q40,116 54,116 L346,116 Q360,116 360,130 L360,160 Z" fill="#4285F4"/>
+  </g>
+  <text x="60" y="146" font-size="16" font-weight="700" fill="#ffffff">GCP — us-central1</text>
+  <text x="60" y="196" font-size="16" font-weight="600" fill="#16222e">e2-micro  ·  x86</text>
+  <text x="60" y="224" font-size="12.5" font-weight="700" fill="#4285F4" letter-spacing="0.6">LIGHTHOUSE · REPLICA</text>
+  <text x="60" y="254" font-size="13.5" font-family="'SFMono-Regular',Consolas,monospace" fill="#33414d">overlay 10.42.0.1:8001</text>
+  <text x="60" y="282" font-size="12.5" fill="#5b6b7b">zone gcp · Always Free (x86)</text>
+
+  <!-- ================= Oracle card ================= -->
+  <g filter="url(#sh)">
+    <rect x="420" y="116" width="320" height="190" rx="14" fill="#ffffff" stroke="#e3e8ee"/>
+    <path d="M420,160 L420,130 Q420,116 434,116 L726,116 Q740,116 740,130 L740,160 Z" fill="#C74634"/>
+  </g>
+  <text x="440" y="146" font-size="16" font-weight="700" fill="#ffffff">Oracle Cloud — us-ashburn-1</text>
+  <text x="440" y="196" font-size="16" font-weight="600" fill="#16222e">E2.1.Micro  ·  arm64*</text>
+  <text x="440" y="224" font-size="12.5" font-weight="700" fill="#C74634" letter-spacing="0.6">LIGHTHOUSE · REPLICA</text>
+  <text x="440" y="254" font-size="13.5" font-family="'SFMono-Regular',Consolas,monospace" fill="#33414d">overlay 10.42.0.2:8001</text>
+  <text x="440" y="282" font-size="12.5" fill="#5b6b7b">zone oci · Free A1 busy → AMD micro</text>
+
+  <!-- ================= AWS card ================= -->
+  <g filter="url(#sh)">
+    <rect x="800" y="116" width="320" height="190" rx="14" fill="#ffffff" stroke="#e3e8ee"/>
+    <path d="M800,160 L800,130 Q800,116 814,116 L1106,116 Q1120,116 1120,130 L1120,160 Z" fill="#FF9900"/>
+  </g>
+  <text x="820" y="146" font-size="16" font-weight="700" fill="#16222e">AWS — us-east-1</text>
+  <text x="820" y="196" font-size="16" font-weight="600" fill="#16222e">t4g.small  ·  arm64</text>
+  <text x="820" y="224" font-size="12.5" font-weight="700" fill="#cf7a00" letter-spacing="0.6">LIGHTHOUSE · REPLICA</text>
+  <text x="820" y="254" font-size="13.5" font-family="'SFMono-Regular',Consolas,monospace" fill="#33414d">overlay 10.42.0.3:8001</text>
+  <text x="820" y="282" font-size="12.5" fill="#5b6b7b">zone aws · Graviton free trial</text>
+
+  <!-- connectors cloud <-> overlay -->
+  <line x1="200" y1="306" x2="200" y2="356" stroke="#9fb3c6" stroke-width="2" marker-start="url(#arrS)" marker-end="url(#arr)"/>
+  <line x1="580" y1="306" x2="580" y2="356" stroke="#9fb3c6" stroke-width="2" marker-start="url(#arrS)" marker-end="url(#arr)"/>
+  <line x1="960" y1="306" x2="960" y2="356" stroke="#9fb3c6" stroke-width="2" marker-start="url(#arrS)" marker-end="url(#arr)"/>
+
+  <!-- ================= overlay band ================= -->
+  <g filter="url(#sh)">
+    <rect x="40" y="358" width="1080" height="76" rx="16" fill="#0e7c86"/>
+  </g>
+  <text x="580" y="392" font-size="18" font-weight="700" fill="#ffffff" text-anchor="middle">&#128274;  Nebula encrypted overlay   ·   10.42.0.0/24</text>
+  <text x="580" y="416" font-size="13" fill="#d6f0f2" text-anchor="middle">one public UDP port :4242  ·  consensus rides the overlay  ·  client API stays on 127.0.0.1  ·  userspace, no TUN, no root</text>
+
+  <!-- connector overlay <-> laptop -->
+  <line x1="580" y1="434" x2="580" y2="486" stroke="#9fb3c6" stroke-width="2" marker-start="url(#arrS)" marker-end="url(#arr)"/>
+  <text x="596" y="466" font-size="12" fill="#5b6b7b">routes reads &amp; writes to the replicas</text>
+
+  <!-- ================= laptop card ================= -->
+  <g filter="url(#sh)">
+    <rect x="370" y="486" width="420" height="150" rx="14" fill="#ffffff" stroke="#e3e8ee"/>
+    <path d="M370,530 L370,500 Q370,486 384,486 L776,486 Q790,486 790,500 L790,530 Z" fill="#5A6B7B"/>
+  </g>
+  <text x="390" y="516" font-size="16" font-weight="700" fill="#ffffff">&#128187;  Laptop — behind home NAT</text>
+  <text x="390" y="562" font-size="15" font-weight="600" fill="#16222e">client-only  ·  holds 0 replicas</text>
+  <text x="390" y="588" font-size="13.5" font-family="'SFMono-Regular',Consolas,monospace" fill="#33414d">overlay 10.42.0.100 · zone edge</text>
+  <text x="390" y="612" font-size="12.5" fill="#5b6b7b">outbound-only: dials the 3 public lighthouses; never dialed in</text>
+
+  <!-- footer -->
+  <text x="40" y="672" font-size="12.5" fill="#7a8b9a">Self-forms with no configuration: nodes derive identity from the overlay IP, seed the roster from the lighthouses, and place a RF=3 range — across clouds and NAT.</text>
+  <text x="40" y="692" font-size="11.5" fill="#9aa9b6">*Oracle Always-Free A1 (arm64) is frequently out of capacity, so the demo falls back to the AMD E2.1.Micro (x86); the cluster is mixed-arch and each node runs the matching binary.</text>
+</svg>

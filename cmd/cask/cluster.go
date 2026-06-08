@@ -1,11 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math/rand"
 	"net"
 	"net/http"
 	"sync"
@@ -21,42 +21,6 @@ import (
 	"github.com/phoban01/cask/internal/transport/nebula"
 )
 
-// bootstrapAttempts bounds how long a node retries a contended roster write while
-// the lighthouses concurrently seed genesis.
-const bootstrapAttempts = 20
-
-// genesisEpoch is the configuration epoch the roster starts at; it must match the
-// value roster.Genesis installs so non-seeders can adopt the genesis value locally.
-const genesisEpoch = 1
-
-// errRosterPending signals the roster register has not been seeded yet; a node
-// that reaches Get before any lighthouse has installed genesis retries until it has.
-var errRosterPending = errors.New("roster pending")
-
-// retryBootstrap retries fn while it is preempted (concurrent lighthouses dueling
-// to seed the one roster register) or the roster is not yet present, backing off
-// with jitter so the contenders desynchronise and one wins. Genesis/Add/Get are
-// all idempotent, so retrying is safe. Backoff/jitter live here in the impure
-// command layer, keeping the consensus core free of time and randomness.
-func retryBootstrap(ctx context.Context, fn func() error) error {
-	var err error
-	for attempt := 0; attempt < bootstrapAttempts; attempt++ {
-		if err = fn(); err == nil {
-			return nil
-		}
-		if !errors.Is(err, caspaxos.ErrPreempted) && !errors.Is(err, errRosterPending) {
-			return err
-		}
-		d := time.Duration((25<<min(attempt, 5))+rand.Intn(50)) * time.Millisecond
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(d):
-		}
-	}
-	return err
-}
-
 // rangeKey identifies the single full-keyspace range this binary serves.
 // Range splitting exists in internal/ranges but is not yet driven from cmd/cask;
 // the node hosts one range whose replica set is chosen by zone-aware placement.
@@ -68,111 +32,346 @@ const replicationFactor = 3
 // consensus roster, re-placing the range if membership changed.
 const reconcileInterval = 5 * time.Second
 
-// nebulaCluster builds a self-forming consensus engine over a Nebula overlay:
-// it brings up the overlay, derives seeds from the config (the node's own cert
-// plus its lighthouse hosts), installs the roster by consensus, and routes a
-// single placement-driven range. It returns a proposer for mvcc/lease, the
-// overlay listener the node serves its acceptor on, and the local member.
+// join bootstrap pacing: how long a joining node waits to find a live cluster
+// member to learn the current roster core from, and how often it retries.
+const (
+	joinTimeout = 60 * time.Second
+	joinPoll    = 1 * time.Second
+)
+
+// nebulaCluster builds a self-forming consensus engine over a Nebula overlay.
 //
-// The returned proposer is dynamic: a background loop reconciles the roster with
-// discovery and, on a membership change, recomputes placement and swaps in a
-// fresh router — so the range's replica set tracks the cluster.
-// clientOnly nodes join the overlay and route KV/lock traffic to the roster's
-// replicas, but never add themselves to the consensus roster — so HRW placement
-// never selects them and no peer ever dials them. They only make outbound overlay
-// connections to the lighthouses, which is exactly what a NAT'd node can do.
-func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, caskPort int, local *caspaxos.Acceptor, clientOnly bool) (*dynamicProposer, net.Listener, roster.Member, *healthMonitor, error) {
+// There is no static genesis member set: exactly one node (started with
+// --bootstrap, so bootstrap==true) FOUNDS the roster as a single-node register;
+// every other node JOINS by learning the current acceptor core from a live peer
+// (its /roster snapshot) and adding itself. The register's core then grows and
+// shrinks by joint-consensus reconfiguration driven from the reconcile loop, so
+// membership is fully dynamic.
+//
+// disco surfaces candidate members for the reconcile loop (e.g. DNS-SRV); it may
+// be nil. Returns a proposer for mvcc/lease, the overlay listener, the local
+// member, a health monitor (nil for client-only), and a roster snapshot holder
+// the caller serves at /roster so joining peers can learn the core.
+func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, caskPort int, local *caspaxos.Acceptor, clientOnly, bootstrap bool, disco roster.Discovery) (*dynamicProposer, net.Listener, roster.Member, *healthMonitor, *rosterSnap, error) {
 	network, err := nebula.New(configYAML, log)
 	if err != nil {
-		return nil, nil, roster.Member{}, nil, err
+		return nil, nil, roster.Member{}, nil, nil, err
 	}
 
 	self, err := nebula.SelfMember(configYAML, caskPort)
 	if err != nil {
-		return nil, nil, roster.Member{}, nil, err
+		return nil, nil, roster.Member{}, nil, nil, err
 	}
-	// genesis is the identical lighthouse set every node installs; seeds is this
-	// node's discovery view (self + lighthouses) used by the reconcile loop.
-	genesis, err := nebula.GenesisMembers(configYAML, caskPort)
-	if err != nil {
-		return nil, nil, roster.Member{}, nil, err
-	}
+	// seeds are the lighthouse hosts (+self) — Nebula rendezvous points that are
+	// also where a joining node looks first for a live cask member to learn the
+	// core from. They are NOT auto-added to the roster (a lighthouse need not be a
+	// cask member); querying one that isn't simply fails and is skipped.
 	seeds, err := nebula.SeedMembers(configYAML, caskPort)
 	if err != nil {
-		return nil, nil, roster.Member{}, nil, err
+		return nil, nil, roster.Member{}, nil, nil, err
 	}
-	log.Info("nebula self-forming", "node", self.NodeID, "addr", self.Addr, "zone", self.Zone, "lighthouses", len(genesis))
+	log.Info("nebula self-forming", "node", self.NodeID, "addr", self.Addr, "zone", self.Zone, "bootstrap", bootstrap, "clientOnly", clientOnly)
 
 	dialer := newOverlayDialer(self.NodeID, local, network.HTTPClient())
-	dialer.learn(genesis)
+	dialer.learn(seeds)
 	dialer.learn([]roster.Member{self})
 
-	// The roster register lives on the lighthouse (genesis) acceptor set; every
-	// node proposes to it through that same set, so the bootstrap is consistent.
-	rost := roster.New(caspaxos.NewProposer(self.NodeID, dialer.clients(memberIDs(genesis))))
-	// Bootstrap the roster with NO read contention. The genesis member set is
-	// deterministic and already known locally (every node derived the same set from
-	// its config), so only ONE node writes it — the highest node id, a choice all
-	// agree on — and everyone else adopts the identical value directly. This is the
-	// crux: write-imposing CASPaxos reads (even a linearizable Get) would escalate
-	// ballots and perpetually preempt the lone seeder, so the cluster would never
-	// converge. Post-genesis membership changes are picked up by the reconcile loop
-	// once the register is quiescent.
-	val := roster.Value{Epoch: genesisEpoch, Members: genesis} // matches roster.Genesis
-	if self.NodeID == highestID(genesis) {
-		if err := retryBootstrap(ctx, func() error {
-			v, e := rost.Genesis(ctx, genesis)
-			if e == nil {
-				val = v
+	// The roster proposes against its current acceptor core, resolved to overlay
+	// acceptor clients at call time — so a reconfiguration automatically retargets.
+	rost := roster.New(self.NodeID, func(groups [][]uint64) roster.Proposer {
+		return proposerForGroups(self.NodeID, groups, dialer)
+	})
+
+	// candidates a joiner polls for the core: seeds plus whatever discovery finds.
+	candidates := func() []roster.Member {
+		out := append([]roster.Member(nil), seeds...)
+		if disco != nil {
+			if d, derr := disco.Discover(ctx); derr == nil {
+				out = append(out, d...)
 			}
-			return e
-		}); err != nil {
-			return nil, nil, roster.Member{}, nil, fmt.Errorf("roster genesis: %w", err)
 		}
+		return out
 	}
-	// A non-lighthouse node joins by adding itself to the consensus roster (a write,
-	// but it runs after the seeder has quiesced). A client-only node skips this: it
-	// routes to the replicas without becoming one.
-	if !clientOnly && !containsID(genesis, self.NodeID) {
-		if err := retryBootstrap(ctx, func() error {
-			v, e := rost.Add(ctx, self)
-			if e == nil {
-				val = v
-			}
-			return e
-		}); err != nil {
-			return nil, nil, roster.Member{}, nil, fmt.Errorf("roster join: %w", err)
+
+	var val roster.Value
+	switch {
+	case bootstrap:
+		v, err := rost.Founder(ctx, self)
+		if err != nil {
+			return nil, nil, roster.Member{}, nil, nil, fmt.Errorf("roster founder: %w", err)
 		}
+		val = v
+		log.Info("founded roster", "node", self.NodeID)
+	default:
+		// joinCluster returns the snapshot it observed (with self in membership),
+		// so the node never issues a startup consensus read that could race the
+		// driver's reconfiguration.
+		v, err := joinCluster(ctx, log, rost, dialer, network.HTTPClient(), self, candidates, !clientOnly)
+		if err != nil {
+			return nil, nil, roster.Member{}, nil, nil, fmt.Errorf("roster join: %w", err)
+		}
+		val = v
 	}
 	dialer.learn(val.Members)
+
+	snap := newRosterSnap(self.NodeID)
+	snap.store(val)
 
 	dyn := &dynamicProposer{}
 	dyn.set(routerFor(self.NodeID, val, dialer))
 
 	ln, err := network.Listen(ctx, fmt.Sprintf(":%d", caskPort))
 	if err != nil {
-		return nil, nil, roster.Member{}, nil, fmt.Errorf("overlay listen: %w", err)
+		return nil, nil, roster.Member{}, nil, nil, fmt.Errorf("overlay listen: %w", err)
 	}
 
-	// A client-only node has no peers to monitor and proposes no roster changes;
-	// it just re-reads the roster and re-places the range as membership shifts.
 	if clientOnly {
-		go reconcileLoopReadOnly(ctx, log, rost, dialer, dyn, val)
-		return dyn, ln, self, nil, nil
+		go reconcileLoopReadOnly(ctx, log, rost, dialer, dyn, snap, candidates, network.HTTPClient(), val)
+		return dyn, ln, self, nil, snap, nil
 	}
 
 	mon := newHealthMonitor(self.NodeID, network.HTTPClient())
-	go reconcileLoop(ctx, log, rost, dialer, dyn, mon, seeds, val)
-	return dyn, ln, self, mon, nil
+	go reconcileLoop(ctx, log, rost, dialer, dyn, mon, snap, disco, candidates, network.HTTPClient(), val)
+	return dyn, ln, self, mon, snap, nil
 }
 
-// reconcileLoopReadOnly is the client-only counterpart to reconcileLoop: it
-// re-reads the consensus roster each tick and, when the epoch advances, learns
-// the new members' overlay addresses and re-places the range so proposals keep
-// routing to the current replica set. It never proposes Add/Remove and runs no
-// failure detector.
-func reconcileLoopReadOnly(ctx context.Context, log *slog.Logger, rost *roster.Roster, dialer *overlayDialer, dyn *dynamicProposer, val roster.Value) {
+// isDriver reports whether self is the single node responsible for driving
+// consensus roster changes: the highest-id current core member. Restricting
+// consensus writes to one node prevents reconcile loops from dueling — CASPaxos
+// reads are write-imposing, so many nodes reading/writing the register at once
+// would starve the multi-round reconfiguration.
+func isDriver(self uint64, core []uint64) bool {
+	if len(core) == 0 {
+		return false
+	}
+	hi := core[0]
+	for _, id := range core[1:] {
+		if id > hi {
+			hi = id
+		}
+	}
+	return self == hi
+}
+
+// joinCluster brings a new node into an existing cluster WITHOUT proposing to the
+// register itself (which would duel with the driver). It polls candidate peers
+// for a roster snapshot, adopts the current acceptor core, and — unless
+// client-only — asks the driver to add it via /roster/join, retrying until it
+// observes itself in the membership or the join deadline passes.
+func joinCluster(ctx context.Context, log *slog.Logger, rost *roster.Roster, dialer *overlayDialer, hc *http.Client, self roster.Member, candidates func() []roster.Member, addSelf bool) (roster.Value, error) {
+	ctx, cancel := context.WithTimeout(ctx, joinTimeout)
+	defer cancel()
+	for {
+		cands := candidates()
+		dialer.learn(cands)
+		if v, ok := fetchCoreHint(ctx, hc, cands); ok && len(v.Core) > 0 {
+			dialer.learn(v.Members)
+			rost.AdoptCore(v.Core)
+			if !addSelf {
+				return v, nil // client-only: tracking the core is enough
+			}
+			if containsMember(v.Members, self.NodeID) {
+				log.Info("joined roster", "node", self.NodeID, "core", v.Core)
+				return v, nil
+			}
+			requestJoin(ctx, hc, fetchTargets(cands, v.Members), self)
+		}
+		select {
+		case <-ctx.Done():
+			return roster.Value{}, fmt.Errorf("no live cluster member found to join (is a --bootstrap node up?): %w", ctx.Err())
+		case <-time.After(joinPoll):
+		}
+	}
+}
+
+// requestJoin posts the member to peers' /roster/join. The current driver queues
+// it; non-drivers reject with a redirect, which is harmless — posting to all
+// targets each retry guarantees the driver eventually receives it, and the
+// driver dedups by node id.
+func requestJoin(ctx context.Context, hc *http.Client, targets []roster.Member, self roster.Member) {
+	body, _ := json.Marshal(self)
+	for _, m := range targets {
+		if m.Addr == "" {
+			continue
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+m.Addr+"/roster/join", bytes.NewReader(body))
+		if err != nil {
+			continue
+		}
+		if resp, err := hc.Do(req); err == nil {
+			resp.Body.Close()
+		}
+	}
+}
+
+func containsMember(members []roster.Member, id uint64) bool {
+	for _, m := range members {
+		if m.NodeID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchCoreHint queries each candidate's /roster endpoint and returns the value
+// with the highest ConfigGen — a non-consensus hint that lets a joiner discover
+// the current acceptor core before it can read the register itself.
+func fetchCoreHint(ctx context.Context, hc *http.Client, candidates []roster.Member) (roster.Value, bool) {
+	var best roster.Value
+	found := false
+	for _, m := range candidates {
+		if m.Addr == "" {
+			continue
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+m.Addr+"/roster", nil)
+		if err != nil {
+			continue
+		}
+		resp, err := hc.Do(req)
+		if err != nil {
+			continue
+		}
+		var v roster.Value
+		derr := json.NewDecoder(resp.Body).Decode(&v)
+		resp.Body.Close()
+		if derr != nil || v.ConfigGen == 0 {
+			continue
+		}
+		// Prefer the freshest snapshot: higher config generation (newest core)
+		// first, then higher epoch (newest membership). The driver holds the max.
+		if !found || v.ConfigGen > best.ConfigGen || (v.ConfigGen == best.ConfigGen && v.Epoch > best.Epoch) {
+			best, found = v, true
+		}
+	}
+	return best, found
+}
+
+// proposerForGroups resolves node-id groups to overlay acceptor clients and
+// builds the matching CASPaxos proposer: a single group is ordinary consensus,
+// multiple groups give joint consensus for roster reconfiguration.
+func proposerForGroups(self uint64, groups [][]uint64, d *overlayDialer) roster.Proposer {
+	acl := make([][]caspaxos.AcceptorClient, len(groups))
+	for i, ids := range groups {
+		acl[i] = d.clients(ids)
+	}
+	if len(acl) == 1 {
+		return caspaxos.NewProposer(self, acl[0])
+	}
+	return caspaxos.NewJointProposer(self, acl)
+}
+
+// rosterSnap holds this node's latest known roster value (served at /roster so
+// joining peers learn the current acceptor core) and a queue of pending joins it
+// accepts at /roster/join. Joins are mediated so that the DRIVER is the single
+// consensus writer of the register: a joining node never proposes to the
+// register itself (which would duel with the driver's reconfiguration); it posts
+// its membership here and the driver drains the queue into its next reconcile.
+type rosterSnap struct {
+	self    uint64
+	v       atomic.Pointer[roster.Value]
+	mu      sync.Mutex
+	pending map[uint64]roster.Member
+}
+
+func newRosterSnap(self uint64) *rosterSnap {
+	return &rosterSnap{self: self, pending: map[uint64]roster.Member{}}
+}
+
+func (s *rosterSnap) store(v roster.Value) { s.v.Store(&v) }
+
+func (s *rosterSnap) load() (roster.Value, bool) {
+	if v := s.v.Load(); v != nil {
+		return *v, true
+	}
+	return roster.Value{}, false
+}
+
+func (s *rosterSnap) serve(w http.ResponseWriter, _ *http.Request) {
+	v := s.v.Load()
+	if v == nil {
+		http.Error(w, "roster not ready", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// serveJoin accepts a membership join. If this node is the current driver it
+// queues the member for its reconcile loop to add; otherwise it points the
+// caller at the driver (whichever it currently believes that to be).
+func (s *rosterSnap) serveJoin(w http.ResponseWriter, r *http.Request) {
+	var m roster.Member
+	if err := json.NewDecoder(r.Body).Decode(&m); err != nil || m.NodeID == 0 || m.Addr == "" {
+		http.Error(w, "bad member", http.StatusBadRequest)
+		return
+	}
+	v, ok := s.load()
+	if !ok || !isDriver(s.self, v.Core) {
+		// Not the driver: tell the caller who is, so it can retarget.
+		driver := ""
+		if ok {
+			driver = addrOfMax(v.Core, v.Members)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMisdirectedRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"driver": driver})
+		return
+	}
+	s.mu.Lock()
+	s.pending[m.NodeID] = m
+	s.mu.Unlock()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// drainJoins returns and clears the queued pending joins.
+func (s *rosterSnap) drainJoins() []roster.Member {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pending) == 0 {
+		return nil
+	}
+	out := make([]roster.Member, 0, len(s.pending))
+	for _, m := range s.pending {
+		out = append(out, m)
+	}
+	s.pending = map[uint64]roster.Member{}
+	return out
+}
+
+// addrOfMax returns the address of the highest-id core member (the driver).
+func addrOfMax(core []uint64, members []roster.Member) string {
+	if len(core) == 0 {
+		return ""
+	}
+	hi := core[0]
+	for _, id := range core[1:] {
+		if id > hi {
+			hi = id
+		}
+	}
+	for _, m := range members {
+		if m.NodeID == hi {
+			return m.Addr
+		}
+	}
+	return ""
+}
+
+// reconcileLoop keeps the consensus roster in step with discovery and the
+// failure detector, and tracks the register's own acceptor core. Every tick it
+// runs the failure-detector scan (so its suspicion vector is published at
+// /health for the driver to aggregate). But only the DRIVER — the highest-id
+// current core member — issues consensus operations (Add/Remove/Reconfigure);
+// every other replica is a follower that learns the roster from the driver's
+// /roster snapshot, never issuing a write-imposing consensus read. This keeps
+// exactly one writer on the register at steady state, so reconfiguration is not
+// starved by dueling reads. The range is re-placed when the membership epoch
+// advances, on driver and follower alike.
+func reconcileLoop(ctx context.Context, log *slog.Logger, rost *roster.Roster, dialer *overlayDialer, dyn *dynamicProposer, mon *healthMonitor, snap *rosterSnap, disco roster.Discovery, candidates func() []roster.Member, hc *http.Client, val roster.Value) {
+	ctrl := roster.NewController(rost).EnableCoreReconfig(roster.RegisterRF)
+	self := dialer.self
 	epoch := val.Epoch
+	cur := val
 	t := time.NewTicker(reconcileInterval)
 	defer t.Stop()
 	for {
@@ -180,19 +379,91 @@ func reconcileLoopReadOnly(ctx context.Context, log *slog.Logger, rost *roster.R
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			v, err := rost.Get(ctx)
-			if err != nil {
-				log.Warn("client roster get", "err", err)
-				continue
-			}
-			if v.Epoch != epoch {
-				dialer.learn(v.Members)
-				dyn.set(routerFor(dialer.self, v, dialer))
-				log.Info("client re-placed range", "epoch", v.Epoch, "members", len(v.Members))
-				epoch = v.Epoch
+			down := mon.scan(ctx, cur.Members, time.Now().UnixNano())
+			if isDriver(self, cur.Core) {
+				// The driver is the SOLE consensus writer: it adds queued joins and
+				// discovered members, removes condemned ones, and reconfigures the
+				// core — all serialized through this one loop, so nothing duels on
+				// the register.
+				discovered := snap.drainJoins()
+				if disco != nil {
+					if d, derr := disco.Discover(ctx); derr == nil {
+						discovered = append(discovered, d...)
+					}
+				}
+				if len(down) > 0 {
+					log.Info("failure detector condemned members", "down", down)
+				}
+				v, err := ctrl.Reconcile(ctx, discovered, down)
+				if err != nil {
+					log.Warn("roster reconcile", "err", err)
+					continue
+				}
+				cur = applyView(log, dialer, dyn, snap, mon, cur, v, &epoch, "driver")
+			} else if v, ok := fetchCoreHint(ctx, hc, fetchTargets(candidates(), cur.Members)); ok && len(v.Core) > 0 {
+				// Follower: adopt the driver's view without touching consensus, so
+				// it can take over cleanly if it later becomes the driver.
+				rost.AdoptCore(v.Core)
+				cur = applyView(log, dialer, dyn, snap, mon, cur, v, &epoch, "follower")
 			}
 		}
 	}
+}
+
+// reconcileLoopReadOnly is the client-only counterpart: a follower that never
+// joins consensus. It tracks the roster purely from peer /roster snapshots and
+// re-places the range on an epoch change. It proposes nothing and runs no
+// failure detector.
+func reconcileLoopReadOnly(ctx context.Context, log *slog.Logger, rost *roster.Roster, dialer *overlayDialer, dyn *dynamicProposer, snap *rosterSnap, candidates func() []roster.Member, hc *http.Client, val roster.Value) {
+	epoch := val.Epoch
+	cur := val
+	t := time.NewTicker(reconcileInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			v, ok := fetchCoreHint(ctx, hc, fetchTargets(candidates(), cur.Members))
+			if !ok || len(v.Core) == 0 {
+				continue
+			}
+			rost.AdoptCore(v.Core)
+			cur = applyView(log, dialer, dyn, snap, nil, cur, v, &epoch, "client")
+		}
+	}
+}
+
+// applyView records a freshly observed roster value: it updates the snapshot,
+// learns member addresses, and — when the membership epoch advanced — re-places
+// the range and forgets departed peers. It returns the value as the new current.
+func applyView(log *slog.Logger, dialer *overlayDialer, dyn *dynamicProposer, snap *rosterSnap, mon *healthMonitor, prev, v roster.Value, epoch *uint64, who string) roster.Value {
+	snap.store(v)
+	dialer.learn(v.Members)
+	if v.Epoch != *epoch {
+		if mon != nil {
+			mon.forget(departed(prev.Members, v.Members))
+		}
+		dyn.set(routerFor(dialer.self, v, dialer))
+		log.Info("roster changed; range re-placed", "by", who, "epoch", v.Epoch, "members", len(v.Members), "core", v.Core)
+		*epoch = v.Epoch
+	}
+	return v
+}
+
+// fetchTargets is the set of peers to poll for a roster snapshot: the current
+// members plus the static/discovered candidates (deduped by node id).
+func fetchTargets(candidates, members []roster.Member) []roster.Member {
+	seen := map[uint64]bool{}
+	var out []roster.Member
+	for _, m := range append(append([]roster.Member(nil), members...), candidates...) {
+		if m.Addr == "" || seen[m.NodeID] {
+			continue
+		}
+		seen[m.NodeID] = true
+		out = append(out, m)
+	}
+	return out
 }
 
 // departed returns the ids present in old but not in cur.
@@ -208,70 +479,6 @@ func departed(old, cur []roster.Member) []uint64 {
 		}
 	}
 	return gone
-}
-
-// highestID returns the largest node id among members — the deterministic, agreed
-// choice of sole genesis seeder. The highest id matters: CASPaxos breaks ballot
-// ties by node id, so the seeder's ballots dominate the (write-imposing) Get rounds
-// other nodes run while awaiting genesis, letting it install the register and win.
-func highestID(members []roster.Member) uint64 {
-	var hi uint64
-	for _, m := range members {
-		if m.NodeID > hi {
-			hi = m.NodeID
-		}
-	}
-	return hi
-}
-
-func containsID(members []roster.Member, id uint64) bool {
-	for _, m := range members {
-		if m.NodeID == id {
-			return true
-		}
-	}
-	return false
-}
-
-// reconcileLoop keeps the consensus roster in step with discovery and re-places
-// the range when the membership epoch advances. Each tick it both adds members
-// surfaced by discovery and removes any condemned by the health monitor's
-// majority cut detector, so the roster tracks both joins and failures.
-func reconcileLoop(ctx context.Context, log *slog.Logger, rost *roster.Roster, dialer *overlayDialer, dyn *dynamicProposer, mon *healthMonitor, seeds []roster.Member, val roster.Value) {
-	ctrl := roster.NewController(rost)
-	disco := roster.SeedDiscovery(seeds)
-	epoch := val.Epoch
-	members := val.Members
-	t := time.NewTicker(reconcileInterval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			discovered, err := disco.Discover(ctx)
-			if err != nil {
-				continue
-			}
-			down := mon.scan(ctx, members, time.Now().UnixNano())
-			if len(down) > 0 {
-				log.Info("failure detector condemned members", "down", down)
-			}
-			val, err := ctrl.Reconcile(ctx, discovered, down)
-			if err != nil {
-				log.Warn("roster reconcile", "err", err)
-				continue
-			}
-			if val.Epoch != epoch {
-				mon.forget(departed(members, val.Members))
-				dialer.learn(val.Members)
-				dyn.set(routerFor(dialer.self, val, dialer))
-				log.Info("roster changed; range re-placed", "epoch", val.Epoch, "members", len(val.Members))
-				epoch = val.Epoch
-			}
-			members = val.Members
-		}
-	}
 }
 
 // routerFor builds a range router for self over the placement computed from val.
@@ -334,7 +541,9 @@ func (d *overlayDialer) learn(members []roster.Member) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	for _, m := range members {
-		d.addrs[m.NodeID] = m.Addr
+		if m.Addr != "" {
+			d.addrs[m.NodeID] = m.Addr
+		}
 	}
 }
 
@@ -366,12 +575,4 @@ func (d *overlayDialer) clients(ids []uint64) []caspaxos.AcceptorClient {
 		}
 	}
 	return out
-}
-
-func memberIDs(members []roster.Member) []uint64 {
-	ids := make([]uint64, len(members))
-	for i, m := range members {
-		ids[i] = m.NodeID
-	}
-	return ids
 }
