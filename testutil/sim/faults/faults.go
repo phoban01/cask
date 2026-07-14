@@ -31,6 +31,7 @@ func All() map[string]sim.Fault {
 		KeepaliveBlackhole{},
 		EpochOldOwnerWrite{},
 		OwnerVsFullProposer{},
+		DuelingProposers{},
 		DuplicateDelivery{},
 		SlowLink{},
 	}

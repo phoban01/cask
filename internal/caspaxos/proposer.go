@@ -35,24 +35,42 @@ type Proposer struct {
 	acceptors []AcceptorClient // unique acceptors across all groups
 	groups    [][]int          // each group is a set of indices into acceptors
 	maxRounds int
+	backoff   func(ctx context.Context, attempt int) error // nil = retry immediately
 
 	mu      sync.Mutex
 	counter uint64 // highest ballot counter this proposer has used (guarded by mu)
 }
 
+// Option configures a Proposer.
+type Option func(*Proposer)
+
+// WithBackoff installs a delay called between preempted rounds (never before
+// the first, so an uncontended round pays nothing). Ballot bumping alone can
+// livelock two symmetric proposers; a randomized delay breaks the symmetry
+// (see internal/backoff). The function is injected so the core stays free of
+// clocks and randomness — the simulator supplies a deterministic one. A
+// non-nil error aborts the Propose with that error.
+func WithBackoff(f func(ctx context.Context, attempt int) error) Option {
+	return func(p *Proposer) { p.backoff = f }
+}
+
 // NewProposer returns a single-group Proposer over acceptors.
-func NewProposer(nodeID uint64, acceptors []AcceptorClient) *Proposer {
+func NewProposer(nodeID uint64, acceptors []AcceptorClient, opts ...Option) *Proposer {
 	idx := make([]int, len(acceptors))
 	for i := range acceptors {
 		idx[i] = i
 	}
-	return &Proposer{nodeID: nodeID, acceptors: acceptors, groups: [][]int{idx}, maxRounds: 12}
+	p := &Proposer{nodeID: nodeID, acceptors: acceptors, groups: [][]int{idx}, maxRounds: 12}
+	for _, o := range opts {
+		o(p)
+	}
+	return p
 }
 
 // NewJointProposer returns a Proposer requiring a quorum in every group. The
 // groups are given as acceptor lists; shared acceptors are deduplicated so a
 // node present in multiple groups is contacted once and counts in each.
-func NewJointProposer(nodeID uint64, groups [][]AcceptorClient) *Proposer {
+func NewJointProposer(nodeID uint64, groups [][]AcceptorClient, opts ...Option) *Proposer {
 	var acceptors []AcceptorClient
 	index := map[AcceptorClient]int{}
 	gidx := make([][]int, len(groups))
@@ -67,7 +85,11 @@ func NewJointProposer(nodeID uint64, groups [][]AcceptorClient) *Proposer {
 			gidx[g] = append(gidx[g], i)
 		}
 	}
-	return &Proposer{nodeID: nodeID, acceptors: acceptors, groups: gidx, maxRounds: 12}
+	p := &Proposer{nodeID: nodeID, acceptors: acceptors, groups: gidx, maxRounds: 12}
+	for _, o := range opts {
+		o(p)
+	}
+	return p
 }
 
 // nextBallot mints a fresh ballot strictly greater than any this proposer has
@@ -158,6 +180,9 @@ func (p *Proposer) Propose(ctx context.Context, key []byte, change ChangeFunc) (
 		}
 		if !ok {
 			floor = floor.Max(conflict)
+			if err := p.pause(ctx, round); err != nil {
+				return nil, err
+			}
 			continue
 		}
 
@@ -176,6 +201,9 @@ func (p *Proposer) Propose(ctx context.Context, key []byte, change ChangeFunc) (
 		}
 		if !ok {
 			floor = floor.Max(conflict)
+			if err := p.pause(ctx, round); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		if cerr != nil {
@@ -184,6 +212,15 @@ func (p *Proposer) Propose(ctx context.Context, key []byte, change ChangeFunc) (
 		return next, nil
 	}
 	return nil, ErrPreempted
+}
+
+// pause runs the configured backoff after a preempted round (attempt is the
+// 0-based round that just failed).
+func (p *Proposer) pause(ctx context.Context, attempt int) error {
+	if p.backoff == nil {
+		return nil
+	}
+	return p.backoff(ctx, attempt)
 }
 
 // errVoteDropped marks a reply the proposer_drop_vote buggify site discarded.

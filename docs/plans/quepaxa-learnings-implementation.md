@@ -334,6 +334,21 @@ demonstrably fails (ErrPreempted observed) with backoff off at K=4/maxRounds=12
 the roster (message-load reasons) but a gate scenario with the convention disabled now
 passes.
 
+**Implementation notes (landed 2026-07-14).** As specified, with one honest
+correction to the done-when: the "fails with backoff off" regression proof
+does NOT reproduce at unit-test scale — 20 runs of 6 writers × 5 ops over
+in-memory acceptors converged every time without backoff, because
+near-zero-RTT rounds break symmetry by scheduler noise alone. The livelock
+class needs real network RTTs (as in the multi-lighthouse bootstrap
+incident), so backoff is defense-in-depth validated by: convergence +
+exactly-once accounting under contention (unit test), the standing
+`dueling_proposers` gate fault (WARNING → FAULT-ASSERT on any preemption
+exhaustion), and the bootstrap history. Wiring: `caspaxos.WithBackoff`
+option (called only between preempted rounds), `agent.Router` WithBackoff,
+`lease.Locks` WithAcquireBackoff (Acquire + Bump retries), production
+policy `backoff.FullJitter(5ms, 500ms)` in cmd; the simulator uses
+`backoff.Seeded` streams drawn on the gate goroutine.
+
 ---
 
 ## W4 — Owner-cached reads (zero-RTT linearizable reads)

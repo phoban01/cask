@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/phoban01/cask/internal/agent"
+	"github.com/phoban01/cask/internal/backoff"
 	"github.com/phoban01/cask/internal/caspaxos"
 	"github.com/phoban01/cask/internal/placement"
 	"github.com/phoban01/cask/internal/ranges"
@@ -255,9 +256,17 @@ func proposerForGroups(self uint64, groups [][]uint64, d *overlayDialer) roster.
 		acl[i] = d.clients(ids)
 	}
 	if len(acl) == 1 {
-		return caspaxos.NewProposer(self, acl[0])
+		return caspaxos.NewProposer(self, acl[0], caspaxos.WithBackoff(contentionBackoff()))
 	}
-	return caspaxos.NewJointProposer(self, acl)
+	return caspaxos.NewJointProposer(self, acl, caspaxos.WithBackoff(contentionBackoff()))
+}
+
+// contentionBackoff is the production contention policy: full jitter, LAN-ish
+// base, bounded cap. Misconfiguration costs latency, never liveness — the
+// single-driver convention still minimizes roster contention, but liveness no
+// longer depends on it (W3 in docs/plans/quepaxa-learnings-implementation.md).
+func contentionBackoff() func(ctx context.Context, attempt int) error {
+	return backoff.FullJitter(5*time.Millisecond, 500*time.Millisecond)
 }
 
 // rosterSnap holds this node's latest known roster value (served at /roster so

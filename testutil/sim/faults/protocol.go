@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
 
+	"github.com/phoban01/cask/internal/backoff"
 	"github.com/phoban01/cask/internal/caspaxos"
 	"github.com/phoban01/cask/internal/hlc"
 	"github.com/phoban01/cask/internal/mvcc"
@@ -137,6 +140,71 @@ func duel(s *sim.Sim, key []byte, ownerID, fullID uint64) {
 		s.Trace.Add("step %d: owner_vs_full_proposer: WARNING deposed owner write returned nil error (lost update hazard)", step)
 	} else if !errors.Is(err, caspaxos.ErrLostOwnership) {
 		s.Trace.Add("step %d: owner_vs_full_proposer: deposed owner write failed unexpectedly: %v", step, err)
+	}
+}
+
+// DuelingProposers is the W3 liveness fault: K symmetric proposers hammer one
+// key concurrently with NO driver convention, relying only on ballot bumping
+// plus the injected randomized backoff to converge. Every writer must finish
+// its ops without exhausting its retry budget — an ErrPreempted here means the
+// livelock class that bit the multi-lighthouse bootstrap is back, and the
+// WARNING fails the gate via FAULT-ASSERT. This asserts, empirically and on
+// every PR, the property QuePaxa gets by construction: contention costs
+// latency, never liveness.
+type DuelingProposers struct{}
+
+func (DuelingProposers) Name() string { return sim.FaultDuelingProposers }
+
+func (DuelingProposers) Inject(s *sim.Sim) {
+	const (
+		writers = 4
+		ops     = 3
+	)
+	ctx := context.Background()
+	clients := s.Net.Clients()
+	if len(clients) == 0 {
+		return
+	}
+	key := []byte("\x00sim/dueling")
+	s.Observe(key)
+	step := s.Step()
+	clock := hlc.New(s.Clock.Phys())
+
+	// Seeds and OpID namespaces are drawn HERE, on the gate goroutine, before
+	// any worker exists (the adversary-RNG ownership rule).
+	seeds := make([]int64, writers)
+	for i := range seeds {
+		seeds[i] = s.RNG.Int63()
+	}
+	kvBase := uint64(10_000 + writers*step)
+
+	var wg sync.WaitGroup
+	errs := make([]error, writers)
+	for w := range writers {
+		prop := caspaxos.NewProposer(uint64(30+w), clients,
+			caspaxos.WithBackoff(backoff.Seeded(200*time.Microsecond, 5*time.Millisecond, seeds[w])))
+		kv := mvcc.New(prop, clock, kvBase+uint64(w))
+		wg.Add(1)
+		go func(w int, kv *mvcc.KV) {
+			defer wg.Done()
+			for op := range ops {
+				if _, err := kv.Put(ctx, key, fmt.Appendf(nil, "w%d-%d-%d", w, step, op)); err != nil {
+					errs[w] = err
+					return
+				}
+			}
+		}(w, kv)
+	}
+	wg.Wait()
+
+	for w, err := range errs {
+		switch {
+		case err == nil:
+		case errors.Is(err, caspaxos.ErrPreempted):
+			s.Trace.Add("step %d: dueling_proposers: WARNING writer %d preempted out (livelock: backoff failed to converge)", step, w)
+		default:
+			s.Trace.Add("step %d: dueling_proposers: writer %d failed: %v", step, w, err)
+		}
 	}
 }
 

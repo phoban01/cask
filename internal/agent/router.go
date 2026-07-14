@@ -46,9 +46,10 @@ func (d StaticDialer) Acceptor(node uint64) (caspaxos.AcceptorClient, bool) {
 // agent. Proposers are cached per range and rebuilt when a range's epoch changes
 // (e.g. after reconfiguration).
 type Router struct {
-	id     uint64 // this agent's proposer id
-	rmap   *ranges.Map
-	dialer Dialer
+	id      uint64 // this agent's proposer id
+	rmap    *ranges.Map
+	dialer  Dialer
+	backoff func(ctx context.Context, attempt int) error
 
 	mu    sync.Mutex
 	cache map[uint64]cachedProposer // by range id
@@ -59,9 +60,22 @@ type cachedProposer struct {
 	p     *caspaxos.Proposer
 }
 
+// RouterOption configures a Router.
+type RouterOption func(*Router)
+
+// WithBackoff installs a contention backoff on every proposer the router
+// builds (caspaxos.WithBackoff).
+func WithBackoff(f func(ctx context.Context, attempt int) error) RouterOption {
+	return func(r *Router) { r.backoff = f }
+}
+
 // NewRouter returns a Router for agent id over the given range map and dialer.
-func NewRouter(id uint64, rmap *ranges.Map, dialer Dialer) *Router {
-	return &Router{id: id, rmap: rmap, dialer: dialer, cache: make(map[uint64]cachedProposer)}
+func NewRouter(id uint64, rmap *ranges.Map, dialer Dialer, opts ...RouterOption) *Router {
+	r := &Router{id: id, rmap: rmap, dialer: dialer, cache: make(map[uint64]cachedProposer)}
+	for _, o := range opts {
+		o(r)
+	}
+	return r
 }
 
 // Propose routes key to its range and runs the round there.
@@ -100,7 +114,11 @@ func (r *Router) proposerFor(d ranges.Descriptor) (*caspaxos.Proposer, error) {
 		}
 		acc = append(acc, a)
 	}
-	p := caspaxos.NewProposer(r.id, acc)
+	var opts []caspaxos.Option
+	if r.backoff != nil {
+		opts = append(opts, caspaxos.WithBackoff(r.backoff))
+	}
+	p := caspaxos.NewProposer(r.id, acc, opts...)
 	r.cache[d.ID] = cachedProposer{epoch: d.Epoch, p: p}
 	return p, nil
 }

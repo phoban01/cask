@@ -31,11 +31,35 @@ type Locks struct {
 	prop     Proposer
 	sessions *Sessions
 	retries  int
+	backoff  func(ctx context.Context, attempt int) error
+}
+
+// LocksOption configures a Locks manager.
+type LocksOption func(*Locks)
+
+// WithAcquireBackoff installs a delay between contended Acquire/Bump retries
+// (never before the first attempt). Without it, the retry budget can exhaust
+// in one contention burst — the same livelock class the proposer-level
+// backoff addresses, one level up.
+func WithAcquireBackoff(f func(ctx context.Context, attempt int) error) LocksOption {
+	return func(l *Locks) { l.backoff = f }
 }
 
 // NewLocks returns a Locks manager that checks holder liveness via sessions.
-func NewLocks(prop Proposer, sessions *Sessions) *Locks {
-	return &Locks{prop: prop, sessions: sessions, retries: 8}
+func NewLocks(prop Proposer, sessions *Sessions, opts ...LocksOption) *Locks {
+	l := &Locks{prop: prop, sessions: sessions, retries: 8}
+	for _, o := range opts {
+		o(l)
+	}
+	return l
+}
+
+// pause runs the configured backoff after a lost race (attempt 0-based).
+func (l *Locks) pause(ctx context.Context, attempt int) error {
+	if l.backoff == nil {
+		return nil
+	}
+	return l.backoff(ctx, attempt)
 }
 
 func LockKey(name string) []byte { return append([]byte("\x00lock\x00"), name...) }
@@ -74,6 +98,9 @@ func (l *Locks) Acquire(ctx context.Context, name, sessionID string) (token uint
 			return marshal(Lock{Session: sessionID, Held: true, Fence: newFence})
 		})
 		if errors.Is(err, caspaxos.ErrConflict) {
+			if perr := l.pause(ctx, attempt); perr != nil {
+				return 0, perr
+			}
 			continue // lost the race; re-read and retry
 		}
 		if err != nil {
@@ -113,6 +140,9 @@ func (l *Locks) Bump(ctx context.Context, name, sessionID string, minFence uint6
 			return marshal(Lock{Session: sessionID, Held: true, Fence: newFence})
 		})
 		if errors.Is(err, caspaxos.ErrConflict) {
+			if perr := l.pause(ctx, attempt); perr != nil {
+				return 0, perr
+			}
 			continue
 		}
 		if err != nil {

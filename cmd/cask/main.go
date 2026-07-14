@@ -144,12 +144,12 @@ func main() {
 	} else {
 		clients := buildClients(*tport, *listen, *peers, localAcc, transport.TCP{}.HTTPClient())
 		log.Info("starting", "id", *id, "listen", *listen, "transport", *tport, "replicas", len(clients))
-		prop = caspaxos.NewProposer(*id, clients)
+		prop = caspaxos.NewProposer(*id, clients, caspaxos.WithBackoff(contentionBackoff()))
 	}
 
 	kv := mvcc.New(prop, clock, nodeID)
 	sessions := lease.NewSessions(prop, func() int64 { return time.Now().UnixNano() })
-	locks := lease.NewLocks(prop, sessions)
+	locks := lease.NewLocks(prop, sessions, lease.WithAcquireBackoff(contentionBackoff()))
 	srv := &server{kv: kv, sessions: sessions, locks: locks, log: log}
 
 	mux.HandleFunc("/kv/", srv.handleKV) // client KV API
