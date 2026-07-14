@@ -7,8 +7,17 @@ import (
 	"context"
 	"sync"
 
+	"github.com/phoban01/cask/internal/buggify"
 	"github.com/phoban01/cask/internal/caspaxos"
 )
+
+func init() {
+	// Declared for catalog completeness. The slow-fsync effect is modelled by the
+	// testutil/sim/faults SlowStore decorator today; a firing site lands here with
+	// the Pebble store (§3.0).
+	buggify.Register("store_slow_fsync",
+		"acceptor Storage.Store pauses before persisting, modelling a slow fsync (decorator-driven today; site lands with §3.0)", 0.05)
+}
 
 // Mem is a goroutine-safe in-memory caspaxos.Storage. It copies values on the
 // way in and out so callers can never alias stored register bytes. There is no

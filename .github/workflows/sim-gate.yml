@@ -1,0 +1,39 @@
+name: sim-gate
+
+# Deterministic-simulator release gate (cask roadmap §6.6). Every PR that
+# touches a protocol-bearing package must run clean: zero §6.5 invariant
+# violations across the CI seed budget and every fault profile. A violation
+# blocks merge; the seed + trace are uploaded for replay.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  sim-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Simulator gate (CI tier — 10^4 seeds per profile)
+        env:
+          SEEDS: "10000"
+          RECORD_DIR: "${{ runner.temp }}/sim-records"
+        run: scripts/sim-gate.sh
+
+      - name: Upload violation records
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-gate-violations
+          path: ${{ runner.temp }}/sim-records
+          if-no-files-found: ignore

@@ -16,9 +16,17 @@ import (
 	"fmt"
 	"sync/atomic"
 
+	"github.com/phoban01/cask/internal/buggify"
 	"github.com/phoban01/cask/internal/caspaxos"
 	"github.com/phoban01/cask/internal/hlc"
 )
+
+func init() {
+	// Declared for catalog completeness; the firing site lands with §3.1
+	// (lease-cached owner reads) — there is no owner cache to skip until then.
+	buggify.Register("mvcc_skip_owner_cache",
+		"mvcc.KV.read bypasses the owner cache and takes the full Paxos round (inactive until §3.1)", 0.05)
+}
 
 // OpID uniquely identifies one logical mutation. It is generated once per
 // Put/Delete/CAS call and reused across every CASPaxos retry of that call, so

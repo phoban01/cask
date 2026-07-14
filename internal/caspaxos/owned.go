@@ -3,7 +3,10 @@ package caspaxos
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
+
+	"github.com/phoban01/cask/internal/buggify"
 )
 
 var (
@@ -12,14 +15,49 @@ var (
 	// ErrLostOwnership means a fast-path round was preempted — a higher epoch
 	// owner exists. The caller must re-acquire ownership (which re-reads state).
 	ErrLostOwnership = errors.New("caspaxos: ownership lost (preempted)")
+	// ErrEpochReserved rejects TakeOwnership at epoch 0: counters below
+	// 1<<epochShift are the plain full-proposer ballot space, and an owner
+	// minting there would break the ballot-space discipline (see
+	// Proposer.nextBallot). Ownership fences start at 1.
+	ErrEpochReserved = errors.New("caspaxos: epoch 0 is reserved for full proposers")
 )
+
+// EpochBehindError reports that the register has already seen ballots at or
+// above the epoch a fast-path operation ran at — a newer owner has taken over,
+// or a full proposer jumped into a synthetic epoch after preempting this one
+// (see Proposer.nextBallot). The caller must re-acquire its fence at an epoch
+// strictly greater than Observed before retrying; blind retries at the same
+// fence can never win. errors.Is(err, ErrLostOwnership) holds.
+type EpochBehindError struct {
+	Observed uint64 // highest epoch seen in a conflicting promise
+}
+
+func (e *EpochBehindError) Error() string {
+	return fmt.Sprintf("caspaxos: ownership lost; register already at epoch %d", e.Observed)
+}
+
+// Unwrap makes errors.Is(err, ErrLostOwnership) hold for callers that do not
+// care about the observed epoch.
+func (e *EpochBehindError) Unwrap() error { return ErrLostOwnership }
 
 // epochShift splits a ballot Counter into an ownership epoch (high bits) and a
 // per-epoch sequence (low bits). Encoding the epoch this way means a newer
 // owner's ballots dominate every ballot a previous owner can mint, so a stale
 // owner's accepts are always rejected — which is what makes the phase-1 skip
 // safe without a time-based lease.
+//
+// Capacity bound: the epoch occupies the top 24 bits (2^24 ≈ 16.7M ownership
+// handoffs per key) and the sequence the low 40 (2^40 writes per epoch). An
+// epoch past 2^24 would wrap into undefined ballot ordering; at one handoff
+// per second that is ~194 days of continuous churn on a single key, so it is
+// a documented limit rather than a guarded one.
 const epochShift = 40
+
+// maxEpoch is the highest representable ownership epoch (24 bits above
+// epochShift). Beyond it, ballot ordering is undefined — the documented
+// capacity limit above — and nextBallot's epoch jump saturates rather than
+// overflow the counter.
+const maxEpoch = 1<<(64-epochShift) - 1
 
 // OwnedProposer is the 1-RTT fast path for a single key. After TakeOwnership
 // runs one phase-1 round (learning the value and installing the epoch's
@@ -58,9 +96,14 @@ func (p *OwnedProposer) ballot() Ballot {
 
 // TakeOwnership runs one phase-1 round at the given epoch (the ownership lease's
 // fence). On success the owner holds the highest promise and has read the
-// current value; subsequent Writes skip phase 1. A higher-epoch owner causes
-// ErrLostOwnership.
+// current value; subsequent Writes skip phase 1. A higher-epoch owner (or a
+// full proposer's synthetic epoch) causes an EpochBehindError carrying the
+// epoch the register has reached, so the caller can re-acquire its fence above
+// it instead of retrying a fence that can never win.
 func (p *OwnedProposer) TakeOwnership(ctx context.Context, key []byte, epoch uint64) error {
+	if epoch == 0 {
+		return ErrEpochReserved
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -71,10 +114,15 @@ func (p *OwnedProposer) TakeOwnership(ctx context.Context, key []byte, epoch uin
 		promised int
 		best     Ballot
 		value    []byte
+		conflict Ballot
 	)
 	for _, ac := range p.acceptors {
 		reply, err := ac.Prepare(ctx, key, b)
-		if err != nil || !reply.Promised {
+		if err != nil {
+			continue
+		}
+		if !reply.Promised {
+			conflict = conflict.Max(reply.Conflict)
 			continue
 		}
 		promised++
@@ -85,6 +133,13 @@ func (p *OwnedProposer) TakeOwnership(ctx context.Context, key []byte, epoch uin
 	}
 	if promised < p.quorum() {
 		p.owning = false
+		// A genuine rejection carries a promise at or above our epoch; report
+		// it so the caller can fence past it. (A conflict below our epoch can
+		// only be a spurious rejection — buggify — or a lost reply: plain
+		// ErrLostOwnership, retryable at the same fence.)
+		if obs := conflict.Counter >> epochShift; obs >= epoch {
+			return &EpochBehindError{Observed: obs}
+		}
 		return ErrLostOwnership
 	}
 	p.value = value
@@ -102,6 +157,14 @@ func (p *OwnedProposer) Write(ctx context.Context, key []byte, change ChangeFunc
 		return nil, ErrNotOwner
 	}
 
+	// BUGGIFY: occasionally force the caller back through the slow path
+	// (re-TakeOwnership + full phase 1), keeping that path exercised. Dropping
+	// ownership here is always safe — it is exactly what a real preemption does.
+	if buggify.Maybe("owned_proposer_force_full_round", 0.02) {
+		p.owning = false
+		return nil, ErrLostOwnership
+	}
+
 	next, err := change(p.value)
 	if err != nil {
 		return nil, err // includes ErrConflict for a failed CAS
@@ -110,15 +173,23 @@ func (p *OwnedProposer) Write(ctx context.Context, key []byte, change ChangeFunc
 	p.seq++
 	b := p.ballot()
 	accepts := 0
+	var conflict Ballot
 	for _, ac := range p.acceptors {
 		reply, aerr := ac.Accept(ctx, key, b, next)
-		if aerr != nil || !reply.Accepted {
+		if aerr != nil {
+			continue
+		}
+		if !reply.Accepted {
+			conflict = conflict.Max(reply.Conflict)
 			continue
 		}
 		accepts++
 	}
 	if accepts < p.quorum() {
 		p.owning = false // a newer owner exists; force re-acquire
+		if obs := conflict.Counter >> epochShift; obs > p.epoch {
+			return nil, &EpochBehindError{Observed: obs}
+		}
 		return nil, ErrLostOwnership
 	}
 	p.value = next

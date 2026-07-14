@@ -6,8 +6,20 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/phoban01/cask/internal/buggify"
 	"github.com/phoban01/cask/internal/caspaxos"
 )
+
+// errBuggifyAbort models a crash between the joint-publish and the carry-forward
+// of a reflexive reconfiguration. The published Joint is left in flight; a later
+// Reconfigure (by this node or a peer) resumes it idempotently — which is
+// exactly the recovery path this site is meant to exercise.
+var errBuggifyAbort = errors.New("roster: reconfig aborted mid-joint (buggify)")
+
+func init() {
+	buggify.Register("roster_abort_joint",
+		"Reconfigure aborts after publishing the Joint marker, before carry-forward", 0.05)
+}
 
 // RegisterRF is the target size of the roster register's acceptor set (the
 // Core): the bounded number of nodes that physically store the membership
@@ -105,6 +117,11 @@ func (r *Roster) Reconfigure(ctx context.Context, target []uint64) (Value, error
 				continue
 			}
 			return Value{}, err
+		}
+		// BUGGIFY: crash here, after the Joint is published but before
+		// carry-forward. The in-flight Joint must be resumable, not lost.
+		if buggify.Maybe("roster_abort_joint", 0.05) {
+			return Value{}, errBuggifyAbort
 		}
 		v, err = r.finishJoint(ctx, v)
 		if err != nil {

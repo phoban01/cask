@@ -27,18 +27,21 @@ ASSUME ConfigsAreAcceptors == (Cold \subseteq Acceptor) /\ (Cnew \subseteq Accep
 Quorums(C) == {Q \in SUBSET C : 2 * Cardinality(Q) > Cardinality(C)}
 
 VARIABLES
-  phase,   \* "old" -> "joint" -> "new": the reconfiguration stage
-  voted    \* voted[a] = set of values acceptor a has voted for
+  phase,     \* "old" -> "joint" -> "new": the reconfiguration stage
+  voted,     \* voted[a] = set of values acceptor a has voted for
+  oldChosen  \* snapshot at release: the values chosen in Cold when LeaveJoint ran
 
-vars == <<phase, voted>>
+vars == <<phase, voted, oldChosen>>
 
 TypeOK ==
   /\ phase \in {"old", "joint", "new"}
   /\ voted \in [Acceptor -> SUBSET Value]
+  /\ oldChosen \subseteq Value
 
 Init ==
   /\ phase = "old"
   /\ voted = [a \in Acceptor |-> {}]
+  /\ oldChosen = {}
 
 \* The set of configurations whose quorums are required to choose, given phase.
 RequiredConfigs ==
@@ -70,20 +73,25 @@ Vote(a, v) ==
   /\ a \in ActiveAcceptor
   /\ \A b \in ActiveAcceptor : \A w \in voted[b] : w = v
   /\ voted' = [voted EXCEPT ![a] = @ \cup {v}]
-  /\ UNCHANGED phase
+  /\ UNCHANGED <<phase, oldChosen>>
 
 \* Enter the joint configuration.
 EnterJoint ==
   /\ phase = "old"
   /\ phase' = "joint"
-  /\ UNCHANGED voted
+  /\ UNCHANGED <<voted, oldChosen>>
 
 \* Leave the joint configuration for Cnew — only permitted once every value that
 \* is chosen has been carried into Cnew (catch-up before release). This is the
-\* load-bearing precondition.
+\* load-bearing precondition. The values chosen in Cold are snapshotted at this
+\* moment: CatchUpHeld must not evaluate ChosenIn(_, Cold) retroactively, since
+\* a post-release vote by a shared acceptor can complete a Cold quorum that was
+\* never commit-capable (Cold quorums stop being an authority at release; in
+\* the implementation this is enforced by ballots, which this spec abstracts).
 LeaveJoint ==
   /\ phase = "joint"
   /\ \A v \in Value : ChosenIn(v, Cold) => ChosenIn(v, Cnew)
+  /\ oldChosen' = {v \in Value : ChosenIn(v, Cold)}
   /\ phase' = "new"
   /\ UNCHANGED voted
 
@@ -101,9 +109,11 @@ Spec == Init /\ [][Next]_vars
 \* AGREEMENT ACROSS RECONFIGURATION: never two different chosen values.
 NoLostValue == \A v, w \in Value : (Chosen(v) /\ Chosen(w)) => (v = w)
 
-\* Once in Cnew, anything that was chosen in Cold is still chosen in Cnew.
+\* Once in Cnew, anything that was chosen in Cold at the moment of release is
+\* still chosen in Cnew (evaluated against the release-time snapshot, not
+\* retroactively — see LeaveJoint).
 CatchUpHeld ==
-  (phase = "new") => \A v \in Value : ChosenIn(v, Cold) => ChosenIn(v, Cnew)
+  (phase = "new") => \A v \in oldChosen : ChosenIn(v, Cnew)
 
 Inv == TypeOK /\ NoLostValue /\ CatchUpHeld
 

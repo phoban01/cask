@@ -8,7 +8,19 @@ package hlc
 import (
 	"fmt"
 	"sync"
+
+	"github.com/phoban01/cask/internal/buggify"
 )
+
+func init() {
+	buggify.Register("hlc_skew_forward",
+		"Clock.Now jumps physical time forward by a bounded skew", 0.02)
+}
+
+// skewJitter is the fixed forward jump applied when the hlc_skew_forward buggify
+// site fires. It is bounded (a few ms) so it stays within a future MaxOffset
+// (§4.4); until then it only stresses HLC monotonicity, never violates it.
+const skewJitter = 5_000_000 // 5ms in nanoseconds
 
 // Timestamp is a hybrid logical clock reading: a physical component (typically
 // unix nanoseconds) plus a logical counter that disambiguates events sharing a
@@ -56,6 +68,11 @@ func (c *Clock) Now() Timestamp {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.phys()
+	// BUGGIFY: jump physical time forward by a bounded skew. Now never moves
+	// backwards regardless, so this stresses — but cannot break — monotonicity.
+	if buggify.Maybe("hlc_skew_forward", 0.02) {
+		now += skewJitter
+	}
 	if now > c.last.Physical {
 		c.last = Timestamp{Physical: now, Logical: 0}
 	} else {

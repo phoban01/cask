@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"sync"
+
+	"github.com/phoban01/cask/internal/buggify"
 )
 
 // AcceptorClient is the proposer's view of one acceptor, whether co-located or
@@ -70,14 +72,35 @@ func NewJointProposer(nodeID uint64, groups [][]AcceptorClient) *Proposer {
 
 // nextBallot mints a fresh ballot strictly greater than any this proposer has
 // produced and at least atLeast (used to jump past a reported conflict).
+//
+// Ballot-space discipline: a counter at or above 1<<epochShift lies in an
+// ownership epoch space (minted by an OwnedProposer, or by a previous jump
+// here). A full proposer must never mint *inside* such a space — a +1 bump
+// past an owner's conflict would produce the exact counter of the owner's
+// next sequence-bumped write, and the NodeID tiebreak could then hand the
+// owner's accept (derived from its now-stale cache) the higher ballot,
+// silently overwriting the value this proposer committed in between: a lost
+// update. Instead the counter is rounded up to the next epoch boundary, which
+// strictly dominates every ballot the owner can mint; the owner NACKs,
+// reports the observed epoch (EpochBehindError), and re-acquires its fence
+// above it. Full proposers therefore only ever mint plain counters
+// (< 1<<epochShift) or exact epoch boundaries, on which classic prepare/accept
+// ordering — including the tiebreak — is safe.
+//
+// Cost: contention against an owned key burns one ownership epoch per
+// preempted round, bounded by maxRounds per Propose, out of the 2^24 epoch
+// budget per key documented at epochShift. At the top of that budget the jump
+// would overflow the counter, so it saturates to +1 bumping — the same
+// documented-not-guarded regime as epoch exhaustion itself.
 func (p *Proposer) nextBallot(atLeast Ballot) Ballot {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if atLeast.Counter > p.counter {
-		p.counter = atLeast.Counter
+	next := max(p.counter, atLeast.Counter) + 1
+	if e := next >> epochShift; e > 0 && e < maxEpoch && next != e<<epochShift {
+		next = (e + 1) << epochShift
 	}
-	p.counter++
-	return Ballot{Counter: p.counter, NodeID: p.nodeID}
+	p.counter = next
+	return Ballot{Counter: next, NodeID: p.nodeID}
 }
 
 // quorumInAllGroups reports whether the boolean per-acceptor outcome has a
@@ -150,6 +173,11 @@ func (p *Proposer) prepare(ctx context.Context, key []byte, b Ballot) (current [
 	promised := make([]bool, len(p.acceptors))
 	var best Ballot
 	for i, ac := range p.acceptors {
+		// BUGGIFY: drop one acceptor's vote, modelling a lost reply / gray
+		// failure. The round must still complete from the remaining quorum.
+		if buggify.Maybe("proposer_drop_vote", 0.01) {
+			continue
+		}
 		reply, perr := ac.Prepare(ctx, key, b)
 		if perr != nil {
 			continue // unreachable acceptor: a non-vote
