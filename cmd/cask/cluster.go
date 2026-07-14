@@ -15,6 +15,8 @@ import (
 	"github.com/phoban01/cask/internal/agent"
 	"github.com/phoban01/cask/internal/backoff"
 	"github.com/phoban01/cask/internal/caspaxos"
+	"github.com/phoban01/cask/internal/lease"
+	"github.com/phoban01/cask/internal/owner"
 	"github.com/phoban01/cask/internal/placement"
 	"github.com/phoban01/cask/internal/ranges"
 	"github.com/phoban01/cask/internal/roster"
@@ -119,7 +121,18 @@ func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, cas
 	snap.store(val)
 
 	dyn := &dynamicProposer{}
-	dyn.set(routerFor(self.NodeID, val, dialer))
+
+	// The ownership manager's control-plane traffic (session, range locks)
+	// rides the same dynamic proposer it serves; the rown key exclusion in
+	// FastPropose breaks the recursion. Client-only nodes are never replicas,
+	// so HRW never selects them and they run no manager.
+	var mgr *owner.Manager
+	if !clientOnly {
+		osess := lease.NewSessions(dyn, func() int64 { return time.Now().UnixNano() })
+		olocks := lease.NewLocks(dyn, osess, lease.WithAcquireBackoff(contentionBackoff()))
+		mgr = owner.New(self.NodeID, dialer, osess, olocks)
+	}
+	dyn.set(routerFor(self.NodeID, val, dialer, mgr))
 
 	ln, err := network.Listen(ctx, fmt.Sprintf(":%d", caskPort))
 	if err != nil {
@@ -132,7 +145,7 @@ func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, cas
 	}
 
 	mon := newHealthMonitor(self.NodeID, network.HTTPClient())
-	go reconcileLoop(ctx, log, rost, dialer, dyn, mon, snap, disco, candidates, network.HTTPClient(), val)
+	go reconcileLoop(ctx, log, rost, dialer, dyn, mon, snap, disco, candidates, network.HTTPClient(), mgr, val)
 	return dyn, ln, self, mon, snap, nil
 }
 
@@ -376,7 +389,7 @@ func addrOfMax(core []uint64, members []roster.Member) string {
 // exactly one writer on the register at steady state, so reconfiguration is not
 // starved by dueling reads. The range is re-placed when the membership epoch
 // advances, on driver and follower alike.
-func reconcileLoop(ctx context.Context, log *slog.Logger, rost *roster.Roster, dialer *overlayDialer, dyn *dynamicProposer, mon *healthMonitor, snap *rosterSnap, disco roster.Discovery, candidates func() []roster.Member, hc *http.Client, val roster.Value) {
+func reconcileLoop(ctx context.Context, log *slog.Logger, rost *roster.Roster, dialer *overlayDialer, dyn *dynamicProposer, mon *healthMonitor, snap *rosterSnap, disco roster.Discovery, candidates func() []roster.Member, hc *http.Client, mgr *owner.Manager, val roster.Value) {
 	ctrl := roster.NewController(rost).EnableCoreReconfig(roster.RegisterRF)
 	self := dialer.self
 	epoch := val.Epoch
@@ -408,12 +421,20 @@ func reconcileLoop(ctx context.Context, log *slog.Logger, rost *roster.Roster, d
 					log.Warn("roster reconcile", "err", err)
 					continue
 				}
-				cur = applyView(log, dialer, dyn, snap, mon, cur, v, &epoch, "driver")
+				cur = applyView(log, dialer, dyn, snap, mon, mgr, cur, v, &epoch, "driver")
 			} else if v, ok := fetchCoreHint(ctx, hc, fetchTargets(candidates(), cur.Members)); ok && len(v.Core) > 0 {
 				// Follower: adopt the driver's view without touching consensus, so
 				// it can take over cleanly if it later becomes the driver.
 				rost.AdoptCore(v.Core)
-				cur = applyView(log, dialer, dyn, snap, mon, cur, v, &epoch, "follower")
+				cur = applyView(log, dialer, dyn, snap, mon, mgr, cur, v, &epoch, "follower")
+			}
+			// Ownership grants ride the reconcile cadence: renew the session,
+			// acquire/release range locks per current HRW eligibility. Never on
+			// the write path; failures cost fast-path coverage, not correctness.
+			if mgr != nil {
+				if err := mgr.Maintain(ctx, placeRange(cur)); err != nil {
+					log.Warn("owner maintain", "err", err)
+				}
 			}
 		}
 	}
@@ -438,7 +459,7 @@ func reconcileLoopReadOnly(ctx context.Context, log *slog.Logger, rost *roster.R
 				continue
 			}
 			rost.AdoptCore(v.Core)
-			cur = applyView(log, dialer, dyn, snap, nil, cur, v, &epoch, "client")
+			cur = applyView(log, dialer, dyn, snap, nil, nil, cur, v, &epoch, "client")
 		}
 	}
 }
@@ -446,14 +467,14 @@ func reconcileLoopReadOnly(ctx context.Context, log *slog.Logger, rost *roster.R
 // applyView records a freshly observed roster value: it updates the snapshot,
 // learns member addresses, and — when the membership epoch advanced — re-places
 // the range and forgets departed peers. It returns the value as the new current.
-func applyView(log *slog.Logger, dialer *overlayDialer, dyn *dynamicProposer, snap *rosterSnap, mon *healthMonitor, prev, v roster.Value, epoch *uint64, who string) roster.Value {
+func applyView(log *slog.Logger, dialer *overlayDialer, dyn *dynamicProposer, snap *rosterSnap, mon *healthMonitor, mgr *owner.Manager, prev, v roster.Value, epoch *uint64, who string) roster.Value {
 	snap.store(v)
 	dialer.learn(v.Members)
 	if v.Epoch != *epoch {
 		if mon != nil {
 			mon.forget(departed(prev.Members, v.Members))
 		}
-		dyn.set(routerFor(dialer.self, v, dialer))
+		dyn.set(routerFor(dialer.self, v, dialer, mgr))
 		log.Info("roster changed; range re-placed", "by", who, "epoch", v.Epoch, "members", len(v.Members), "core", v.Core)
 		*epoch = v.Epoch
 	}
@@ -490,9 +511,15 @@ func departed(old, cur []roster.Member) []uint64 {
 	return gone
 }
 
-// routerFor builds a range router for self over the placement computed from val.
-func routerFor(self uint64, val roster.Value, dialer *overlayDialer) *agent.Router {
-	return agent.NewRouter(self, placeRange(val), dialer)
+// routerFor builds a range router for self over the placement computed from
+// val, with contention backoff and — when an ownership manager exists — the
+// W1 1-RTT fast path.
+func routerFor(self uint64, val roster.Value, dialer *overlayDialer, mgr *owner.Manager) *agent.Router {
+	opts := []agent.RouterOption{agent.WithBackoff(contentionBackoff())}
+	if mgr != nil {
+		opts = append(opts, agent.WithFastPath(mgr))
+	}
+	return agent.NewRouter(self, placeRange(val), dialer, opts...)
 }
 
 // placeRange builds the one-range map whose replicas are chosen by zone-aware

@@ -32,6 +32,14 @@ type Dialer interface {
 	Acceptor(node uint64) (caspaxos.AcceptorClient, bool)
 }
 
+// FastProposer is an optional 1-RTT write path consulted before the full
+// two-phase round (satisfied by *owner.Manager). handled=false means the full
+// path must run; a handled result is final. The seam keeps mvcc/lease/roster
+// untouched: they see the same Proposer interface either way.
+type FastProposer interface {
+	FastPropose(ctx context.Context, key []byte, change caspaxos.ChangeFunc) (val []byte, handled bool, err error)
+}
+
 // StaticDialer is a fixed node-id -> acceptor mapping.
 type StaticDialer map[uint64]caspaxos.AcceptorClient
 
@@ -50,6 +58,7 @@ type Router struct {
 	rmap    *ranges.Map
 	dialer  Dialer
 	backoff func(ctx context.Context, attempt int) error
+	fast    FastProposer
 
 	mu    sync.Mutex
 	cache map[uint64]cachedProposer // by range id
@@ -69,6 +78,12 @@ func WithBackoff(f func(ctx context.Context, attempt int) error) RouterOption {
 	return func(r *Router) { r.backoff = f }
 }
 
+// WithFastPath consults fp before every full round (the W1 ownership fast
+// path). Nil disables it.
+func WithFastPath(fp FastProposer) RouterOption {
+	return func(r *Router) { r.fast = fp }
+}
+
 // NewRouter returns a Router for agent id over the given range map and dialer.
 func NewRouter(id uint64, rmap *ranges.Map, dialer Dialer, opts ...RouterOption) *Router {
 	r := &Router{id: id, rmap: rmap, dialer: dialer, cache: make(map[uint64]cachedProposer)}
@@ -78,8 +93,16 @@ func NewRouter(id uint64, rmap *ranges.Map, dialer Dialer, opts ...RouterOption)
 	return r
 }
 
-// Propose routes key to its range and runs the round there.
+// Propose routes key to its range and runs the round there — via the 1-RTT
+// fast path when an ownership grant covers the key, falling back to the full
+// two-phase round otherwise. A fast-path miss is never an error: the full
+// path is always correct (and fences out a stale owner as a side effect).
 func (r *Router) Propose(ctx context.Context, key []byte, change caspaxos.ChangeFunc) ([]byte, error) {
+	if r.fast != nil {
+		if val, handled, err := r.fast.FastPropose(ctx, key, change); handled {
+			return val, err
+		}
+	}
 	d, ok := r.rmap.Lookup(key)
 	if !ok {
 		return nil, ErrNoRange

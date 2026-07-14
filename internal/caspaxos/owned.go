@@ -107,6 +107,14 @@ func (p *OwnedProposer) TakeOwnership(ctx context.Context, key []byte, epoch uin
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// Idempotent for the current epoch: a caller that lost a race to another
+	// goroutine's successful take must not re-prepare at the same epoch — the
+	// acceptors' strict-greater promise check would reject its own ballot as a
+	// self-conflict and falsely depose the owner.
+	if p.owning && p.epoch == epoch {
+		return nil
+	}
+
 	p.epoch, p.seq = epoch, 0
 	b := p.ballot()
 

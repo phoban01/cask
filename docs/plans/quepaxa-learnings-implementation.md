@@ -212,6 +212,35 @@ owner/non-owner writes pass the `contention` profile seed budget; bench
 sim network; lock/session churn during a 100-round ownership-flapping scenario never
 violates S1/S2/S11/S13.
 
+**Implementation notes (landed 2026-07-14).** As designed, plus three things
+the tests surfaced:
+
+- **Retry-after-bump is load-bearing, not an optimization.** A fence-bump
+  followed by a full-path fallback livelocks against ITSELF: the fallback
+  write epoch-jumps into exactly the epoch the manager just bumped to, and
+  being minted by the same node id, the next TakeOwnership collides with it
+  (equal ballot) and forces another bump, forever. FastPropose therefore
+  retries the fast path once after a successful bump — the retried take
+  lands cleanly because nothing occupied the fresh epoch's boundary.
+- **TakeOwnership is now idempotent per epoch** (`owning && epoch == e` →
+  no-op): concurrent writers racing to the first take would otherwise
+  re-prepare at the same epoch and be rejected by their own promise — a
+  false self-deposition. Combined with the rule that every take/write
+  failure funnels through a strictly-fence-raising recovery, retries can
+  never self-conflict with residue from failed attempts.
+- **Recursion guard**: control-plane sessions/locks ride the same dynamic
+  proposer the manager serves; FastPropose declines ownership-lock keys
+  (`\x00lock\x00rown/` prefix) so lock traffic cannot re-enter the manager.
+  Covered by a test wiring the exact production shape (late-bound proposer).
+- Grant lifecycle rides the reconcile loop (`Maintain`: session renew, HRW
+  eligibility, descriptor-epoch invalidation); never on the write path.
+  Telemetry (fast writes / fallbacks / bumps / grants) feeds the deferred
+  bandit-placement idea. The gate now runs every profile through BOTH
+  topologies (`MVCCWorkload` and `OwnershipWorkload`).
+- Test hygiene note: W2's early-quorum return means phase RPCs can land
+  after the call returns — wire-counting tests must drain stragglers before
+  resetting counters.
+
 ---
 
 ## W2 — Parallel fan-out, early-quorum return, cancellation

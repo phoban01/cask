@@ -11,28 +11,35 @@ import (
 )
 
 // The gate must run clean on the believed-correct code across many seeds and
-// every runnable profile.
+// every runnable profile — through both the plain full-round topology and the
+// W1 ownership fast-path topology.
 func TestGateCleanAcrossProfiles(t *testing.T) {
+	workloads := map[string]sim.Workload{
+		"":      sim.MVCCWorkload{NumKeys: 4},
+		"owned": sim.OwnershipWorkload{NumKeys: 4},
+	}
 	for name, profile := range sim.Profiles() {
-		profile := profile
-		t.Run(name, func(t *testing.T) {
-			v, err := sim.Run(context.Background(), sim.GateConfig{
-				SeedStart: 1,
-				SeedCount: 60,
-				Profile:   profile,
-				Faults:    faults.ForProfile(profile),
-				Workload:  sim.MVCCWorkload{NumKeys: 4},
-				NewStores: storeFactory(profile),
-				Heal:      func(s *sim.Sim) { s.Net.Heal(); faults.HealStores(s) },
-				Rounds:    40,
+		for suffix, wl := range workloads {
+			profile, wl := profile, wl
+			t.Run(name+suffix, func(t *testing.T) {
+				v, err := sim.Run(context.Background(), sim.GateConfig{
+					SeedStart: 1,
+					SeedCount: 60,
+					Profile:   profile,
+					Faults:    faults.ForProfile(profile),
+					Workload:  wl,
+					NewStores: storeFactory(profile),
+					Heal:      func(s *sim.Sim) { s.Net.Heal(); faults.HealStores(s) },
+					Rounds:    40,
+				})
+				if err != nil {
+					t.Fatalf("gate run error: %v", err)
+				}
+				if v != nil {
+					t.Fatalf("unexpected invariant violation: %s\ntrace:\n%v", v, v.Trace)
+				}
 			})
-			if err != nil {
-				t.Fatalf("gate run error: %v", err)
-			}
-			if v != nil {
-				t.Fatalf("unexpected invariant violation: %s\ntrace:\n%v", v, v.Trace)
-			}
-		})
+		}
 	}
 }
 

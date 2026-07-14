@@ -62,7 +62,7 @@ func TestPlacementRoutedConsensus(t *testing.T) {
 	self := desc.Replicas[0]
 	dialer, _ := testDialer(self, members)
 	dyn := &dynamicProposer{}
-	dyn.set(routerFor(self, val, dialer))
+	dyn.set(routerFor(self, val, dialer, nil))
 
 	if _, err := dyn.Propose(ctx, []byte("k"), caspaxos.Write([]byte("hello"))); err != nil {
 		t.Fatalf("propose: %v", err)
@@ -78,7 +78,7 @@ func TestPlacementRoutedConsensus(t *testing.T) {
 	// Re-placing the range under a new epoch keeps reads consistent (same
 	// replicas, bumped epoch invalidates the router's proposer cache).
 	val.Epoch = 2
-	dyn.set(routerFor(self, val, dialer))
+	dyn.set(routerFor(self, val, dialer, nil))
 	got, err = dyn.Propose(ctx, []byte("k"), caspaxos.Identity)
 	if err != nil || string(got) != "hello" {
 		t.Fatalf("read after re-place = %q err=%v", got, err)
