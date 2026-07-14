@@ -36,9 +36,14 @@ func TestReconfigurationProperties(t *testing.T) {
 }
 
 // scenario is one randomized run over a private sim network. Node id == sim
-// acceptor index (0..n-1). reader is a non-member handle with a very high id, so
-// its read ballots dominate any writer's and it always observes the latest
-// committed value regardless of which subset the core currently is.
+// acceptor index (0..n-1). reader is a non-member handle with a very high id,
+// so its read ballots dominate any writer's. It reads via the tracked believed
+// core (like a real client), not via all n acceptors: a quorum over a superset
+// group does not necessarily intersect the register's real core quorums, so an
+// all-nodes read could return stale state — the pre-W2 sequential proposer
+// masked this by happening to collect every reply before returning, but the
+// W2 early-quorum return makes the mismatched-group read the protocol
+// violation it always was.
 type scenario struct {
 	t      *testing.T
 	seed   int64
@@ -49,6 +54,7 @@ type scenario struct {
 	hs     map[uint64]*Roster
 	reader *Roster
 	want   map[uint64]bool
+	core   []uint64 // last observed acceptor core (the reader's belief)
 }
 
 func newScenario(t *testing.T, seed int64, rf int) *scenario {
@@ -90,6 +96,7 @@ func (s *scenario) run() {
 		s.t.Fatalf("seed %d: founder: %v", s.seed, err)
 	}
 	s.want[0] = true
+	s.core = []uint64{0}
 
 	rng := rand.New(rand.NewSource(s.seed))
 	steps := 4 + rng.Intn(12)
@@ -165,17 +172,19 @@ func (s *scenario) check(ctx context.Context) {
 }
 
 // read returns the current register value via the high-id reader against the
-// full node set (all reachable here, so the highest accepted ballot — held by
-// the current core — is always observed).
+// tracked believed core, then updates the belief from the value read — the
+// production client pattern (AdoptCore from a snapshot, refresh on read).
+// This is sound in the test's lockstep flow: a release commits under a joint
+// quorum, so a read via the pre-release core still observes it and learns the
+// new core before the next write happens.
 func (s *scenario) read(ctx context.Context) Value {
-	all := make([]uint64, s.n)
-	for i := range all {
-		all[i] = uint64(i)
-	}
-	s.reader.AdoptCore(all)
+	s.reader.AdoptCore(append([]uint64(nil), s.core...))
 	v, err := s.reader.Get(ctx)
 	if err != nil {
 		s.t.Fatalf("seed %d: read: %v", s.seed, err)
+	}
+	if len(v.Core) > 0 {
+		s.core = append([]uint64(nil), v.Core...)
 	}
 	return v
 }

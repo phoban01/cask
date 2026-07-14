@@ -110,25 +110,37 @@ func (p *OwnedProposer) TakeOwnership(ctx context.Context, key []byte, epoch uin
 	p.epoch, p.seq = epoch, 0
 	b := p.ballot()
 
+	n := len(p.acceptors)
+	pctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	replies := fanout(pctx, n, func(ctx context.Context, i int) (PrepareReply, error) {
+		return p.acceptors[i].Prepare(ctx, key, b)
+	})
+
 	var (
 		promised int
+		pending  = n
 		best     Ballot
 		value    []byte
 		conflict Ballot
 	)
-	for _, ac := range p.acceptors {
-		reply, err := ac.Prepare(ctx, key, b)
-		if err != nil {
-			continue
+	for range n {
+		r := <-replies
+		pending--
+		switch {
+		case r.err != nil:
+			// unreachable acceptor: a non-vote
+		case !r.v.Promised:
+			conflict = conflict.Max(r.v.Conflict)
+		default:
+			promised++
+			if best.Less(r.v.Accepted) {
+				best = r.v.Accepted
+				value = r.v.Value
+			}
 		}
-		if !reply.Promised {
-			conflict = conflict.Max(reply.Conflict)
-			continue
-		}
-		promised++
-		if best.Less(reply.Accepted) {
-			best = reply.Accepted
-			value = reply.Value
+		if promised >= p.quorum() || promised+pending < p.quorum() {
+			break // decided either way; cancel the stragglers
 		}
 	}
 	if promised < p.quorum() {
@@ -172,18 +184,33 @@ func (p *OwnedProposer) Write(ctx context.Context, key []byte, change ChangeFunc
 
 	p.seq++
 	b := p.ballot()
-	accepts := 0
-	var conflict Ballot
-	for _, ac := range p.acceptors {
-		reply, aerr := ac.Accept(ctx, key, b, next)
-		if aerr != nil {
-			continue
+
+	n := len(p.acceptors)
+	pctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	replies := fanout(pctx, n, func(ctx context.Context, i int) (AcceptReply, error) {
+		return p.acceptors[i].Accept(ctx, key, b, next)
+	})
+
+	var (
+		accepts  int
+		pending  = n
+		conflict Ballot
+	)
+	for range n {
+		r := <-replies
+		pending--
+		switch {
+		case r.err != nil:
+			// unreachable acceptor: a non-vote
+		case !r.v.Accepted:
+			conflict = conflict.Max(r.v.Conflict)
+		default:
+			accepts++
 		}
-		if !reply.Accepted {
-			conflict = conflict.Max(reply.Conflict)
-			continue
+		if accepts >= p.quorum() || accepts+pending < p.quorum() {
+			break
 		}
-		accepts++
 	}
 	if accepts < p.quorum() {
 		p.owning = false // a newer owner exists; force re-acquire

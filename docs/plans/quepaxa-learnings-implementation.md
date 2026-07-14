@@ -261,6 +261,29 @@ roadmap §3.6 already names early-quorum as the fix.
 50 ms × 2 phases). With 1-of-3 crashed, Propose completes in ~1 quorum RTT per phase,
 not 4 s. `consensus` profile passes; `go test -race ./internal/caspaxos/...` clean.
 
+**Implementation notes (landed 2026-07-14).** As specified, plus what landing
+it surfaced:
+
+- The buggify hook now has its own seeded, mutex-guarded RNG stream and an
+  atomic hook slot (`buggify.SetHook`): acceptor-side sites fire from fan-out
+  workers, which would have raced both the shared adversary RNG and the
+  scenario-swap of the hook global. Stream isolation is a strict improvement —
+  buggify draw counts can no longer perturb the fault schedule.
+- Early-quorum return exposed a latent protocol misuse in
+  `roster/property_test.go`: its reader proposed over ALL nodes while the
+  register's group was the 3-node core; a 4-of-7 quorum need not intersect a
+  2-of-3 core quorum. The sequential proposer masked it by collecting every
+  reply. The test now reads via a tracked believed core — the production
+  client pattern. Lesson recorded: **a proposer's group must be the
+  register's group**; superset reads were never sound.
+- Impossibility detection (`quorumStillPossible`) fails a phase as soon as a
+  group provably cannot reach quorum — a fully-down joint group no longer
+  waits out the stragglers.
+- New latency regression tests: a blocked (not yet timed-out) peer and a
+  300 ms-slow replica are both off the critical path for `Propose` and
+  `OwnedProposer.Write`; early-quorum value carry is asserted against a slow
+  value-holder; joint impossibility fails fast.
+
 ---
 
 ## W3 — Randomized backoff on preemption

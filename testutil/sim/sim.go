@@ -25,11 +25,20 @@ import (
 // determinism is deferred until a bug proves the concurrent gate insufficient.
 //
 // RNG is NOT goroutine-safe and is deliberately unguarded: every consumer (the
-// gate loop's fault scheduling, fault Inject methods, the workload round, the
-// buggify hook) runs serially on the gate goroutine. "Interleaving is
-// uncontrolled" refers to protocol-internal goroutines, which must never touch
-// the adversary's state — do not pass RNG (or anything derived from it) into
-// code that runs concurrently with the round.
+// gate loop's fault scheduling, fault Inject methods, the workload round) runs
+// serially on the gate goroutine. "Interleaving is uncontrolled" refers to
+// protocol-internal goroutines, which must never touch the adversary's state —
+// do not pass RNG (or anything derived from it) into code that runs
+// concurrently with the round.
+//
+// The buggify hook does NOT draw from RNG: since the W2 concurrent fan-out,
+// acceptor-side sites fire from worker goroutines, so the hook has its own
+// seeded, mutex-guarded stream (see InstallBuggify). Isolating the streams
+// also means buggify draw counts can never perturb the fault/workload
+// schedule. Proposer-side sites are pre-drawn serially per the concurrency
+// rule in internal/buggify, keeping them fully deterministic; acceptor-side
+// draw order is schedule-dependent — the documented residual limit of the
+// concurrent gate.
 type Sim struct {
 	Seed     int64
 	RNG      *rand.Rand

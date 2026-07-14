@@ -21,10 +21,10 @@ func TestMaybeConsultsHook(t *testing.T) {
 
 	var gotName string
 	var gotProb float64
-	buggify.Hook = func(name string, prob float64) bool {
+	buggify.SetHook(func(name string, prob float64) bool {
 		gotName, gotProb = name, prob
 		return true
-	}
+	})
 	if !buggify.Maybe("site_a", 0.25) {
 		t.Fatal("Maybe should return the hook's true decision")
 	}
@@ -32,7 +32,7 @@ func TestMaybeConsultsHook(t *testing.T) {
 		t.Fatalf("hook saw (%q, %v), want (site_a, 0.25)", gotName, gotProb)
 	}
 
-	buggify.Hook = func(string, float64) bool { return false }
+	buggify.SetHook(func(string, float64) bool { return false })
 	if buggify.Maybe("site_a", 1.0) {
 		t.Fatal("Maybe should return the hook's false decision")
 	}

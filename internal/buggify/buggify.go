@@ -17,16 +17,48 @@
 // one-directional: testutil/sim assigns Hook and reads [Declared]; this package
 // must never import testutil/sim (or any protocol package), so that protocol
 // code importing buggify stays clean and cheap.
+//
+// # Concurrency rule
+//
+// Code that fans work out to goroutines (the W2 proposer phases) MUST pre-draw
+// its Maybe decisions serially on the goroutine that owns the operation,
+// before spawning workers — never call Maybe from inside them. Sites that
+// inherently fire on concurrent goroutines (acceptor-side sites, reached via
+// concurrent RPC handling) are tolerated: the simulator's hook serializes
+// draws on its own dedicated RNG stream, so they are race-free — but their
+// draw ORDER is schedule-dependent, which weakens replay determinism for
+// those sites. Pre-drawing keeps every proposer-side site on the
+// deterministic serial stream.
 package buggify
 
-import "sort"
+import (
+	"sort"
+	"sync/atomic"
+)
 
-// Hook, when non-nil, decides whether a [Maybe] site fires. The simulator
-// installs it; production never sets it. It returns true to make the call site
+// HookFunc decides whether a [Maybe] site fires. The simulator installs one
+// via [SetHook]; production never does. It returns true to make the call site
 // take the "cruel" path. The name identifies the site for the simulator's
 // report and the fault catalog; prob is the site's default firing probability,
 // which the simulator may override per fault profile.
-var Hook func(name string, prob float64) bool
+type HookFunc func(name string, prob float64) bool
+
+// hook holds the installed HookFunc atomically: cancelled fan-out worker
+// goroutines (W2) can still be inside an acceptor call — and hence inside
+// Maybe — while the simulator tears one scenario down and installs the next,
+// so the swap must not race the readers. A straggler that observes the next
+// scenario's hook merely draws from that scenario's independent buggify
+// stream (harmless); after Reset it draws nothing.
+var hook atomic.Pointer[HookFunc]
+
+// SetHook installs f as the process-wide buggify decider (nil uninstalls).
+func SetHook(f HookFunc) {
+	if f == nil {
+		hook.Store(nil)
+		return
+	}
+	hook.Store(&f)
+}
 
 // SiteInfo describes a buggify site declared via [Register].
 type SiteInfo struct {
@@ -56,10 +88,11 @@ var declared = map[string]SiteInfo{}
 //	    continue // treat this acceptor's reply as a non-vote
 //	}
 func Maybe(name string, prob float64) bool {
-	if Hook == nil {
+	h := hook.Load()
+	if h == nil {
 		return false
 	}
-	return Hook(name, prob)
+	return (*h)(name, prob)
 }
 
 // Register declares a buggify site so the simulator knows the full site set at
@@ -87,6 +120,6 @@ func Declared() []SiteInfo {
 	return out
 }
 
-// Reset clears the installed Hook (used by the simulator between scenarios).
+// Reset clears the installed hook (used by the simulator between scenarios).
 // Declared sites are compile-time constants and persist across scenarios.
-func Reset() { Hook = nil }
+func Reset() { hook.Store(nil) }

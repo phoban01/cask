@@ -120,6 +120,25 @@ func (p *Proposer) quorumInAllGroups(ok []bool) bool {
 	return true
 }
 
+// quorumStillPossible reports whether every group could still reach a
+// majority, counting undecided acceptors as potential yes-votes. When it
+// turns false the phase has already failed — waiting for stragglers can only
+// add conflicts, never votes.
+func (p *Proposer) quorumStillPossible(ok, undecided []bool) bool {
+	for _, g := range p.groups {
+		cnt := 0
+		for _, idx := range g {
+			if ok[idx] || undecided[idx] {
+				cnt++
+			}
+		}
+		if cnt < len(g)/2+1 {
+			return false
+		}
+	}
+	return true
+}
+
 // Propose runs CASPaxos for key: gather a prepare quorum (in every group), apply
 // change to the highest-accepted value, then gather an accept quorum (in every
 // group). A failed CAS still writes the current value back (completing any
@@ -167,53 +186,109 @@ func (p *Proposer) Propose(ctx context.Context, key []byte, change ChangeFunc) (
 	return nil, ErrPreempted
 }
 
-// prepare runs phase 1 and, on success (quorum in every group), returns the
-// value carried by the highest accepted ballot seen.
+// errVoteDropped marks a reply the proposer_drop_vote buggify site discarded.
+var errVoteDropped = errors.New("caspaxos: vote dropped (buggify)")
+
+// prepare runs phase 1 concurrently against every acceptor and, on success
+// (quorum in every group), returns the value carried by the highest accepted
+// ballot within the responding quorum. It returns as soon as the quorum is
+// gathered — or as soon as one is provably unreachable — and cancels the
+// stragglers; a slow or dead replica costs nothing while a quorum is healthy.
+//
+// Safety of the early return: the carried value is the max accepted over
+// exactly the promised set at return time, which is a valid prepare quorum —
+// any previously chosen value has a quorum of acceptors carrying it, and two
+// quorums always intersect, so the chosen value is represented.
 func (p *Proposer) prepare(ctx context.Context, key []byte, b Ballot) (current []byte, conflict Ballot, ok bool, err error) {
-	promised := make([]bool, len(p.acceptors))
+	n := len(p.acceptors)
+
+	// BUGGIFY: drop acceptors' votes, modelling lost replies / gray failure.
+	// Decisions are pre-drawn HERE, serially, on the operation's goroutine —
+	// never inside the fan-out workers (see the concurrency rule in
+	// internal/buggify): the round must still complete from the remaining
+	// quorum.
+	drop := make([]bool, n)
+	for i := range drop {
+		drop[i] = buggify.Maybe("proposer_drop_vote", 0.01)
+	}
+
+	pctx, cancel := context.WithCancel(ctx)
+	defer cancel() // hurry the stragglers once the phase is decided
+
+	replies := fanout(pctx, n, func(ctx context.Context, i int) (PrepareReply, error) {
+		if drop[i] {
+			return PrepareReply{}, errVoteDropped
+		}
+		return p.acceptors[i].Prepare(ctx, key, b)
+	})
+
+	promised := make([]bool, n)
+	undecided := make([]bool, n)
+	for i := range undecided {
+		undecided[i] = true
+	}
 	var best Ballot
-	for i, ac := range p.acceptors {
-		// BUGGIFY: drop one acceptor's vote, modelling a lost reply / gray
-		// failure. The round must still complete from the remaining quorum.
-		if buggify.Maybe("proposer_drop_vote", 0.01) {
-			continue
+	for range n {
+		r := <-replies
+		undecided[r.i] = false
+		switch {
+		case r.err != nil:
+			// unreachable acceptor (or a dropped vote): a non-vote
+		case !r.v.Promised:
+			conflict = conflict.Max(r.v.Conflict)
+		default:
+			promised[r.i] = true
+			if best.Less(r.v.Accepted) {
+				best = r.v.Accepted
+				current = r.v.Value
+			}
 		}
-		reply, perr := ac.Prepare(ctx, key, b)
-		if perr != nil {
-			continue // unreachable acceptor: a non-vote
+		if p.quorumInAllGroups(promised) {
+			return current, Ballot{}, true, nil
 		}
-		if !reply.Promised {
-			conflict = conflict.Max(reply.Conflict)
-			continue
-		}
-		promised[i] = true
-		if best.Less(reply.Accepted) {
-			best = reply.Accepted
-			current = reply.Value
+		if !p.quorumStillPossible(promised, undecided) {
+			return nil, conflict, false, ctx.Err()
 		}
 	}
-	if p.quorumInAllGroups(promised) {
-		return current, Ballot{}, true, nil
-	}
-	return nil, conflict, false, nil
+	return nil, conflict, false, ctx.Err()
 }
 
-// accept runs phase 2, requiring a quorum in every group.
+// accept runs phase 2 concurrently, requiring a quorum in every group, with
+// the same early-quorum return and straggler cancellation as prepare. A
+// cancelled accept may still land on a straggler later — Paxos tolerates
+// this, and the duplicate_delivery sim fault exercises the idempotency it
+// relies on.
 func (p *Proposer) accept(ctx context.Context, key []byte, b Ballot, val []byte) (conflict Ballot, ok bool, err error) {
-	accepted := make([]bool, len(p.acceptors))
-	for i, ac := range p.acceptors {
-		reply, aerr := ac.Accept(ctx, key, b, val)
-		if aerr != nil {
-			continue
-		}
-		if !reply.Accepted {
-			conflict = conflict.Max(reply.Conflict)
-			continue
-		}
-		accepted[i] = true
+	n := len(p.acceptors)
+	pctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	replies := fanout(pctx, n, func(ctx context.Context, i int) (AcceptReply, error) {
+		return p.acceptors[i].Accept(ctx, key, b, val)
+	})
+
+	accepted := make([]bool, n)
+	undecided := make([]bool, n)
+	for i := range undecided {
+		undecided[i] = true
 	}
-	if p.quorumInAllGroups(accepted) {
-		return Ballot{}, true, nil
+	for range n {
+		r := <-replies
+		undecided[r.i] = false
+		switch {
+		case r.err != nil:
+			// unreachable acceptor: a non-vote
+		case !r.v.Accepted:
+			conflict = conflict.Max(r.v.Conflict)
+		default:
+			accepted[r.i] = true
+		}
+		if p.quorumInAllGroups(accepted) {
+			return Ballot{}, true, nil
+		}
+		if !p.quorumStillPossible(accepted, undecided) {
+			return conflict, false, ctx.Err()
+		}
 	}
-	return conflict, false, nil
+	return conflict, false, ctx.Err()
 }
