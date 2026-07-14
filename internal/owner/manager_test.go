@@ -82,10 +82,42 @@ func newHarness(t *testing.T, epoch uint64) *harness {
 	return h
 }
 
-// drainStragglers lets cancelled fan-out workers from prior phases land their
-// RPCs before a counter reset: early-quorum return (W2) means a phase's last
-// replies can arrive after the call itself has returned.
-func (h *harness) drainStragglers() { time.Sleep(20 * time.Millisecond) }
+// waitCount blocks until c reaches at least want — the straggler-immune way
+// to assert wire shape: early-quorum return (W2) means a phase's last RPCs
+// can land (or even start) after the call itself has returned, so a fixed
+// sleep before a counter reset is a race. Expected totals are exact (3
+// acceptors, no vote-dropping outside the sim), so waiting for the total is
+// deterministic.
+func (h *harness) waitCount(t *testing.T, c *atomic.Int64, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for c.Load() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("counter stuck at %d, want %d", c.Load(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := c.Load(); got != want {
+		t.Fatalf("counter overshot: %d, want %d", got, want)
+	}
+}
+
+// drainStable waits until both counters stop moving (five consecutive quiet
+// 10ms windows) — for measurement windows whose preceding totals are not
+// statically known (recovery dances involve bump rounds on the lock key).
+func (h *harness) drainStable() {
+	var last [2]int64
+	stable := 0
+	for stable < 5 {
+		time.Sleep(10 * time.Millisecond)
+		cur := [2]int64{h.prepares.Load(), h.accepts.Load()}
+		if cur == last {
+			stable++
+		} else {
+			stable, last = 0, cur
+		}
+	}
+}
 
 func (h *harness) maintain(t *testing.T) {
 	t.Helper()
@@ -104,22 +136,28 @@ func TestFastPathWriteIsSingleAcceptRound(t *testing.T) {
 		t.Fatalf("grants = %d, want 1", s.Grants)
 	}
 
-	// Warm-up: first write pays the one-time TakeOwnership prepare round.
+	// Zero out Maintain's control-plane rounds (session grant, lock acquire)
+	// once they have quiesced, then warm up: the first write pays the one-time
+	// TakeOwnership prepare round (3 prepares) plus its accept round (3
+	// accepts). Waiting for the exact totals keeps stragglers out of the
+	// measured window.
+	h.drainStable()
+	h.prepares.Store(0)
+	h.accepts.Store(0)
 	if _, err := h.kv.Put(ctx, []byte("k"), []byte("v0")); err != nil {
 		t.Fatalf("warm-up put: %v", err)
 	}
+	h.waitCount(t, &h.prepares, 3)
+	h.waitCount(t, &h.accepts, 3)
 
-	h.drainStragglers()
 	h.prepares.Store(0)
 	h.accepts.Store(0)
 	if _, err := h.kv.Put(ctx, []byte("k"), []byte("v1")); err != nil {
 		t.Fatalf("put: %v", err)
 	}
+	h.waitCount(t, &h.accepts, 3) // exactly one accept round
 	if p := h.prepares.Load(); p != 0 {
 		t.Fatalf("owned write issued %d prepares, want 0 (1-RTT fast path)", p)
-	}
-	if a := h.accepts.Load(); a != 3 {
-		t.Fatalf("owned write issued %d accepts, want 3 (one accept round)", a)
 	}
 	if s := h.mgr.Stats(); s.FastWrites == 0 {
 		t.Fatal("stats recorded no fast writes")
@@ -159,11 +197,13 @@ func TestInterloperFencesThenFastPathRecovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Recovery complete: warm owned writes are prepare-free again.
-	h.drainStragglers()
+	h.drainStable()
 	h.prepares.Store(0)
+	h.accepts.Store(0)
 	if _, err := h.kv.Put(ctx, key, []byte("fast-4")); err != nil {
 		t.Fatal(err)
 	}
+	h.waitCount(t, &h.accepts, 3)
 	if p := h.prepares.Load(); p != 0 {
 		t.Fatalf("fast path did not recover: %d prepares on a warm owned write", p)
 	}
@@ -195,6 +235,7 @@ func TestCASConflictDecidedByFullPath(t *testing.T) {
 	if _, err := h.kv.Put(ctx, key, []byte("actual")); err != nil {
 		t.Fatal(err)
 	}
+	h.drainStable()
 	h.prepares.Store(0)
 	if _, err := h.kv.CAS(ctx, key, []byte("wrong"), []byte("new")); !errors.Is(err, caspaxos.ErrConflict) {
 		t.Fatalf("CAS = %v, want ErrConflict", err)
