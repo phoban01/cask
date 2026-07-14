@@ -4,12 +4,29 @@ A two-tier, leaderless, MVCC coordination store on **CASPaxos** — for leases/l
 on global resources and small metadata, with a modern no-config UX, designed to
 scale to a fleet of 10,000+ participating nodes.
 
-The full design and rationale live in the approved plan:
-`~/.claude/plans/i-would-like-to-logical-goose.md`.
+The design and rationale live in-repo:
+
+- [`docs/etcd-little-sister.md`](docs/etcd-little-sister.md) — the canonical
+  performance + scale roadmap, the decided designs (range descriptors C',
+  cross-range consistency A), and the §6.5 safety-invariant contract.
+- [`docs/confidence.md`](docs/confidence.md) — how cask earns trust (TLA+,
+  deterministic simulation, Jepsen, burn-in) and where it sits on its own
+  trust ladder today (**demo**).
+- [`docs/sim-gate.md`](docs/sim-gate.md) — the simulator release gate: what it
+  proves, what it defers, how to add faults/invariants.
+- [`docs/integration.md`](docs/integration.md) — etcd-compatible coordination
+  profile + Kubernetes aggregated API server: what maps, what doesn't, and why.
+- [`docs/plans/`](docs/plans/) — the vendored source plans (master
+  architecture, multi-cloud demo, control-plane shape) that the roadmap's §0
+  builds on.
 
 ## Status
 
-Early implementation. Built so far:
+Early implementation. One caveat applies to every durability claim below:
+the only `Storage` backend today is **in-memory** (`internal/store/mem.go`),
+so "crash/restart" coverage is against the simulated crash model — durable
+acceptor storage (Pebble) is the gating roadmap item
+(`docs/etcd-little-sister.md` §3.0). Built so far:
 
 - **M0 — safety specs** (`tla/`): `CasPaxosMvcc.tla` (consensus agreement) and
   `Lease.tla` (single-holder + fencing monotonicity). Spec-first; require TLC to
@@ -125,9 +142,21 @@ curl -XPOST 'localhost:8001/session/me?ttl=30'
 curl -XPOST 'localhost:8001/lock/widget?session=me'   # -> {"token":1}
 ```
 
-This is the **static-membership** path (a permanent backend). Inter-node
-consensus rides **ConnectRPC** (protobuf) by default; `--transport http` selects
-the interim JSON path. The client KV/lock API stays HTTP/JSON.
+This is the **static-membership** path. Inter-node consensus rides
+**ConnectRPC** (protobuf) by default; `--transport http` selects the interim
+JSON path. The client KV/lock API stays HTTP/JSON.
+
+> **Security posture (read before exposing a port).** On this static-TCP path
+> consensus is **plaintext and unauthenticated** — anyone who can inject traffic
+> between nodes can forge Prepare/Accept replies and break consensus safety. It
+> is for local/dev/CI and trusted-network use only. For any real deployment use
+> the Nebula overlay below, where consensus rides an encrypted, mutually
+> cert-authenticated mesh. The **client API** (`/kv`, `/lock`, `/session`) and
+> the control endpoints (`/health`, `/roster`) are unauthenticated everywhere
+> today — cask has no auth layer yet (a deliberate current limitation, see
+> `docs/confidence.md`), so bind them to localhost or the overlay, never a
+> public interface. Wire hardening (TLS-or-remove on the TCP path; client-API
+> auth) is tracked as a roadmap item.
 
 ### Self-forming over a Nebula overlay
 

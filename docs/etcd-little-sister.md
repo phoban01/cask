@@ -22,16 +22,18 @@ gate the scale claim from being a benchmark-on-localhost story.
 
 ## 0. Source plans and what is canonical here
 
-Three plan documents exist in `~/.claude/plans/`. This roadmap is the
-canonical reference for performance + scale work, but it builds on top
-of decisions already locked in by those plans:
+Three plan documents are vendored in [`docs/plans/`](plans/) (originals
+authored under `~/.claude/plans/`; the in-repo copies are canonical so
+the repo is self-contained for handoff). This roadmap is the canonical
+reference for performance + scale work, but it builds on top of
+decisions already locked in by those plans:
 
 | Plan | Date | Role | Canonical for |
 |---|---|---|---|
-| `i-would-like-to-logical-goose.md` | 2026-06-01 | The master architecture plan ("logical goose"). | Two-tier topology, milestones M0–M8, verification layers, language choice, the existence of TLA+ as a release gate. |
-| `warm-plotting-biscuit.md` Phase 1 | 2026-06-06 | Multi-cloud demo (implemented + live). | Cross-cloud deployment scripts under `demo/`, Nebula listen-vs-advertise split, client-only mode. |
-| `warm-plotting-biscuit.md` Phase 2 | superseded | Registry + relay control plane. | **Superseded** by nifty-globe. Do not implement. |
-| `i-was-thinking-more-nifty-globe.md` | 2026-06-06 | Stateless mint + DNS-SRV + **reflexive roster** on a dynamic Core. | **The control-plane shape**: bootstrap (founder gate), NodeID lifecycle (cert is the persistent identity), roster value shape (`{Epoch, Members, Core, Joint, ConfigGen}`), DNS-SRV discovery. |
+| [`plans/i-would-like-to-logical-goose.md`](plans/i-would-like-to-logical-goose.md) | 2026-06-01 | The master architecture plan ("logical goose"). | Two-tier topology, milestones M0–M8, verification layers, language choice, the existence of TLA+ as a release gate. |
+| [`plans/warm-plotting-biscuit.md`](plans/warm-plotting-biscuit.md) Phase 1 | 2026-06-06 | Multi-cloud demo (implemented + live). | Cross-cloud deployment scripts under `demo/`, Nebula listen-vs-advertise split, client-only mode. |
+| [`plans/warm-plotting-biscuit.md`](plans/warm-plotting-biscuit.md) Phase 2 | superseded | Registry + relay control plane. | **Superseded** by nifty-globe. Do not implement. |
+| [`plans/i-was-thinking-more-nifty-globe.md`](plans/i-was-thinking-more-nifty-globe.md) | 2026-06-06 | Stateless mint + DNS-SRV + **reflexive roster** on a dynamic Core. | **The control-plane shape**: bootstrap (founder gate), NodeID lifecycle (cert is the persistent identity), roster value shape (`{Epoch, Members, Core, Joint, ConfigGen}`), DNS-SRV discovery. **Status: Work Items 1–4 implemented in commit `4d82117` (2026-06-08).** WI1 certgen split (`internal/transport/nebula/certgen.go`); WI2 `cask mint` + enrollment (`cmd/cask/mint*.go`); WI3 DNS-SRV (`internal/discovery/srv.go`); WI4 reflexive roster reconfig (`internal/roster/roster.go` extended + `internal/roster/reconfig.go` new). `tla/RosterReconfig.tla` proves the reflexive case (`NoLostMembership`, `AlwaysAvailable`). |
 | `docs/etcd-little-sister.md` | 2026-06-06 | This document. | Performance + scale roadmap, range-descriptor placement (C'), cross-range consistency (A), invariants list, TLA+ specs added for §4.3 and §4.4. |
 
 **Where this doc supersedes the master plan:** the master plan said
@@ -139,10 +141,12 @@ Directories that matter most for this roadmap:
 | `internal/agent/`                 | `Router` — routes a key to its range's proposer.              |
 | `internal/membership/`            | HyParView + Plumtree.                                         |
 | `internal/failure/`               | Phi-accrual + Rapid cut detector.                             |
-| `internal/roster/`                | Consensus membership register + Controller.                   |
+| `internal/roster/`                | Consensus membership register + reflexive reconfig (`{Epoch, Members, Core, Joint, ConfigGen}` value, `Reconfigure` 3-step over the roster key per nifty-globe WI4, commit `4d82117`). |
 | `internal/reconfig/`              | Joint-consensus carry-forward for range reconfig.             |
-| `cmd/cask/`                       | Runnable single binary; static + overlay wiring.              |
-| `tla/`                            | TLA+ safety specs (per-register, lease, reconfig).            |
+| `internal/discovery/`             | DNS-SRV `roster.Discovery` adapter (nifty-globe WI3, commit `4d82117`). |
+| `cmd/cask/mint.go`, `mint_client.go` | Stateless `cask mint` CA + enrollment client (nifty-globe WI2, commit `4d82117`). |
+| `cmd/cask/`                       | Runnable single binary; static + overlay + founder-bootstrap (`--bootstrap`) + mint enrollment wiring. |
+| `tla/`                            | TLA+ safety specs (per-register, lease, per-range reconfig, **reflexive roster reconfig**, range descriptors, cross-range). |
 
 Two facts that drive most of the optimizations below:
 
@@ -530,17 +534,22 @@ semantics across the rmap refresh.
 
 ### 4.2 — Persistent NodeID (via cert persistence)
 
+**Status (2026-06-08):** `cask mint` and the enrollment client are
+**implemented** in commit `4d82117` (`cmd/cask/mint.go`,
+`mint_client.go`). The minting flow exists. **Remaining work** is the
+cert-persistence-to-disk discipline at PR #1 scope.
+
 **Problem.** `nebula/discovery.go:115-138` derives `NodeID` from the
 overlay IP. If the node's overlay IP changes on restart, it shows up
 as a new roster member; the old member must be cut-detected and
 removed; in-flight leases bound to the old NodeID are reaped.
 
-**Fix (per nifty-globe Work Item 2).** Persistence is the **minted
-cert**: a node ships with `--mint <url> --token --zone --role` (or
-loads a pre-minted cert from disk). After the first `cask mint` call
-the node writes the cert+key to disk; on every subsequent start it
-loads them, getting the **same overlay IP and therefore the same
-NodeID**. The cert is the persistent identity.
+**Fix (per nifty-globe Work Item 2 — design and primary code landed).**
+Persistence is the **minted cert**: a node ships with `--mint <url>
+--token --zone --role` (or loads a pre-minted cert from disk). After
+the first `cask mint` call the node writes the cert+key to disk; on
+every subsequent start it loads them, getting the **same overlay IP
+and therefore the same NodeID**. The cert is the persistent identity.
 
 Trade-off (accept, document): a node that **loses its cert** (data-dir
 wiped) and re-mints becomes a **new** node. The stale NodeID ages out
@@ -548,17 +557,18 @@ via the failure detector and is removed from the roster. There is no
 "recover my old NodeID" path — and nor should there be, because the
 cert key is the security boundary.
 
-**Files.**
+**Remaining files.**
 
 - `cmd/cask/main.go` — `enroll()` writes cert+key to `<data-dir>/cert/`
-  on first mint; loads from disk on every subsequent start.
+  on first mint; loads from disk on every subsequent start. (Mint flow
+  exists; persistence wiring is the gap.)
 - `internal/transport/nebula/discovery.go` — no change; identity
   derivation from overlay IP is correct, just stable now.
 - `internal/roster/controller.go` — already idempotent on
   `Add(self)` (nifty-globe §c); no change.
 
-**Depends on:** §3.0 (need a data dir to write the cert to), and
-nifty-globe Work Item 2 (`cask mint`).
+**Depends on:** §3.0 (need a data dir to write the cert to). Nifty-globe
+Work Item 2 dependency is **satisfied** by commit `4d82117`.
 
 **Out of scope:** the UUID-in-data-dir approach previously considered
 here is dropped — cert persistence is simpler and aligns with the
@@ -739,9 +749,14 @@ makes the trigger decision; we wire it to the orchestrator.
 - §4.1 (`ErrRangeChanged` plumbed through the proposer error space).
 - §3.0 (descriptors are CASPaxos registers; Core members need durable
   storage for them — same Pebble store the roster uses).
-- nifty-globe Work Item 4 (reflexive roster on a dynamic Core). The
-  Core concept must exist in `internal/roster` before §4.3 can wire
-  descriptors onto it.
+- nifty-globe Work Item 4 (reflexive roster on a dynamic Core).
+  **Satisfied** by commit `4d82117`: `internal/roster/roster.go` now
+  carries `{Epoch, Members, Core, Joint, ConfigGen}`,
+  `internal/roster/reconfig.go` implements the 3-step joint reconfig,
+  and `tla/RosterReconfig.tla` proves `NoLostMembership` and
+  `AlwaysAvailable`. §4.3 work can now extend the value with
+  `RangeIDs []uint64` and reuse the same reconfig machinery for
+  descriptor registers.
 
 #### Sub-decisions deferred to implementation
 
@@ -958,17 +973,18 @@ small items make it complete.
 
 ### 5.1 — DNS-SRV discovery backend
 
-**Spec is canonical in nifty-globe Work Item 3** — the design,
-including the `Unmap()` requirement, identity derivation from overlay
-IPs, error propagation, and union-with-seeds dedup, is already
-specified there. This roadmap item is a pointer to that spec, not a
-duplicate. Implement as written.
+**Status (2026-06-08): SHIPPED** in commit `4d82117`.
+`internal/discovery/srv.go` (116 LOC) + `srv_test.go` (143 LOC)
+implement `SRVDiscovery` per nifty-globe Work Item 3, including the
+`Unmap()` requirement and identity derivation via
+`nebula.NodeIDFromIP`. `internal/transport/nebula/discovery.go`
+exports `NodeIDFromIP` as a single-sourced cluster contract.
 
-**Files.** `internal/discovery/srv.go` (new, per nifty-globe);
-`cmd/cask/cluster.go` behind `--discovery-srv <domain>`; export
-`nebula.NodeIDFromIP`.
+**Remaining (small):** the `--discovery-srv <domain>` flag wiring in
+`cmd/cask/cluster.go` if not yet plumbed through to the reconcile
+loop's union-with-seeds discovery — verify before checking off.
 
-**Depends on:** nothing structural — can land independently.
+This item is otherwise complete.
 
 ---
 
@@ -990,6 +1006,106 @@ are reachable through gateway nodes that bridge two overlays.
 
 **This is exploratory** — write a design doc in `docs/federation.md`
 before code.
+
+---
+
+### 5.4 — Wire hardening: secure the non-overlay path + client API **[gates "internal critical"]**
+
+**Status.** Not started. Gating for any deployment off a fully-trusted
+network — and for the "internal critical" rung of the trust ladder
+(`docs/confidence.md`).
+
+**Problem.** Two distinct exposures (surfaced by the networking review,
+2026-06-10):
+
+1. **Plaintext, unauthenticated consensus on the static-TCP path**
+   (`--peers`, both `--transport http` and ConnectRPC-over-TCP). An
+   attacker who can inject between nodes can forge Prepare/Accept
+   replies and break CASPaxos agreement (invariant S1) — not a bug, an
+   unprotected channel. The Nebula overlay path is unaffected (Noise +
+   mutual cert auth).
+2. **No auth anywhere on the client API** (`/kv`, `/lock`, `/session`)
+   or the control endpoints (`/health`, `/roster`). Anyone who can
+   reach the port can read/write keys, take locks, or feed false
+   suspicion into the cut detector. `confidence.md` records "no auth
+   layer" as a current policy limitation; this item is where it gets a
+   plan.
+
+**Fix (two independent pieces; either can land alone).**
+
+- **TCP consensus:** either (a) require TLS on the `Network` seam when
+  not on the overlay (peer certs from the same mint CA as Nebula), or
+  (b) drop the bare-TCP consensus path entirely and make the overlay
+  the only multi-node transport, keeping static-TCP as a localhost/CI
+  convenience explicitly documented as insecure. **Recommend (b)** —
+  less surface, and the overlay already solves identity + encryption.
+- **Client API:** a pluggable authenticator on the HTTP handlers —
+  bearer token or mutual TLS to start; scope `/health` + `/roster` to
+  consensus participants. Keep it an interface so an external policy
+  layer can replace it (per the §1 layers framing).
+
+**Files.** `internal/transport/network.go` (TLS on the seam, or remove
+the TCP path), `cmd/cask/cluster.go` + `cmd/cask/main.go` (listener
+wiring, `--client-auth` / `--tls-*` flags), `cmd/cask/health.go`
+(scope the endpoint).
+
+**Done when.**
+
+- The static-TCP consensus path either carries TLS or is gone; the
+  README's plaintext warning is replaced by the actual posture.
+- The client API rejects unauthenticated requests when auth is
+  configured; default-deny on a non-localhost bind.
+- A Jepsen/integration test confirms a forged Accept on the wire is
+  rejected (TLS) or impossible (path removed).
+
+**Out of scope:** full RBAC / per-key ACLs (etcd-style). Cask's
+authz story is the fencing-token discipline, not key-prefix roles;
+revisit only if a workload demands it.
+
+---
+
+### 5.5 — etcd-compatible API + Kubernetes integration
+
+**Status.** Design landed in [`docs/integration.md`](integration.md);
+no code. This is the **external-layer** interop story (§1), not a core
+change.
+
+**Shape (two layers, independently build-orderable).**
+
+1. **etcd coordination profile** — a flag-gated gRPC listener speaking
+   `etcdserverpb` for the subset of etcd semantics cask maps cleanly
+   (point KV, single-key `Txn`/CAS, `Lease`, single-key + prefix
+   `Watch` with `ErrCompacted` → relist), returning `Unimplemented`
+   for multi-key `Txn` and anything needing etcd's **global revision**.
+   Lets an existing `clientv3` locks/leases/leader-election program
+   point at cask unchanged — and get fencing tokens for free.
+2. **Kubernetes aggregated API server** — an extension server
+   (`APIService` over the aggregation layer) serving cask's own
+   `coord.cask.io/v1` resources (`Lock`, `Session`, `Lease`) over the
+   same mapping. **Not** cask-as-etcd-backend: that path needs the
+   global `resourceVersion` cask lacks and would rebuild the single-
+   sequencer bottleneck. The aggregation contract is per-resource
+   watch/list, so cask's per-key `Seq` *is* a valid per-object
+   `resourceVersion`.
+
+**The governing constraint.** Both layers are per-key/per-object clean
+and cross-range-consistent only outside `MaxOffset`. Multi-object LISTs
+must be fed from `GetReadVersion` (§4.6); design resources so the hot
+path is single-object (the natural shape for locks/leases/election).
+
+**Done when.** The gRPC profile passes a Jepsen `lin-kv` + lock-fencing
+run against its own surface; the extension server serves a `Lock` CRD
+whose leader-election watch/relist works against a real kube control
+plane. Full contract + the maps/doesn't-map table in
+`docs/integration.md`.
+
+**Depends on:** §4.6 (GRV for consistent LISTs), §4.1
+(`ErrRangeChanged`), and §5.4 (don't expose either surface
+unauthenticated). Sequence after PR #2.
+
+**Out of scope:** backing the kube-apiserver via cask-as-etcd; a
+global-revision-fidelity "v3 API"; multi-key `Txn`; per-key RBAC. All
+four are structural mismatches, not missing features (§9).
 
 ---
 
@@ -1415,6 +1531,8 @@ any of these is a release-blocker.**
 | **S3** | **HLC monotonicity per range.** Within a range, HLC timestamps are strictly increasing in commit order. | per-range `HLC' > HLC` | (covered by `internal/hlc` invariants) | `internal/hlc/hlc_test.go` |
 | **S4** | **No committed value lost across reconfig.** For any sequence of joint-quorum reconfigs of a register's acceptor set, every previously chosen value remains chosen. | `NoLostValue` | `tla/Reconfig.tla` | `internal/reconfig/reconfig_test.go` |
 | **S5** | **Catch-up before release.** A reconfig may not finalize the new-only phase until every value chosen in the old config is chosen in the new config. | `CatchUpHeld` | `tla/Reconfig.tla` | same |
+| **S5.1** | **No lost membership across reflexive reconfig.** When the roster register's Core changes old → joint → new, no membership version committed under the old core is lost — by `LeaveJoint` time the latest committed value is present in the new core. The harder, reflexive-register case of S4/S5: the value advances *during* the very transition that hands the register to a new quorum. | `NoLostMembership` | **`tla/RosterReconfig.tla` (new, shipped commit `4d82117`)** | `internal/roster/reconfig_test.go`, `internal/roster/property_test.go` |
+| **S5.2** | **Always-available membership.** The latest committed membership version is always present on some currently-active configuration — the register is never stranded on a quorum that has already been left behind. | `AlwaysAvailable` | `tla/RosterReconfig.tla` | `internal/roster/reconfig_test.go` |
 | **S6** | **Single lock holder.** At any instant, at most one client holds a live lease on a given lock register. | `SingleHolder` | `tla/Lease.tla` | `internal/lease/lock_test.go`, `test/jepsen/fencing_test.go` |
 | **S7** | **Fence monotonicity.** The fencing token issued on every successful `Acquire` is strictly greater than every previously issued token for that lock — across owner preemption, range relocation, and core reconfig. | `FenceLatest`, `FenceMonotone` | `tla/Lease.tla` (extend to include carry-forward across reconfig — see TLA work below) | `test/jepsen/fencing_test.go` |
 | **S8** | **No two replica sets for one key (post-cutover).** After a split's roster cutover (§4.3 step 3), no two clients can successfully write the same key to disjoint replica sets at the same descriptor epoch. | `NoSplitBrain` | **`tla/RangeDescriptors.tla` (new — §4.3)** | `test/linearizability/split_test.go` (new) |
@@ -1430,14 +1548,25 @@ fairness assumptions; document them where they bite.
 
 **TLA+ work this section calls out:**
 
-- New `tla/RangeDescriptors.tla` — proves S8, S9, L1.
-- New `tla/CrossRange.tla` — proves S10.
+- `tla/RangeDescriptors.tla` — proves S8, S9, L1. **Shipped** in
+  commit `4d82117`.
+- `tla/CrossRange.tla` — proves S10. **Shipped** in commit `4d82117`.
+- `tla/RosterReconfig.tla` — proves S5.1 + S5.2. **Shipped** in
+  commit `4d82117`. Closes the reflexive-register gap that
+  `Reconfig.tla` alone left open.
 - Extension to `tla/Lease.tla` — add carry-forward across a range
   reconfig action so S7 is proved across the boundary, not just within
   one register. (S7 is already implemented and tested; the spec gap is
-  closing the proof loop.)
+  closing the proof loop.) **Still pending.**
 
 ## 7. What the next agent should do first
+
+**Context (2026-06-08):** commit `4d82117` shipped a substantial
+chunk of nifty-globe (mint, DNS-SRV, reflexive roster, certgen split)
+plus three TLA+ specs (`RangeDescriptors`, `CrossRange`,
+`RosterReconfig`). The roster Core now exists in real code, so the
+§4.3 prerequisite is gone — PR #2 is effectively unblocked at the
+control-plane level.
 
 The four FDB lessons (§1 layers, §4.6 GRV, §6.6 simulator gate, §6.7
 fault catalog) reshape priority. §6.6 + §6.7 are now **PR #0 — the
@@ -1445,20 +1574,26 @@ discipline that makes every subsequent PR safer**.
 
 **PR #0 (~one week): build the gate before adding more protocol code.**
 
-1. **§6.6 + §6.7** together. The current `testutil/sim` nemesis becomes
-   the seed catalog; the existing invariants become enumerable
-   predicates. The CI runs `smoke` + `consensus` profiles on every PR.
-   Capture the three historical M2 bugs as named regression scenarios.
+1. **§6.6 + §6.7 + §6.6.1 (`buggify`)** together. The current
+   `testutil/sim` nemesis becomes the seed catalog; the existing
+   invariants (plus the new S5.1/S5.2 from `RosterReconfig.tla`)
+   become enumerable predicates. The CI runs `smoke` + `consensus`
+   profiles on every PR. Capture the three historical M2 bugs as
+   named regression scenarios.
 
-   Without this, the next protocol PRs are flying blind. With it, every
-   subsequent change gets stronger as new faults accrete.
+   Without this, the next protocol PRs are flying blind. With it,
+   every subsequent change gets stronger as new faults accrete.
 
 **PR #1 (~two weeks): the foundation.**
 
 1. **§3.0 Pebble store** — unblocks §3.1, §3.2, §4.2, durable Core
-   storage for §4.3.
+   storage for §4.3. **The Core now exists** in `internal/roster`;
+   Pebble is what gives it crash-durability.
 2. **§3.1 lease-cached owner reads** — single biggest perf delta.
 3. **§4.1 ErrRangeChanged** — small, gates §4.3.
+4. **§4.2 finish** — cert persistence to `<data-dir>/cert/`. Mint
+   flow already shipped (`cmd/cask/mint.go`); this is just the
+   disk-roundtrip discipline.
 
 PR #0's gate runs against every commit of PR #1. Storage durability
 under `slow_fsync` + `crash_restart` is verified before merge.
@@ -1466,9 +1601,12 @@ under `slow_fsync` + `crash_restart` is verified before merge.
 **PR #2 (~three weeks): C' + GRV together.**
 
 1. **§4.3 range descriptors C'** — the cluster's biggest structural
-   landmark.
+   landmark. **Now unblocked**: extend the existing reflexive roster's
+   `Value` with `RangeIDs []uint64`, host descriptors on the existing
+   Core, reuse `internal/roster/reconfig.go`'s 3-step joint reconfig
+   machinery for descriptor reconfigs.
 2. **§4.6 `GetReadVersion`** — small additive API; lands here because
-   the Core (which §4.3 depends on) is what GRV queries.
+   the Core that §4.3 wires descriptors onto is what GRV queries.
 3. Add the `ranges` and `snapshot` fault profiles to §6.7 in the same
    PR.
 
@@ -1476,6 +1614,10 @@ under `slow_fsync` + `crash_restart` is verified before merge.
 
 **PR #4:** §1 layers framing in README + `docs/layers.md` with the
 external-layer recipes. No code; positioning + docs.
+
+**Side track (can land any time, independent):** extend `tla/Lease.tla`
+with a carry-forward action so S7 composes with `Reconfig.tla` and
+`RosterReconfig.tla` — closes the spec gap noted in §6.5.
 
 ---
 
