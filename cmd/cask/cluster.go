@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,9 +58,10 @@ const (
 // be nil. Returns a proposer for mvcc/lease, the overlay listener, the local
 // member, a health monitor (nil for client-only), and a roster snapshot holder
 // the caller serves at /roster so joining peers can learn the core.
-func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, caskPort int, local *caspaxos.Acceptor, localStore caspaxos.Storage, clientOnly, bootstrap bool, disco roster.Discovery) (*dynamicProposer, net.Listener, roster.Member, *healthMonitor, *rosterSnap, *forwarder, *owner.Manager, error) {
-	fail := func(err error) (*dynamicProposer, net.Listener, roster.Member, *healthMonitor, *rosterSnap, *forwarder, *owner.Manager, error) {
-		return nil, nil, roster.Member{}, nil, nil, nil, nil, err
+func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, caskPort int, local *caspaxos.Acceptor, localStore caspaxos.Storage, clientOnly, bootstrap bool, disco roster.Discovery) (*dynamicProposer, net.Listener, roster.Member, *healthMonitor, *rosterSnap, *forwarder, *owner.Manager, *adminAPI, error) {
+	var admin *adminAPI
+	fail := func(err error) (*dynamicProposer, net.Listener, roster.Member, *healthMonitor, *rosterSnap, *forwarder, *owner.Manager, *adminAPI, error) {
+		return nil, nil, roster.Member{}, nil, nil, nil, nil, nil, err
 	}
 	network, err := nebula.New(configYAML, log)
 	if err != nil {
@@ -155,7 +157,7 @@ func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, cas
 
 	if clientOnly {
 		go reconcileLoopReadOnly(ctx, log, rost, dialer, dyn, snap, candidates, network.HTTPClient(), val)
-		return dyn, ln, self, nil, snap, fwd, nil, nil
+		return dyn, ln, self, nil, snap, fwd, nil, nil, nil
 	}
 
 	// §4.3: the descriptor store proposes against the current Core; the
@@ -173,10 +175,32 @@ func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, cas
 	}
 	orch := ranges.NewOrchestrator(self.NodeID, dstore, dialer,
 		keyLister(self.NodeID, localStore, dialer, network.HTTPClient()), settle)
+	// Split/merge cutovers commit through the roster's RangeIDs — the routing
+	// switch clients observe on their next snapshot poll.
+	orch.SetCutover(func(ctx context.Context, remove, add []uint64) error {
+		_, err := rost.UpdateRangeIDs(ctx, func(ids []uint64) []uint64 {
+			keep := ids[:0:0]
+			for _, id := range ids {
+				drop := false
+				for _, r := range remove {
+					if id == r {
+						drop = true
+						break
+					}
+				}
+				if !drop {
+					keep = append(keep, id)
+				}
+			}
+			return append(keep, add...)
+		})
+		return err
+	})
 
 	mon := newHealthMonitor(self.NodeID, network.HTTPClient())
 	go reconcileLoop(ctx, log, rost, dialer, dyn, mon, snap, disco, candidates, network.HTTPClient(), mgr, dstore, orch, val)
-	return dyn, ln, self, mon, snap, fwd, mgr, nil
+	admin = &adminAPI{self: self.NodeID, orch: orch, snap: snap, log: log}
+	return dyn, ln, self, mon, snap, fwd, mgr, admin, nil
 }
 
 // isDriver reports whether self is the single node responsible for driving
@@ -833,6 +857,97 @@ func keyLister(self uint64, local caspaxos.Storage, dialer *overlayDialer, hc *h
 	}
 }
 
+// adminAPI exposes the §4.3 lifecycle operations. Split/merge policy is an
+// operator decision for now (split-point selection heuristics are a deferred
+// sub-decision); like joins, the endpoints are driver-gated — a non-driver
+// answers 421 with the driver's address.
+type adminAPI struct {
+	self uint64
+	orch *ranges.Orchestrator
+	snap *rosterSnap
+	log  *slog.Logger
+}
+
+// serveSplit handles POST /admin/split?range=<id>&at=<key>.
+func (a *adminAPI) serveSplit(w http.ResponseWriter, r *http.Request) {
+	v, ok := a.gate(w)
+	if !ok {
+		return
+	}
+	id := uint64(queryInt64(r, "range", 0))
+	at := r.URL.Query().Get("at")
+	if id == 0 || at == "" {
+		http.Error(w, "need range=<id>&at=<key>", http.StatusBadRequest)
+		return
+	}
+	next := maxRangeID(v) + 1
+	left, right, err := a.orch.Split(r.Context(), id, []byte(at), next, next+1)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	a.log.Info("range split", "range", id, "at", at, "left", left.ID, "right", right.ID)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]uint64{"left": left.ID, "right": right.ID})
+}
+
+// serveMerge handles POST /admin/merge?left=<id>&right=<id>.
+func (a *adminAPI) serveMerge(w http.ResponseWriter, r *http.Request) {
+	v, ok := a.gate(w)
+	if !ok {
+		return
+	}
+	leftID := uint64(queryInt64(r, "left", 0))
+	rightID := uint64(queryInt64(r, "right", 0))
+	if leftID == 0 || rightID == 0 {
+		http.Error(w, "need left=<id>&right=<id>", http.StatusBadRequest)
+		return
+	}
+	merged, err := a.orch.Merge(r.Context(), leftID, rightID, maxRangeID(v)+1)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	a.log.Info("ranges merged", "left", leftID, "right", rightID, "into", merged.ID)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]uint64{"range": merged.ID})
+}
+
+// gate enforces the driver-only rule, mirroring serveJoin.
+func (a *adminAPI) gate(w http.ResponseWriter) (roster.Value, bool) {
+	v, ok := a.snap.load()
+	if !ok || !isDriver(a.self, v.Core) {
+		driver := ""
+		if ok {
+			driver = addrOfMax(v.Core, v.Members)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMisdirectedRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"driver": driver})
+		return roster.Value{}, false
+	}
+	return v, true
+}
+
+func maxRangeID(v roster.Value) uint64 {
+	max := uint64(0)
+	for _, id := range rangeIDsOf(v) {
+		if id > max {
+			max = id
+		}
+	}
+	return max
+}
+
+func queryInt64(r *http.Request, key string, def int64) int64 {
+	if s := r.URL.Query().Get(key); s != "" {
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
 // driveRanges is the driver's per-tick §4.3 duty: seed the genesis descriptor
 // if missing, trigger replica reconfiguration when placement wants it (or an
 // in-flight joint needs completing), and return the fresh descriptor states
@@ -865,17 +980,36 @@ func driveRanges(ctx context.Context, log *slog.Logger, dstore *ranges.Store, or
 		}
 		out = append(out, st)
 
-		target, need := placement.NeedsReconfig(ranges.RangeKey(id), st.Replicas, nodesOf(cur), rf)
-		if (need || st.Joint != nil) && busy.CompareAndSwap(false, true) {
-			go func(id uint64, target []uint64) {
+		// Resume interrupted split/merge protocols first (their intents are
+		// recorded in the register), then placement-driven reconfiguration.
+		switch {
+		case st.Split != nil && busy.CompareAndSwap(false, true):
+			go func(id uint64, in ranges.SplitIntent) {
 				defer busy.Store(false)
-				released, err := orch.ReconfigReplicas(ctx, id, target)
-				if err != nil {
-					log.Warn("range reconfig", "range", id, "target", target, "err", err)
-					return
+				if _, _, err := orch.Split(ctx, id, in.At, in.Left, in.Right); err != nil {
+					log.Warn("split resume", "range", id, "err", err)
 				}
-				log.Info("range reconfigured", "range", id, "replicas", released.Replicas, "epoch", released.Epoch)
-			}(id, target)
+			}(id, *st.Split)
+		case st.Merge != nil && busy.CompareAndSwap(false, true):
+			go func(id uint64, in ranges.MergeIntent) {
+				defer busy.Store(false)
+				if _, err := orch.Merge(ctx, id, in.With, in.Into); err != nil {
+					log.Warn("merge resume", "range", id, "err", err)
+				}
+			}(id, *st.Merge)
+		default:
+			target, need := placement.NeedsReconfig(ranges.RangeKey(id), st.Replicas, nodesOf(cur), rf)
+			if (need || st.Joint != nil) && busy.CompareAndSwap(false, true) {
+				go func(id uint64, target []uint64) {
+					defer busy.Store(false)
+					released, err := orch.ReconfigReplicas(ctx, id, target)
+					if err != nil {
+						log.Warn("range reconfig", "range", id, "target", target, "err", err)
+						return
+					}
+					log.Info("range reconfigured", "range", id, "replicas", released.Replicas, "epoch", released.Epoch)
+				}(id, target)
+			}
 		}
 	}
 	return out

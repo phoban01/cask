@@ -221,6 +221,28 @@ func (r *Roster) Remove(ctx context.Context, nodeID uint64) (Value, error) {
 	})
 }
 
+// UpdateRangeIDs atomically rewrites the live range-id list (§4.3). This is
+// the split/merge CUTOVER commit: the moment it lands, snapshot polls route
+// clients to the new ranges. mutate receives the current list — the implicit
+// single range materialized as [1] so mutations compose — and returns the
+// desired list; an actual change bumps Epoch (a new range is observable like
+// any membership change).
+func (r *Roster) UpdateRangeIDs(ctx context.Context, mutate func(ids []uint64) []uint64) (Value, error) {
+	return r.write(ctx, func(cur Value) (Value, error) {
+		in := cur.RangeIDs
+		if len(in) == 0 {
+			in = []uint64{1}
+		}
+		out := normalizeIDs(mutate(append([]uint64(nil), in...)))
+		if idsEqual(out, normalizeIDs(in)) {
+			return cur, nil
+		}
+		cur.RangeIDs = out
+		cur.Epoch++
+		return cur, nil
+	})
+}
+
 // Get returns the current membership (linearizable read). It reads against the
 // believed acceptor set and, if a reconfiguration is in flight, re-reads against
 // the joint union so the value returned is the latest chosen one. Either way it

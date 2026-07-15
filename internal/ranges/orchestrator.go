@@ -40,6 +40,7 @@ type Orchestrator struct {
 	dialer  Dialer
 	listKey KeyLister
 	settle  func(ctx context.Context) error // waits out the routing refresh interval
+	cutover Cutover                         // roster RangeIDs commit (split/merge)
 }
 
 // Dialer resolves node ids to acceptor clients (structurally agent.Dialer).
@@ -75,7 +76,7 @@ func (o *Orchestrator) ReconfigReplicas(ctx context.Context, id uint64, target [
 	if cur.Joint != nil {
 		return o.completeJoint(ctx, id, cur)
 	}
-	if cur.Tombstoned || cur.Splitting {
+	if cur.Tombstoned || cur.Split != nil || cur.Merge != nil {
 		return cur, nil // range is mid-lifecycle elsewhere; not our move
 	}
 	if equalIDs(cur.Replicas, target) {
@@ -84,7 +85,7 @@ func (o *Orchestrator) ReconfigReplicas(ctx context.Context, id uint64, target [
 
 	// Step 1 — publish the joint descriptor (CAS-guarded on the state we read).
 	published, err := o.store.Publish(ctx, id, func(s State, present bool) (State, error) {
-		if !present || s.Epoch != cur.Epoch || s.Joint != nil || s.Tombstoned || s.Splitting {
+		if !present || s.Epoch != cur.Epoch || s.busy() || s.Tombstoned {
 			return State{}, caspaxos.ErrConflict // moved under us: retry next tick
 		}
 		s.Joint = &ReplicaJoint{Old: slices.Clone(s.Replicas), New: slices.Clone(target)}
@@ -217,4 +218,174 @@ func (o *Orchestrator) Seed(ctx context.Context, d Descriptor) (State, error) {
 		}
 		return State{Descriptor: d}, nil
 	})
+}
+
+// Cutover applies a split/merge's roster commit: remove the old range ids
+// from the live list and add the new ones (cmd wires this to
+// roster.UpdateRangeIDs). It must be idempotent — resume paths re-apply it.
+type Cutover func(ctx context.Context, remove []uint64, add []uint64) error
+
+// SetCutover injects the roster cutover; Split and Merge require it.
+func (o *Orchestrator) SetCutover(f Cutover) { o.cutover = f }
+
+// Split divides range id at key `at` into left/right (§4.3 Variant 1):
+//
+//  1. record the SplitIntent on the old descriptor (CAS — serializes
+//     concurrent splits and makes every later step resumable)
+//  2. create both new descriptors on the Core (no routing change yet: the
+//     roster still names only the old range)
+//  3. CUTOVER: the roster's RangeIDs swap old -> left,right (one commit) —
+//     clients route to the halves from their next snapshot poll
+//  4. tombstone the old descriptor, pointing at its replacements
+//
+// Data moves nowhere: both halves inherit the old replica set, and later
+// ReconfigReplicas calls rebalance them independently. The new descriptors
+// start at old.Epoch+1 — NOT 1 — so §4.1's per-key epoch comparison stays
+// monotonic across the lineage (a stale pre-split claim rejects against
+// either half). Calling Split again with the recorded intent's parameters
+// resumes a crashed run; different parameters conflict.
+func (o *Orchestrator) Split(ctx context.Context, id uint64, at []byte, leftID, rightID uint64) (left, right State, err error) {
+	if o.cutover == nil {
+		return State{}, State{}, fmt.Errorf("ranges: split: no cutover injected")
+	}
+	cur, present, err := o.store.Get(ctx, id)
+	if err != nil {
+		return State{}, State{}, err
+	}
+	if !present {
+		return State{}, State{}, fmt.Errorf("ranges: split: descriptor %d does not exist", id)
+	}
+	if cur.Tombstoned {
+		return State{}, State{}, fmt.Errorf("ranges: split: range %d is tombstoned (replaced by %v)", id, cur.ReplacedBy)
+	}
+	if cur.Joint != nil || cur.Merge != nil {
+		return State{}, State{}, fmt.Errorf("ranges: split: range %d has another lifecycle operation in flight", id)
+	}
+	switch {
+	case cur.Split == nil:
+		// Step 1 — record the intent.
+		cur, err = o.store.Publish(ctx, id, func(s State, present bool) (State, error) {
+			if !present || s.Epoch != cur.Epoch || s.busy() || s.Tombstoned {
+				return State{}, caspaxos.ErrConflict
+			}
+			s.Split = &SplitIntent{At: at, Left: leftID, Right: rightID}
+			return s, nil
+		})
+		if err != nil {
+			return State{}, State{}, err
+		}
+	case bytes.Equal(cur.Split.At, at) && cur.Split.Left == leftID && cur.Split.Right == rightID:
+		// Resuming the recorded intent.
+	default:
+		return State{}, State{}, fmt.Errorf("ranges: split: range %d already splitting with different parameters %+v", id, cur.Split)
+	}
+
+	// Step 2 — create both descriptors (idempotent: Seed keeps a committed value).
+	l, r, ok := cur.Descriptor.Split(at, leftID, rightID)
+	if !ok {
+		return State{}, State{}, fmt.Errorf("ranges: split point %q outside range %d", at, id)
+	}
+	l.Epoch, r.Epoch = cur.Epoch+1, cur.Epoch+1
+	l.Joint, r.Joint = nil, nil
+	leftState, err := o.Seed(ctx, l)
+	if err != nil {
+		return State{}, State{}, err
+	}
+	rightState, err := o.Seed(ctx, r)
+	if err != nil {
+		return State{}, State{}, err
+	}
+
+	// Step 3 — the cutover commit (idempotent set arithmetic on the roster).
+	if err := o.cutover(ctx, []uint64{id}, []uint64{leftID, rightID}); err != nil {
+		return State{}, State{}, fmt.Errorf("ranges: split cutover: %w", err)
+	}
+
+	// Step 4 — tombstone the old descriptor for direct readers.
+	if _, err := o.store.Publish(ctx, id, func(s State, present bool) (State, error) {
+		if s.Tombstoned {
+			return s, nil
+		}
+		s.Tombstoned = true
+		s.ReplacedBy = []uint64{leftID, rightID}
+		s.Split = nil
+		s.Epoch++
+		return s, nil
+	}); err != nil {
+		return State{}, State{}, err
+	}
+	return leftState, rightState, nil
+}
+
+// Merge absorbs right into left as a new range (the split inverse). Both
+// halves must be adjacent and already share one replica set — reconfigure
+// them onto a common set first; merging moves no data.
+func (o *Orchestrator) Merge(ctx context.Context, leftID, rightID, newID uint64) (State, error) {
+	if o.cutover == nil {
+		return State{}, fmt.Errorf("ranges: merge: no cutover injected")
+	}
+	left, lok, err := o.store.Get(ctx, leftID)
+	if err != nil {
+		return State{}, err
+	}
+	right, rok, err := o.store.Get(ctx, rightID)
+	if err != nil {
+		return State{}, err
+	}
+	if !lok || !rok {
+		return State{}, fmt.Errorf("ranges: merge: descriptor missing (left=%v right=%v)", lok, rok)
+	}
+	if left.Tombstoned || right.Tombstoned || left.Joint != nil || right.Joint != nil || left.Split != nil || right.Split != nil || right.Merge != nil {
+		return State{}, fmt.Errorf("ranges: merge: a lifecycle operation is in flight")
+	}
+	if !equalIDs(left.Replicas, right.Replicas) {
+		return State{}, fmt.Errorf("ranges: merge: replica sets differ (%v vs %v); reconfigure onto a common set first", left.Replicas, right.Replicas)
+	}
+
+	switch {
+	case left.Merge == nil:
+		left, err = o.store.Publish(ctx, leftID, func(s State, present bool) (State, error) {
+			if !present || s.Epoch != left.Epoch || s.busy() || s.Tombstoned {
+				return State{}, caspaxos.ErrConflict
+			}
+			s.Merge = &MergeIntent{With: rightID, Into: newID}
+			return s, nil
+		})
+		if err != nil {
+			return State{}, err
+		}
+	case left.Merge.With == rightID && left.Merge.Into == newID:
+		// Resuming the recorded intent.
+	default:
+		return State{}, fmt.Errorf("ranges: merge: range %d already merging with different parameters %+v", leftID, left.Merge)
+	}
+
+	merged, ok := Merge(left.Descriptor, right.Descriptor, newID)
+	if !ok {
+		return State{}, fmt.Errorf("ranges: merge: ranges %d and %d are not adjacent", leftID, rightID)
+	}
+	mergedState, err := o.Seed(ctx, merged)
+	if err != nil {
+		return State{}, err
+	}
+
+	if err := o.cutover(ctx, []uint64{leftID, rightID}, []uint64{newID}); err != nil {
+		return State{}, fmt.Errorf("ranges: merge cutover: %w", err)
+	}
+
+	for _, oldID := range []uint64{leftID, rightID} {
+		if _, err := o.store.Publish(ctx, oldID, func(s State, present bool) (State, error) {
+			if s.Tombstoned {
+				return s, nil
+			}
+			s.Tombstoned = true
+			s.ReplacedBy = []uint64{newID}
+			s.Merge = nil
+			s.Epoch++
+			return s, nil
+		}); err != nil {
+			return State{}, err
+		}
+	}
+	return mergedState, nil
 }

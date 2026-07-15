@@ -18,18 +18,38 @@ import (
 // move independently.
 
 // State is a descriptor register's value: the routing descriptor plus the
-// lifecycle flags the orchestrator drives.
+// lifecycle intents the orchestrator drives.
 type State struct {
 	Descriptor
 
-	// Splitting serializes concurrent splits of this range: set via CAS when
-	// a split begins, cleared when it completes (§4.3 Variant 1).
-	Splitting bool `json:"splitting,omitempty"`
+	// Split is non-nil while this range is being split (§4.3 Variant 1). The
+	// recorded intent both serializes concurrent splits (set via CAS) and
+	// makes the multi-commit protocol resumable by any driver.
+	Split *SplitIntent `json:"split,omitempty"`
+	// Merge is non-nil on the LEFT range while it is being merged with its
+	// right neighbor — same CAS-serialization and resume roles as Split.
+	Merge *MergeIntent `json:"merge,omitempty"`
 	// Tombstoned marks a range replaced by a split/merge. A client catching
 	// ErrRangeChanged on this descriptor reads ReplacedBy and refetches.
 	Tombstoned bool     `json:"tombstoned,omitempty"`
 	ReplacedBy []uint64 `json:"replaced_by,omitempty"`
 }
+
+// SplitIntent records an in-flight split's parameters.
+type SplitIntent struct {
+	At    []byte `json:"at"`
+	Left  uint64 `json:"left"`
+	Right uint64 `json:"right"`
+}
+
+// MergeIntent records an in-flight merge's parameters (held by the left range).
+type MergeIntent struct {
+	With uint64 `json:"with"` // the right neighbor being absorbed
+	Into uint64 `json:"into"` // the merged range's new id
+}
+
+// busy reports whether any lifecycle operation is in flight on this range.
+func (s State) busy() bool { return s.Split != nil || s.Merge != nil || s.Joint != nil }
 
 // DescriptorKey is the register key for range id: "\x00rd/" + big-endian id.
 func DescriptorKey(id uint64) []byte {

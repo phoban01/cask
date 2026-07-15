@@ -554,10 +554,38 @@ wiring (this commit):
 
 Tested: the full driver flow (seed from placement → membership change →
 background reconfig → all data served from the new set → fingerprint
-retarget) plus the ranges-layer suite from the foundation commit. Remaining
-§4.3 scope, deliberately deferred: split/merge (Variant 1) and roster
-`RangeIDs` management — the descriptor/orchestrator machinery they ride on
-is now in place.
+retarget) plus the ranges-layer suite from the foundation commit.
+
+**Split/merge (Variant 1) — landed 2026-07-15, completing §4.3:**
+
+- `Orchestrator.Split(id, at, left, right)`: record the `SplitIntent` on the
+  old descriptor (CAS — serializes concurrent splits AND makes every later
+  step resumable), create both descriptors on the Core, CUTOVER via the
+  injected roster commit (`roster.UpdateRangeIDs` swaps the ids; clients
+  route to the halves from their next snapshot poll), tombstone the old
+  descriptor with `ReplacedBy`. Data moves nowhere — both halves inherit the
+  replica set; later `ReconfigReplicas` calls rebalance them independently.
+- **Epoch lineage rule (deviation from the roadmap's `Epoch = 1`)**: new
+  descriptors start at `old.Epoch+1`, keeping §4.1's per-key epoch
+  comparison monotonic across the lineage — a stale pre-split claim must
+  reject against either half, which `Epoch = 1` would break as soon as the
+  claim exceeded 1.
+- `Orchestrator.Merge(left, right, into)`: the inverse, intent on the left
+  descriptor; requires adjacency and a COMMON replica set (reconfigure
+  first — merge moves no data either).
+- cmd: `driveRanges` resumes recorded split/merge intents before considering
+  placement moves; `/admin/split?range&at` and `/admin/merge?left&right`
+  are the operator triggers, driver-gated like joins (split-point policy is
+  the roadmap's deferred sub-decision). Crash between cutover and tombstone
+  leaves an un-tombstoned old descriptor that no routing names — snapshot
+  distribution makes the tombstone belt-and-braces for direct register
+  readers only.
+
+Tested additionally: split→write-both-halves→merge round trip with all data
+readable throughout; interrupted-split resume (intent recorded, driver
+crashed) and conflicting-parameter refusal; merge refusal across differing
+replica sets. §4.3 is complete; remaining §4.3-adjacent polish: tombstone GC
+(TTL, deferred sub-decision) and split-point selection heuristics.
 - A degraded read (guard refusal) lands on the owner's 1-RTT identity round,
   not the 2-RTT full path — reads never get slower than pre-W4.
 - `tla/OwnerReads.tla` proves the guard under adversarial skew

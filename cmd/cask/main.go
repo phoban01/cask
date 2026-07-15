@@ -180,13 +180,18 @@ func main() {
 	)
 	if useOverlay {
 		disco := buildDisco(log, srvName, *seed)
-		dyn, overlayLn, self, mon, snap, f, m, err := nebulaCluster(ctx, log, configYAML, *ovPort, localAcc, acceptorStore, clientOnly, *boot, disco)
+		dyn, overlayLn, self, mon, snap, f, m, admin, err := nebulaCluster(ctx, log, configYAML, *ovPort, localAcc, acceptorStore, clientOnly, *boot, disco)
 		if err != nil {
 			log.Error("nebula cluster", "err", err)
 			os.Exit(1)
 		}
 		prop, nodeID, fwd, mgr = dyn, self.NodeID, f, m
 		epochSnap.Store(snap)
+		// §4.3 lifecycle operations (driver-gated, like joins).
+		if admin != nil {
+			mux.HandleFunc("/admin/split", admin.serveSplit)
+			mux.HandleFunc("/admin/merge", admin.serveMerge)
+		}
 		// Peers probe this endpoint over the overlay; its reply is both a
 		// liveness heartbeat and this node's suspicion vector for cut detection.
 		// A client-only node is never in the roster, so nothing probes it (mon is nil).
