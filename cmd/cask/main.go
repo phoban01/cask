@@ -26,6 +26,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/phoban01/cask/internal/caspaxos"
@@ -99,11 +100,32 @@ func main() {
 	nodeID := *id
 	ctx := context.Background()
 
+	// Stale-routing rejection (§4.1): the consensus handlers compare each
+	// request's claimed range epoch against the CURRENT placement, resolved
+	// from the roster snapshot installed once the overlay is up. Until then
+	// (and forever in static --peers mode, which has no descriptor epochs)
+	// the check is disabled.
+	var epochSnap atomic.Pointer[rosterSnap]
+	epochOf := transport.EpochOf(func(key []byte) (uint64, bool) {
+		s := epochSnap.Load()
+		if s == nil {
+			return 0, false
+		}
+		v, ok := s.load()
+		if !ok {
+			return 0, false
+		}
+		if d, ok := placeRange(v).Lookup(key); ok {
+			return d.Epoch, true
+		}
+		return 0, false
+	})
+
 	mux := http.NewServeMux()
 	if *tport == "http" {
-		mux.Handle("/v1/", transport.Handler(localAcc))
+		mux.Handle("/v1/", transport.Handler(localAcc, transport.WithEpochOf(epochOf)))
 	} else {
-		mux.Handle(transport.ConnectHandler(localAcc))
+		mux.Handle(transport.ConnectHandler(localAcc, transport.WithEpochOf(epochOf)))
 	}
 
 	// The overlay path gets its config either from a file (--nebula-config) or by
@@ -145,6 +167,7 @@ func main() {
 			os.Exit(1)
 		}
 		prop, nodeID, fwd, mgr = dyn, self.NodeID, f, m
+		epochSnap.Store(snap)
 		// Peers probe this endpoint over the overlay; its reply is both a
 		// liveness heartbeat and this node's suspicion vector for cut detection.
 		// A client-only node is never in the roster, so nothing probes it (mon is nil).

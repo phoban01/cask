@@ -140,7 +140,7 @@ func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, cas
 		olocks := lease.NewLocks(dyn, osess, lease.WithAcquireBackoff(contentionBackoff()))
 		mgr = owner.New(self.NodeID, dialer, osess, olocks)
 	}
-	dyn.set(routerFor(self.NodeID, val, dialer, mgr))
+	dyn.set(routerFor(self.NodeID, val, dialer, mgr, snap))
 
 	ln, err := network.Listen(ctx, fmt.Sprintf(":%d", caskPort))
 	if err != nil {
@@ -484,7 +484,7 @@ func applyView(log *slog.Logger, dialer *overlayDialer, dyn *dynamicProposer, sn
 		if mon != nil {
 			mon.forget(departed(prev.Members, v.Members))
 		}
-		dyn.set(routerFor(dialer.self, v, dialer, mgr))
+		dyn.set(routerFor(dialer.self, v, dialer, mgr, snap))
 		log.Info("roster changed; range re-placed", "by", who, "epoch", v.Epoch, "members", len(v.Members), "core", v.Core)
 		*epoch = v.Epoch
 	}
@@ -522,12 +522,23 @@ func departed(old, cur []roster.Member) []uint64 {
 }
 
 // routerFor builds a range router for self over the placement computed from
-// val, with contention backoff and — when an ownership manager exists — the
-// W1 1-RTT fast path.
-func routerFor(self uint64, val roster.Value, dialer *overlayDialer, mgr *owner.Manager) *agent.Router {
+// val, with contention backoff, the W1 fast path (when an ownership manager
+// exists), and §4.1 stale-routing recovery (when a snapshot source exists):
+// an ErrRangeChanged rejection re-resolves placement from the latest roster
+// snapshot and retries once.
+func routerFor(self uint64, val roster.Value, dialer *overlayDialer, mgr *owner.Manager, snap *rosterSnap) *agent.Router {
 	opts := []agent.RouterOption{agent.WithBackoff(contentionBackoff())}
 	if mgr != nil {
 		opts = append(opts, agent.WithFastPath(mgr))
+	}
+	if snap != nil {
+		opts = append(opts, agent.WithRefresh(func() *ranges.Map {
+			v, ok := snap.load()
+			if !ok {
+				return nil
+			}
+			return placeRange(v)
+		}))
 	}
 	return agent.NewRouter(self, placeRange(val), dialer, opts...)
 }

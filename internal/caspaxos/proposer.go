@@ -269,6 +269,9 @@ func (p *Proposer) prepare(ctx context.Context, key []byte, b Ballot) (current [
 		r := <-replies
 		undecided[r.i] = false
 		switch {
+		case errors.Is(r.err, ErrRangeChanged):
+			// The replica set moved under us; no quorum here can be trusted.
+			return nil, Ballot{}, false, ErrRangeChanged
 		case r.err != nil:
 			// unreachable acceptor (or a dropped vote): a non-vote
 		case !r.v.Promised:
@@ -313,6 +316,8 @@ func (p *Proposer) accept(ctx context.Context, key []byte, b Ballot, val []byte)
 		r := <-replies
 		undecided[r.i] = false
 		switch {
+		case errors.Is(r.err, ErrRangeChanged):
+			return Ballot{}, false, ErrRangeChanged
 		case r.err != nil:
 			// unreachable acceptor: a non-vote
 		case !r.v.Accepted:

@@ -74,12 +74,13 @@ func (d StaticDialer) Acceptor(node uint64) (caspaxos.AcceptorClient, bool) {
 // (e.g. after reconfiguration).
 type Router struct {
 	id      uint64 // this agent's proposer id
-	rmap    *ranges.Map
 	dialer  Dialer
 	backoff func(ctx context.Context, attempt int) error
 	fast    FastProposer
+	refresh func() *ranges.Map // re-resolves placement after ErrRangeChanged
 
 	mu    sync.Mutex
+	rmap  *ranges.Map
 	cache map[uint64]cachedProposer // by range id
 }
 
@@ -103,6 +104,14 @@ func WithFastPath(fp FastProposer) RouterOption {
 	return func(r *Router) { r.fast = fp }
 }
 
+// WithRefresh installs the placement re-resolver used when an acceptor
+// rejects a proposal with caspaxos.ErrRangeChanged (§4.1): the router swaps
+// in the fresh map, drops its proposer cache, and retries the operation once.
+// Without it, ErrRangeChanged propagates to the caller.
+func WithRefresh(f func() *ranges.Map) RouterOption {
+	return func(r *Router) { r.refresh = f }
+}
+
 // NewRouter returns a Router for agent id over the given range map and dialer.
 func NewRouter(id uint64, rmap *ranges.Map, dialer Dialer, opts ...RouterOption) *Router {
 	r := &Router{id: id, rmap: rmap, dialer: dialer, cache: make(map[uint64]cachedProposer)}
@@ -116,13 +125,33 @@ func NewRouter(id uint64, rmap *ranges.Map, dialer Dialer, opts ...RouterOption)
 // fast path when an ownership grant covers the key, falling back to the full
 // two-phase round otherwise. A fast-path miss is never an error: the full
 // path is always correct (and fences out a stale owner as a side effect).
+//
+// A caspaxos.ErrRangeChanged rejection means this router's placement is
+// stale (the range was reconfigured since the map was built): with a refresh
+// source installed, the router re-resolves placement and retries ONCE against
+// the current replica set; a second rejection propagates — the caller's
+// routing layer is persistently behind and must resynchronize.
 func (r *Router) Propose(ctx context.Context, key []byte, change caspaxos.ChangeFunc) ([]byte, error) {
+	val, err := r.propose(ctx, key, change)
+	if errors.Is(err, caspaxos.ErrRangeChanged) && r.refresh != nil {
+		if fresh := r.refresh(); fresh != nil {
+			r.mu.Lock()
+			r.rmap = fresh
+			r.cache = make(map[uint64]cachedProposer)
+			r.mu.Unlock()
+			return r.propose(ctx, key, change)
+		}
+	}
+	return val, err
+}
+
+func (r *Router) propose(ctx context.Context, key []byte, change caspaxos.ChangeFunc) ([]byte, error) {
 	if r.fast != nil {
 		if val, handled, err := r.fast.FastPropose(ctx, key, change); handled {
 			return val, err
 		}
 	}
-	d, ok := r.rmap.Lookup(key)
+	d, ok := r.lookup(key)
 	if !ok {
 		return nil, ErrNoRange
 	}
@@ -135,7 +164,9 @@ func (r *Router) Propose(ctx context.Context, key []byte, change caspaxos.Change
 	if err != nil {
 		return nil, err
 	}
-	val, err := p.Propose(ctx, key, change)
+	// Stamp the epoch this route was computed under; the serving node rejects
+	// the round with ErrRangeChanged if its descriptor has moved past it.
+	val, err := p.Propose(ranges.WithClaimedEpoch(ctx, d.Epoch), key, change)
 	// A full round may have committed (even on error paths — a failed CAS
 	// writes the current value back); anything the fast path cached for this
 	// key is now unreliable.
@@ -145,9 +176,15 @@ func (r *Router) Propose(ctx context.Context, key []byte, change caspaxos.Change
 	return val, err
 }
 
+func (r *Router) lookup(key []byte) (ranges.Descriptor, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.rmap.Lookup(key)
+}
+
 // Owner returns the storage node that owns key (HRW over its range's replicas).
 func (r *Router) Owner(key []byte) (uint64, bool) {
-	d, ok := r.rmap.Lookup(key)
+	d, ok := r.lookup(key)
 	if !ok {
 		return 0, false
 	}

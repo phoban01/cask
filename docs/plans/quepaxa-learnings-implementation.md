@@ -495,6 +495,31 @@ bypass all three mechanisms and are out of contract (the repurposed test
 documents the resulting staleness and its recovery). The gate costs two
 control-plane reads per gated propose — only on the forward-failed path;
 cache the verdict if that ever shows up in profiles.
+
+### §4.1 — ErrRangeChanged (landed 2026-07-15)
+
+Stale routing is now a typed, recoverable condition instead of a silent
+round against the wrong replicas:
+
+- The router stamps each proposal with the descriptor epoch it routed under
+  (`ranges.WithClaimedEpoch`, carried as the `Cask-Range-Epoch` header on
+  both transports — no protobuf change needed).
+- The serving node compares it against its CURRENT placement (from the
+  roster snapshot) and rejects OLDER claims with `caspaxos.ErrRangeChanged`
+  before touching the acceptor. Newer or absent claims pass: the acceptor
+  itself is deliberately range-agnostic, and a behind server is harmless.
+- The proposer treats `ErrRangeChanged` unlike a transport failure: it
+  aborts the round immediately (a stale replica set can never yield a
+  trustworthy quorum) instead of counting a non-vote.
+- The router re-resolves placement (`agent.WithRefresh` → `placeRange` of
+  the latest snapshot in cmd), drops its proposer cache, and retries ONCE;
+  persistent staleness propagates to the caller.
+
+**Known hole this does NOT fix (tracked)**: `reconfig.CarryForwardKeys` is
+never driven from cmd — when HRW re-places the range's replicas on a roster
+change, committed data is not carried to the new acceptor set. §4.1 is the
+client-refresh half; the carry-forward driver is §4.3's replica-set-reconfig
+scope and is release-blocking for any multi-epoch churn claim.
 - A degraded read (guard refusal) lands on the owner's 1-RTT identity round,
   not the 2-RTT full path — reads never get slower than pre-W4.
 - `tla/OwnerReads.tla` proves the guard under adversarial skew

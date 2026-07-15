@@ -14,8 +14,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 
 	"github.com/phoban01/cask/internal/caspaxos"
+	"github.com/phoban01/cask/internal/ranges"
 )
 
 // wire request/response envelopes. []byte fields marshal as base64 JSON.
@@ -37,11 +39,19 @@ const (
 )
 
 // Handler returns an http.Handler exposing acc's Prepare/Accept over JSON.
-func Handler(acc *caspaxos.Acceptor) http.Handler {
+func Handler(acc *caspaxos.Acceptor, opts ...HandlerOption) http.Handler {
+	var o handlerOpts
+	for _, opt := range opts {
+		opt(&o)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(pathPrepare, func(w http.ResponseWriter, r *http.Request) {
 		var req prepareReq
 		if !decode(w, r, &req) {
+			return
+		}
+		if err := o.checkEpoch(req.Key, r.Header.Get(epochHeader)); err != nil {
+			http.Error(w, err.Error(), http.StatusPreconditionFailed)
 			return
 		}
 		reply, err := acc.Prepare(r.Context(), req.Key, req.Ballot)
@@ -50,6 +60,10 @@ func Handler(acc *caspaxos.Acceptor) http.Handler {
 	mux.HandleFunc(pathAccept, func(w http.ResponseWriter, r *http.Request) {
 		var req acceptReq
 		if !decode(w, r, &req) {
+			return
+		}
+		if err := o.checkEpoch(req.Key, r.Header.Get(epochHeader)); err != nil {
+			http.Error(w, err.Error(), http.StatusPreconditionFailed)
 			return
 		}
 		reply, err := acc.Accept(r.Context(), req.Key, req.Ballot, req.Value)
@@ -95,11 +109,17 @@ func (c *Client) call(ctx context.Context, path string, req, out any) error {
 		return err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if e, ok := ranges.ClaimedEpoch(ctx); ok {
+		httpReq.Header.Set(epochHeader, strconv.FormatUint(e, 10))
+	}
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
 		return err // unreachable acceptor: counted as a non-vote by the proposer
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusPreconditionFailed {
+		return caspaxos.ErrRangeChanged // stale routing: abort the round, refresh
+	}
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<12))
 		return fmt.Errorf("transport: %s -> %s: %s", path, resp.Status, b)

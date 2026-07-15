@@ -13,27 +13,80 @@ package transport
 import (
 	"context"
 	"net/http"
+	"strconv"
 
 	"connectrpc.com/connect"
 
 	"github.com/phoban01/cask/internal/caspaxos"
+	"github.com/phoban01/cask/internal/ranges"
 
 	caskv1 "github.com/phoban01/cask/gen/cask/v1"
 	"github.com/phoban01/cask/gen/cask/v1/caskv1connect"
 )
 
+// epochHeader carries the proposer's claimed range-descriptor epoch (§4.1).
+// It rides a header rather than the protobuf schema so both transports share
+// one mechanism and the wire types stay untouched.
+const epochHeader = "Cask-Range-Epoch"
+
+// EpochOf resolves the CURRENT descriptor epoch for a key on the serving
+// node (from its roster/placement view). ok=false disables the check (e.g.
+// the static --peers topology, which has no descriptor epochs).
+type EpochOf func(key []byte) (uint64, bool)
+
+// HandlerOption configures a transport handler.
+type HandlerOption func(*handlerOpts)
+
+type handlerOpts struct{ epochOf EpochOf }
+
+// WithEpochOf enables stale-proposer rejection: a request claiming an epoch
+// OLDER than epochOf(key) fails with caspaxos.ErrRangeChanged before touching
+// the acceptor, telling the proposer to refresh its routing (§4.1). Requests
+// claiming no epoch, or a newer one (the SERVER is behind — harmless, the
+// acceptor itself is range-agnostic), pass through.
+func WithEpochOf(f EpochOf) HandlerOption {
+	return func(o *handlerOpts) { o.epochOf = f }
+}
+
+// checkEpoch applies the §4.1 rule; nil means proceed.
+func (o *handlerOpts) checkEpoch(key []byte, claimed string) error {
+	if o.epochOf == nil || claimed == "" {
+		return nil
+	}
+	cur, ok := o.epochOf(key)
+	if !ok {
+		return nil
+	}
+	c, err := strconv.ParseUint(claimed, 10, 64)
+	if err != nil {
+		return nil // malformed claim: ignore rather than invent failures
+	}
+	if c < cur {
+		return caspaxos.ErrRangeChanged
+	}
+	return nil
+}
+
 // ConnectHandler returns the route prefix and http.Handler exposing acc's
 // Prepare/Accept over ConnectRPC. Register it on a mux: mux.Handle(path, h).
-func ConnectHandler(acc *caspaxos.Acceptor) (string, http.Handler) {
-	return caskv1connect.NewAcceptorServiceHandler(&acceptorHandler{acc: acc})
+func ConnectHandler(acc *caspaxos.Acceptor, opts ...HandlerOption) (string, http.Handler) {
+	h := &acceptorHandler{acc: acc}
+	for _, o := range opts {
+		o(&h.opts)
+	}
+	return caskv1connect.NewAcceptorServiceHandler(h)
 }
 
 type acceptorHandler struct {
 	caskv1connect.UnimplementedAcceptorServiceHandler
-	acc *caspaxos.Acceptor
+	acc  *caspaxos.Acceptor
+	opts handlerOpts
 }
 
 func (h *acceptorHandler) Prepare(ctx context.Context, req *connect.Request[caskv1.PrepareRequest]) (*connect.Response[caskv1.PrepareResponse], error) {
+	if err := h.opts.checkEpoch(req.Msg.GetKey(), req.Header().Get(epochHeader)); err != nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+	}
 	reply, err := h.acc.Prepare(ctx, req.Msg.GetKey(), ballotFromPB(req.Msg.GetBallot()))
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -47,6 +100,9 @@ func (h *acceptorHandler) Prepare(ctx context.Context, req *connect.Request[cask
 }
 
 func (h *acceptorHandler) Accept(ctx context.Context, req *connect.Request[caskv1.AcceptRequest]) (*connect.Response[caskv1.AcceptResponse], error) {
+	if err := h.opts.checkEpoch(req.Msg.GetKey(), req.Header().Get(epochHeader)); err != nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
+	}
 	reply, err := h.acc.Accept(ctx, req.Msg.GetKey(), ballotFromPB(req.Msg.GetBallot()), req.Msg.GetValue())
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
@@ -55,6 +111,22 @@ func (h *acceptorHandler) Accept(ctx context.Context, req *connect.Request[caskv
 		Accepted: reply.Accepted,
 		Conflict: ballotToPB(reply.Conflict),
 	}), nil
+}
+
+// stampEpoch copies the claimed epoch (if the router stamped one on ctx)
+// onto the outgoing request, and rangeChangedErr maps the server's
+// FailedPrecondition back to the typed sentinel the proposer recognizes.
+func stampEpoch[T any](ctx context.Context, req *connect.Request[T]) {
+	if e, ok := ranges.ClaimedEpoch(ctx); ok {
+		req.Header().Set(epochHeader, strconv.FormatUint(e, 10))
+	}
+}
+
+func rangeChangedErr(err error) error {
+	if connect.CodeOf(err) == connect.CodeFailedPrecondition {
+		return caspaxos.ErrRangeChanged
+	}
+	return err
 }
 
 // ConnectClient is an [caspaxos.AcceptorClient] that talks to a remote
@@ -74,12 +146,16 @@ func NewConnectClient(baseURL string, hc connect.HTTPClient) *ConnectClient {
 }
 
 func (c *ConnectClient) Prepare(ctx context.Context, key []byte, b caspaxos.Ballot) (caspaxos.PrepareReply, error) {
-	resp, err := c.rpc.Prepare(ctx, connect.NewRequest(&caskv1.PrepareRequest{
+	req := connect.NewRequest(&caskv1.PrepareRequest{
 		Key:    key,
 		Ballot: ballotToPB(b),
-	}))
+	})
+	stampEpoch(ctx, req)
+	resp, err := c.rpc.Prepare(ctx, req)
 	if err != nil {
-		return caspaxos.PrepareReply{}, err // unreachable acceptor: counted as a non-vote
+		// A range-changed rejection is typed (aborts the round); anything else
+		// is an unreachable acceptor, counted as a non-vote.
+		return caspaxos.PrepareReply{}, rangeChangedErr(err)
 	}
 	return caspaxos.PrepareReply{
 		Promised: resp.Msg.GetPromised(),
@@ -90,13 +166,15 @@ func (c *ConnectClient) Prepare(ctx context.Context, key []byte, b caspaxos.Ball
 }
 
 func (c *ConnectClient) Accept(ctx context.Context, key []byte, b caspaxos.Ballot, val []byte) (caspaxos.AcceptReply, error) {
-	resp, err := c.rpc.Accept(ctx, connect.NewRequest(&caskv1.AcceptRequest{
+	req := connect.NewRequest(&caskv1.AcceptRequest{
 		Key:    key,
 		Ballot: ballotToPB(b),
 		Value:  val,
-	}))
+	})
+	stampEpoch(ctx, req)
+	resp, err := c.rpc.Accept(ctx, req)
 	if err != nil {
-		return caspaxos.AcceptReply{}, err
+		return caspaxos.AcceptReply{}, rangeChangedErr(err)
 	}
 	return caspaxos.AcceptReply{
 		Accepted: resp.Msg.GetAccepted(),
