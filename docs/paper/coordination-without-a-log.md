@@ -1,8 +1,10 @@
 # Coordination Without a Log
 
 *Working draft / outline — target: arXiv preprint, then an industrial-track or
-workshop venue (PaPoC, HotOS, or NSDI/SOSP industrial). Project name pending
-(see naming note at the end); "cask" is the working name throughout.*
+workshop venue (PaPoC, HotOS, or NSDI/SOSP industrial). Name decided
+2026-07-15: the project stays **cask** — the searchability cost of the
+CaskDB/Bitcask/Homebrew collisions was judged worth avoiding a rename; the
+paper title carries the differentiation instead.*
 
 ## Abstract (draft)
 
@@ -171,9 +173,9 @@ like writing to etcd's bbolt behind its back). No auth layer yet.
 
 ## 7. Naming note
 
-"cask" collides badly (CaskDB tutorials, Bitcask, Homebrew casks).
-Shortlist with collision status: **capstan** (nautical winch a small crew
-uses to move heavy loads — mechanism-not-vessel; only a dormant OSv
-packaging tool collides), **coxswain** (steers without rowing; a rowing
-Android app exists; awkward to type), keep **cask** (searchability cost).
-Decision pending.
+Decided 2026-07-15: **cask** stays. The collision landscape (CaskDB
+tutorials, Bitcask associations, Homebrew casks) was weighed against rename
+churn (repo, module path, binary, docs) and the rename lost. Mitigation:
+public materials always lead with the qualified form — "cask, a
+coordination store without a log" — so search anchors on the phrase, not
+the word.

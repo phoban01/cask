@@ -2,8 +2,7 @@
 
 *Review-ready draft. Register and structure deliberately mirror Cloudflare's
 Meerkat introduction — incident-shaped motivation, honest limitations —
-because it is written to sit beside it in the same conversation. Project
-name pending; "cask" used throughout.*
+because it is written to sit beside it in the same conversation.*
 
 ---
 
@@ -28,7 +27,7 @@ We stopped paying.
 
 ## Registers all the way down
 
-Cask (working name) is a coordination store — think "etcd's little sister":
+Cask is a coordination store — think "etcd's little sister":
 leases, locks, sessions, and small config at fleet scale — in which every
 key is its own CASPaxos register. There is no log anywhere in the system.
 A write is one consensus decision on one register; two writes to two keys
