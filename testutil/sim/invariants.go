@@ -91,6 +91,10 @@ func All() []Invariant {
 		{ID: "S12", Desc: "watcher non-starvation — TODO: observe watch cursors vs compact watermark", Implemented: false},
 		{ID: "L1", Desc: "eventual rmap consistency — TODO(PR#2): fairness model", Implemented: false},
 		{ID: "L2", Desc: "eventual lock takeover — TODO: fairness model", Implemented: false},
+		// L3 is enforced inline by the gate loop (gate.go), not as a snapshot
+		// predicate: it needs the per-round fault schedule, which snapshots
+		// don't carry. Registered here for honest coverage accounting.
+		{ID: "L3", Desc: "healed-dwell progress: no retry-budget exhaustion without an active fault (checked inline by the gate)", Implemented: false},
 	}
 }
 

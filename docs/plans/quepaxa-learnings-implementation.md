@@ -521,6 +521,18 @@ and the buggify concurrency rule from W2), `.github/workflows/`, `scripts/`.
 (validation that the invariant is sharp); `contention` profile green across the PR
 budget on main; docs updated.
 
+**Implementation notes (landed 2026-07-15; S13 + FAULT-ASSERT landed early with
+W0, where they were needed).** The healed-dwell liveness check shipped as
+**L3** (L1/L2 remain the roadmap's reserved names for rmap/lock fairness):
+inline in the gate loop rather than as a snapshot predicate, since it needs
+the per-round fault schedule. The `contention` profile raises
+`acceptor_spurious_preempted` to 0.05, `proposer_drop_vote` to 0.03, and
+`owned_proposer_force_full_round` to 0.05 over the duel faults + gray links.
+The gate now runs every profile × {mvcc, owned} workload — locally, in
+`scripts/sim-gate.sh` (sharded per pair), and in CI (per-pair budget halved
+to keep the total scenario count at the old tier). Meerkat follow-up posts
+remain a standing watch item (blog.cloudflare.com/tag/meerkat/).
+
 ---
 
 ## W6 — Paper, blog post, Kubernetes multi-cluster story

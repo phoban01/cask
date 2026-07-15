@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/phoban01/cask/internal/caspaxos"
+	"github.com/phoban01/cask/internal/lease"
 )
 
 // Round runs one unit of protocol work for a scenario. The gate calls it once
@@ -138,8 +139,28 @@ func runScenario(ctx context.Context, seed int64, rounds, faultEvery int, heal f
 		}
 
 		// Run protocol work; tolerate expected protocol errors under faults.
-		if werr := run(ctx, round); werr != nil && !expectedUnderFault(werr) {
-			s.Trace.Add("round %d: workload error: %v", round, werr)
+		if werr := run(ctx, round); werr != nil {
+			switch {
+			case !expectedUnderFault(werr):
+				s.Trace.Add("round %d: workload error: %v", round, werr)
+			case !faulted && retryBudgetExhausted(werr):
+				// L3 — healed-dwell progress: with no fault active this round
+				// (the previous dwell healed), exhausting a retry budget means
+				// the contention machinery (ballot bumping + randomized
+				// backoff) failed to converge — the livelock class that bit
+				// the multi-lighthouse bootstrap. Under an active fault the
+				// same error is an expected outcome; here it is a liveness
+				// violation.
+				return &Violation{
+					Seed:      seed,
+					Profile:   profileName(cfg.Profile),
+					Round:     round,
+					Step:      s.Step(),
+					Invariant: "L3",
+					Detail:    fmt.Sprintf("retry budget exhausted during a healed dwell: %v", werr),
+					Trace:     s.Trace.Events(),
+				}, nil
+			}
 		}
 
 		step := s.Advance()
@@ -207,6 +228,12 @@ func profileName(p *Profile) string {
 		return ""
 	}
 	return p.Name
+}
+
+// retryBudgetExhausted reports whether err is a retry budget running dry —
+// tolerable under an active fault, a liveness violation (L3) without one.
+func retryBudgetExhausted(err error) bool {
+	return errors.Is(err, caspaxos.ErrPreempted) || errors.Is(err, lease.ErrContended)
 }
 
 // expectedUnderFault reports whether err is a normal protocol outcome under an

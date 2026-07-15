@@ -24,9 +24,11 @@ jobs:
       - name: Build
         run: go build ./...
 
-      - name: Simulator gate (CI tier — 10^4 seeds per profile)
+      - name: Simulator gate (CI tier — 5·10^3 seeds per profile-workload pair)
         env:
-          SEEDS: "10000"
+          # 5 profiles x 2 workloads (full-round and W1 ownership topologies);
+          # halved per-pair budget keeps total scenario count at the old tier.
+          SEEDS: "5000"
           RECORD_DIR: "${{ runner.temp }}/sim-records"
         run: scripts/sim-gate.sh
 

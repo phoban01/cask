@@ -110,9 +110,30 @@ func Cluster() *Profile {
 	}
 }
 
-// Profiles returns the runnable PR #0 profiles by name.
+// Contention is the QuePaxa regime as a standing release gate (W5): dueling
+// proposers, owner-vs-full duels, gray links, and raised buggify cruelty on
+// exactly the sites that stress the retry/recovery machinery. Safety is
+// audited by the S* invariants as usual; the healed-dwell liveness check (L3)
+// asserts that contention costs latency, never a retry-budget exhaustion.
+func Contention() *Profile {
+	return &Profile{
+		Name: "contention",
+		Faults: []string{
+			FaultDuelingProposers, FaultOwnerVsFullProposer,
+			FaultEpochOldOwnerWrite, FaultSlowLink,
+			FaultAsymmetricReach, FaultDuplicateDelivery,
+		},
+		SiteProb: map[string]float64{
+			"acceptor_spurious_preempted":     0.05,
+			"proposer_drop_vote":              0.03,
+			"owned_proposer_force_full_round": 0.05,
+		},
+	}
+}
+
+// Profiles returns the runnable profiles by name.
 func Profiles() map[string]*Profile {
-	ps := []*Profile{Smoke(), Consensus(), Lease(), Cluster()}
+	ps := []*Profile{Smoke(), Consensus(), Lease(), Cluster(), Contention()}
 	out := make(map[string]*Profile, len(ps))
 	for _, p := range ps {
 		out[p.Name] = p

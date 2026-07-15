@@ -68,12 +68,24 @@ Faults (`testutil/sim/faults/`, profiles in `testutil/sim/profile.go`):
 | `slow_fsync` (SlowStore decorator) | `mid_grv_partition` (§4.6) |
 | `epoch_old_owner_write` | `lighthouse_loss`, `core_stale_rejoin` |
 | `owner_vs_full_proposer` (W0 ballot-space duel) | |
+| `dueling_proposers` (W3 liveness: K symmetric writers, no driver convention) | |
 | `keepalive_blackhole` (buggify-driven) | `message_reorder` (needs logical-time scheduler) |
 | `duplicate_delivery` (at-least-once link) | membership-layer dup/reorder (HyParView/Plumtree not gate-driven) |
 | `slow_link` (link-latency injection) | |
 
-Profiles: `smoke`, `consensus`, `lease`, `cluster`. The `ranges` and `snapshot`
-profiles land with their features (§4.3 / §4.6).
+Profiles: `smoke`, `consensus`, `lease`, `cluster`, and `contention` — the
+QuePaxa regime as a standing gate (dueling proposers, owner/full duels, gray
+links, raised buggify cruelty), paired with the **L3 healed-dwell liveness
+check**: with no fault active in a round, exhausting a retry budget
+(`ErrPreempted`/`ErrContended`) is a violation — contention must cost latency,
+never liveness. The `ranges` and `snapshot` profiles land with their features
+(§4.3 / §4.6).
+
+Every profile runs under two workloads: `mvcc` (full two-phase rounds) and
+`owned` (the W1 ownership fast-path topology, including lease-guarded local
+reads and the fast/slow interleave the `owned_proposer_force_full_round` site
+forces). `scripts/sim-gate.sh` shards profile × workload × seeds across
+processes.
 
 ### Gray-failure link faults and what's still not modelled
 

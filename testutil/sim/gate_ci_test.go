@@ -17,6 +17,7 @@ import (
 // parallelism):
 //
 //	SIM_PROFILE     profile name (default "smoke")
+//	SIM_WORKLOAD    "mvcc" (full rounds) or "owned" (W1 fast-path topology; default "mvcc")
 //	SIM_SEED_START  first seed (default 1)
 //	SIM_SEEDS       seed count for this shard (default 200)
 //	SIM_RECORD_DIR  directory for JSON violation records (optional)
@@ -27,7 +28,15 @@ func TestGate(t *testing.T) {
 	name := envOr("SIM_PROFILE", "smoke")
 	profile, ok := sim.Profiles()[name]
 	if !ok {
-		t.Fatalf("unknown profile %q (have: smoke, consensus, lease, cluster)", name)
+		t.Fatalf("unknown profile %q (have: smoke, consensus, lease, cluster, contention)", name)
+	}
+	var workload sim.Workload = sim.MVCCWorkload{NumKeys: 4}
+	switch w := envOr("SIM_WORKLOAD", "mvcc"); w {
+	case "mvcc":
+	case "owned":
+		workload = sim.OwnershipWorkload{NumKeys: 4}
+	default:
+		t.Fatalf("unknown workload %q (have: mvcc, owned)", w)
 	}
 	seedStart := envInt(t, "SIM_SEED_START", 1)
 	seeds := envInt(t, "SIM_SEEDS", 200)
@@ -37,7 +46,7 @@ func TestGate(t *testing.T) {
 		SeedCount: seeds,
 		Profile:   profile,
 		Faults:    faults.ForProfile(profile),
-		Workload:  sim.MVCCWorkload{NumKeys: 4},
+		Workload:  workload,
 		NewStores: ciStores(profile),
 		Heal:      func(s *sim.Sim) { s.Net.Heal(); faults.HealStores(s) },
 		Rounds:    40,
