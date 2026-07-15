@@ -52,6 +52,18 @@ func (m *Mem) Store(_ context.Context, key []byte, r caspaxos.Register) error {
 	return nil
 }
 
+// Keys returns every stored key (the store.Lister seam for carry-forward key
+// enumeration, §4.3).
+func (m *Mem) Keys(_ context.Context) ([][]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([][]byte, 0, len(m.regs))
+	for k := range m.regs {
+		out = append(out, []byte(k))
+	}
+	return out, nil
+}
+
 func clone(b []byte) []byte {
 	if b == nil {
 		return nil

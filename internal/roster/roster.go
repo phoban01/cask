@@ -57,6 +57,13 @@ type Value struct {
 	// ConfigGen is bumped ONLY when Core/Joint changes, so a reader can cheaply
 	// detect that the register's acceptor set has moved.
 	ConfigGen uint64 `json:"cfg_gen"`
+	// RangeIDs is the authoritative list of live range ids (§4.3): the roster
+	// is the index, each range's descriptor register (\x00rd/<id>, hosted on
+	// the Core) is the placement authority. Empty means the pre-§4.3 implicit
+	// single range (id 1) — readers treat the two identically, so existing
+	// clusters upgrade in place. Split/merge commits update this list; that
+	// update IS the routing cutover.
+	RangeIDs []uint64 `json:"range_ids,omitempty"`
 }
 
 // Proposer is the consensus operation the roster needs (satisfied by

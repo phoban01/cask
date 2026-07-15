@@ -172,6 +172,30 @@ func (p *Pebble) flusher() {
 	}
 }
 
+// Keys returns every stored register key (the store.Lister seam for
+// carry-forward key enumeration, §4.3).
+func (p *Pebble) Keys(_ context.Context) ([][]byte, error) {
+	iter, err := p.db.NewIter(&pebble.IterOptions{
+		LowerBound: []byte("r/"),
+		UpperBound: []byte("r0"), // '0' = '/'+1: everything under the r/ prefix
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: keys iter: %w", err)
+	}
+	defer iter.Close()
+	var out [][]byte
+	for iter.First(); iter.Valid(); iter.Next() {
+		k := iter.Key()
+		out = append(out, append([]byte(nil), k[2:]...)) // strip "r/"
+	}
+	return out, iter.Error()
+}
+
+// Lister is implemented by stores that can enumerate their keys.
+type Lister interface {
+	Keys(ctx context.Context) ([][]byte, error)
+}
+
 // Flushes reports how many group commits have run (telemetry/tests).
 func (p *Pebble) Flushes() uint64 {
 	p.mu.Lock()

@@ -197,19 +197,45 @@ func (r *Router) proposerFor(d ranges.Descriptor) (*caspaxos.Proposer, error) {
 	if c, ok := r.cache[d.ID]; ok && c.epoch == d.Epoch {
 		return c.p, nil
 	}
-	acc := make([]caspaxos.AcceptorClient, 0, len(d.Replicas))
-	for _, n := range d.Replicas {
+	var opts []caspaxos.Option
+	if r.backoff != nil {
+		opts = append(opts, caspaxos.WithBackoff(r.backoff))
+	}
+	var p *caspaxos.Proposer
+	if d.Joint != nil {
+		// A replica reconfiguration is in flight (§4.3): every proposal must
+		// gather a quorum in BOTH the old and new sets, so nothing committed
+		// during the migration can be lost by either side. Shared acceptors
+		// are deduplicated by NewJointProposer.
+		old, err := r.clientsFor(d.Joint.Old)
+		if err != nil {
+			return nil, err
+		}
+		new_, err := r.clientsFor(d.Joint.New)
+		if err != nil {
+			return nil, err
+		}
+		p = caspaxos.NewJointProposer(r.id, [][]caspaxos.AcceptorClient{old, new_}, opts...)
+	} else {
+		acc, err := r.clientsFor(d.Replicas)
+		if err != nil {
+			return nil, err
+		}
+		p = caspaxos.NewProposer(r.id, acc, opts...)
+	}
+	r.cache[d.ID] = cachedProposer{epoch: d.Epoch, p: p}
+	return p, nil
+}
+
+// clientsFor resolves node ids to acceptor clients (locked by the caller).
+func (r *Router) clientsFor(ids []uint64) ([]caspaxos.AcceptorClient, error) {
+	acc := make([]caspaxos.AcceptorClient, 0, len(ids))
+	for _, n := range ids {
 		a, ok := r.dialer.Acceptor(n)
 		if !ok {
 			return nil, ErrNoReplica
 		}
 		acc = append(acc, a)
 	}
-	var opts []caspaxos.Option
-	if r.backoff != nil {
-		opts = append(opts, caspaxos.WithBackoff(r.backoff))
-	}
-	p := caspaxos.NewProposer(r.id, acc, opts...)
-	r.cache[d.ID] = cachedProposer{epoch: d.Epoch, p: p}
-	return p, nil
+	return acc, nil
 }
