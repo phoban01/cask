@@ -56,7 +56,15 @@ func newNode(t *testing.T, ca cert.Certificate, caKey []byte, name string, ip ne
 	if err != nil {
 		t.Fatalf("build nebula network %q: %v", name, err)
 	}
-	t.Cleanup(func() { net.Close() })
+	// DELIBERATELY not closed: upstream nebula's Interface.listenIn treats any
+	// device-read error other than os.ErrClosed as fatal and calls os.Exit(2),
+	// but the userspace device is io.Pipe-backed and surfaces close as io.EOF —
+	// so tearing the overlay down races a PROCESS KILL against the test
+	// runner's verdict (the old ~1-in-5 "FAIL with no failing test" flake).
+	// The wrapper cannot intercept the error either: service.New type-asserts
+	// the concrete *overlay.UserDevice. Leaking the overlay is harmless here —
+	// the test process exit reaps goroutines and ports. See Network.Close docs.
+	_ = net.Close // keep the symbol referenced so the hazard note is visible
 	return net
 }
 

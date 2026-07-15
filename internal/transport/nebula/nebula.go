@@ -99,6 +99,16 @@ func (n *Network) HTTPClient() *http.Client {
 const overlayRPCTimeout = 4 * time.Second
 
 // Close tears down the overlay and all tunnels.
+//
+// CAUTION — safe only at process shutdown. Upstream nebula's packet loop
+// (Interface.listenIn, slackhq/nebula v1.10.3 interface.go) treats any device
+// read error other than os.ErrClosed as fatal to the fd and calls os.Exit(2);
+// the userspace device is io.Pipe-backed, whose close surfaces as io.EOF, so
+// this teardown path can race an os.Exit(2) against whatever the process is
+// still doing. The error cannot be intercepted from here: service.New
+// type-asserts the concrete *overlay.UserDevice, so the device cannot be
+// wrapped. cask only closes the overlay when the process is exiting anyway;
+// do not add a mid-life Close without fixing this upstream first.
 func (n *Network) Close() error { return n.svc.Close() }
 
 // logrusBridge returns a *logrus.Logger that emits nothing of its own and
