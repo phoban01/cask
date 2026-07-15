@@ -115,7 +115,10 @@ func main() {
 		if !ok {
 			return 0, false
 		}
-		if d, ok := placeRange(v).Lookup(key); ok {
+		// §4.3: current epochs come from descriptor registers (distributed
+		// via the roster snapshot), falling back to roster-derived placement
+		// until the genesis descriptor is seeded.
+		if d, ok := rmapFromSnap(s, v).Lookup(key); ok {
 			return d.Epoch, true
 		}
 		return 0, false
@@ -127,6 +130,22 @@ func main() {
 	} else {
 		mux.Handle(transport.ConnectHandler(localAcc, transport.WithEpochOf(epochOf)))
 	}
+	// §4.3 carry-forward key enumeration: the reconfiguration driver reads a
+	// majority of the old replicas' key lists through this endpoint.
+	mux.HandleFunc("/rangekeys", func(w http.ResponseWriter, r *http.Request) {
+		l, ok := acceptorStore.(store.Lister)
+		if !ok {
+			http.Error(w, "store cannot enumerate keys", http.StatusNotImplemented)
+			return
+		}
+		keys, err := l.Keys(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(keys)
+	})
 
 	// The overlay path gets its config either from a file (--nebula-config) or by
 	// enrolling at a `cask mint` endpoint (--mint).
@@ -161,7 +180,7 @@ func main() {
 	)
 	if useOverlay {
 		disco := buildDisco(log, srvName, *seed)
-		dyn, overlayLn, self, mon, snap, f, m, err := nebulaCluster(ctx, log, configYAML, *ovPort, localAcc, clientOnly, *boot, disco)
+		dyn, overlayLn, self, mon, snap, f, m, err := nebulaCluster(ctx, log, configYAML, *ovPort, localAcc, acceptorStore, clientOnly, *boot, disco)
 		if err != nil {
 			log.Error("nebula cluster", "err", err)
 			os.Exit(1)

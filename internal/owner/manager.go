@@ -219,6 +219,13 @@ func (m *Manager) FastPropose(ctx context.Context, key []byte, change caspaxos.C
 
 	ko := g.owner(m, key)
 
+	// Fast-path rounds carry the SAME claimed epoch as full-path rounds
+	// (§4.1/§4.3): during a range reconfiguration, epoch-aware replicas
+	// reject this grant's pre-joint writes just like any other stale
+	// writer's — without this, a live owner that missed the joint publish
+	// could keep committing to the old replica set past the migration.
+	ctx = ranges.WithClaimedEpoch(ctx, g.rangeEpoch)
+
 	// One recovery retry after a fence bump, then fall back. The retry is
 	// load-bearing, not merely an optimization: a fallback full-path write
 	// epoch-jumps into the NEXT epoch space — exactly the fence the manager
@@ -286,7 +293,7 @@ func (m *Manager) ReadLocal(ctx context.Context, key []byte) ([]byte, bool, erro
 		return nil, false, nil // too close to expiry: a successor may be taking over
 	}
 	ko := g.owner(m, key)
-	if err := ko.take(ctx, key, g.currentFence()); err != nil {
+	if err := ko.take(ranges.WithClaimedEpoch(ctx, g.rangeEpoch), key, g.currentFence()); err != nil {
 		// Reads stay cheap: no recovery dance, just the full path.
 		return nil, false, nil
 	}
@@ -439,7 +446,11 @@ func (m *Manager) Maintain(ctx context.Context, rmap *ranges.Map) error {
 	for _, d := range descs {
 		live[d.ID] = true
 		hint, ok := placement.Owner(ranges.RangeKey(d.ID), d.Replicas)
-		eligible := ok && hint == m.nodeID
+		// A range mid-reconfiguration (Joint set) takes no grant: owned
+		// writes are single-set accept rounds, which cannot satisfy the
+		// joint-quorum requirement the migration depends on. The fast path
+		// resumes after the release publishes the new replica set.
+		eligible := ok && hint == m.nodeID && d.Joint == nil
 
 		m.mu.Lock()
 		g, have := m.grants[d.ID]

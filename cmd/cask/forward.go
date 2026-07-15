@@ -54,7 +54,7 @@ func (f *forwarder) ownerAddr(key []byte) string {
 	if !ok {
 		return ""
 	}
-	d, ok := placeRange(val).Lookup(key)
+	d, ok := rmapFromSnap(f.snap, val).Lookup(key)
 	if !ok {
 		return ""
 	}

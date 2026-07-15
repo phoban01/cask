@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/phoban01/cask/internal/placement"
 	"github.com/phoban01/cask/internal/ranges"
 	"github.com/phoban01/cask/internal/roster"
+	"github.com/phoban01/cask/internal/store"
 	"github.com/phoban01/cask/internal/transport"
 	"github.com/phoban01/cask/internal/transport/nebula"
 )
@@ -55,7 +57,7 @@ const (
 // be nil. Returns a proposer for mvcc/lease, the overlay listener, the local
 // member, a health monitor (nil for client-only), and a roster snapshot holder
 // the caller serves at /roster so joining peers can learn the core.
-func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, caskPort int, local *caspaxos.Acceptor, clientOnly, bootstrap bool, disco roster.Discovery) (*dynamicProposer, net.Listener, roster.Member, *healthMonitor, *rosterSnap, *forwarder, *owner.Manager, error) {
+func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, caskPort int, local *caspaxos.Acceptor, localStore caspaxos.Storage, clientOnly, bootstrap bool, disco roster.Discovery) (*dynamicProposer, net.Listener, roster.Member, *healthMonitor, *rosterSnap, *forwarder, *owner.Manager, error) {
 	fail := func(err error) (*dynamicProposer, net.Listener, roster.Member, *healthMonitor, *rosterSnap, *forwarder, *owner.Manager, error) {
 		return nil, nil, roster.Member{}, nil, nil, nil, nil, err
 	}
@@ -100,6 +102,7 @@ func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, cas
 	}
 
 	var val roster.Value
+	var joinedDescs []ranges.State
 	switch {
 	case bootstrap:
 		v, err := rost.Founder(ctx, self)
@@ -116,12 +119,13 @@ func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, cas
 		if err != nil {
 			return fail(fmt.Errorf("roster join: %w", err))
 		}
-		val = v
+		val, joinedDescs = v.Value, v.Descriptors
 	}
 	dialer.learn(val.Members)
 
 	snap := newRosterSnap(self.NodeID)
 	snap.store(val)
+	snap.storeDescs(joinedDescs)
 
 	dyn := &dynamicProposer{}
 
@@ -154,8 +158,24 @@ func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, cas
 		return dyn, ln, self, nil, snap, fwd, nil, nil
 	}
 
+	// §4.3: the descriptor store proposes against the current Core; the
+	// orchestrator's settle waits out the routing lease — two reconcile ticks
+	// covers the driver's own observation plus every follower's next poll,
+	// after which no pre-joint writer can commit (§4.1 fencing).
+	dstore := descriptorStore(self.NodeID, snap, dialer)
+	settle := func(ctx context.Context) error {
+		select {
+		case <-time.After(2*reconcileInterval + time.Second):
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	orch := ranges.NewOrchestrator(self.NodeID, dstore, dialer,
+		keyLister(self.NodeID, localStore, dialer, network.HTTPClient()), settle)
+
 	mon := newHealthMonitor(self.NodeID, network.HTTPClient())
-	go reconcileLoop(ctx, log, rost, dialer, dyn, mon, snap, disco, candidates, network.HTTPClient(), mgr, val)
+	go reconcileLoop(ctx, log, rost, dialer, dyn, mon, snap, disco, candidates, network.HTTPClient(), mgr, dstore, orch, val)
 	return dyn, ln, self, mon, snap, fwd, mgr, nil
 }
 
@@ -182,7 +202,7 @@ func isDriver(self uint64, core []uint64) bool {
 // for a roster snapshot, adopts the current acceptor core, and — unless
 // client-only — asks the driver to add it via /roster/join, retrying until it
 // observes itself in the membership or the join deadline passes.
-func joinCluster(ctx context.Context, log *slog.Logger, rost *roster.Roster, dialer *overlayDialer, hc *http.Client, self roster.Member, candidates func() []roster.Member, addSelf bool) (roster.Value, error) {
+func joinCluster(ctx context.Context, log *slog.Logger, rost *roster.Roster, dialer *overlayDialer, hc *http.Client, self roster.Member, candidates func() []roster.Member, addSelf bool) (snapPayload, error) {
 	ctx, cancel := context.WithTimeout(ctx, joinTimeout)
 	defer cancel()
 	for {
@@ -202,7 +222,7 @@ func joinCluster(ctx context.Context, log *slog.Logger, rost *roster.Roster, dia
 		}
 		select {
 		case <-ctx.Done():
-			return roster.Value{}, fmt.Errorf("no live cluster member found to join (is a --bootstrap node up?): %w", ctx.Err())
+			return snapPayload{}, fmt.Errorf("no live cluster member found to join (is a --bootstrap node up?): %w", ctx.Err())
 		case <-time.After(joinPoll):
 		}
 	}
@@ -240,8 +260,8 @@ func containsMember(members []roster.Member, id uint64) bool {
 // fetchCoreHint queries each candidate's /roster endpoint and returns the value
 // with the highest ConfigGen — a non-consensus hint that lets a joiner discover
 // the current acceptor core before it can read the register itself.
-func fetchCoreHint(ctx context.Context, hc *http.Client, candidates []roster.Member) (roster.Value, bool) {
-	var best roster.Value
+func fetchCoreHint(ctx context.Context, hc *http.Client, candidates []roster.Member) (snapPayload, bool) {
+	var best snapPayload
 	found := false
 	for _, m := range candidates {
 		if m.Addr == "" {
@@ -255,7 +275,7 @@ func fetchCoreHint(ctx context.Context, hc *http.Client, candidates []roster.Mem
 		if err != nil {
 			continue
 		}
-		var v roster.Value
+		var v snapPayload
 		derr := json.NewDecoder(resp.Body).Decode(&v)
 		resp.Body.Close()
 		if derr != nil || v.ConfigGen == 0 {
@@ -301,8 +321,19 @@ func contentionBackoff() func(ctx context.Context, attempt int) error {
 type rosterSnap struct {
 	self    uint64
 	v       atomic.Pointer[roster.Value]
+	descs   atomic.Pointer[[]ranges.State] // §4.3: descriptor states, driver-refreshed
 	mu      sync.Mutex
 	pending map[uint64]roster.Member
+}
+
+// snapPayload is the /roster wire shape: the roster value flat (embedded, so
+// a decoder expecting only roster.Value still works) plus the descriptor
+// states the driver last read from the Core. The snapshot poll is how
+// followers learn descriptor changes — joint publishes, releases, splits —
+// without issuing write-imposing consensus reads of their own.
+type snapPayload struct {
+	roster.Value
+	Descriptors []ranges.State `json:"descriptors,omitempty"`
 }
 
 func newRosterSnap(self uint64) *rosterSnap {
@@ -318,6 +349,20 @@ func (s *rosterSnap) load() (roster.Value, bool) {
 	return roster.Value{}, false
 }
 
+// storeDescs records the latest known descriptor states (nil-safe no-op).
+func (s *rosterSnap) storeDescs(descs []ranges.State) {
+	if descs != nil {
+		s.descs.Store(&descs)
+	}
+}
+
+func (s *rosterSnap) loadDescs() []ranges.State {
+	if d := s.descs.Load(); d != nil {
+		return *d
+	}
+	return nil
+}
+
 func (s *rosterSnap) serve(w http.ResponseWriter, _ *http.Request) {
 	v := s.v.Load()
 	if v == nil {
@@ -325,7 +370,7 @@ func (s *rosterSnap) serve(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(snapPayload{Value: *v, Descriptors: s.loadDescs()})
 }
 
 // serveJoin accepts a membership join. If this node is the current driver it
@@ -399,11 +444,13 @@ func addrOfMax(core []uint64, members []roster.Member) string {
 // exactly one writer on the register at steady state, so reconfiguration is not
 // starved by dueling reads. The range is re-placed when the membership epoch
 // advances, on driver and follower alike.
-func reconcileLoop(ctx context.Context, log *slog.Logger, rost *roster.Roster, dialer *overlayDialer, dyn *dynamicProposer, mon *healthMonitor, snap *rosterSnap, disco roster.Discovery, candidates func() []roster.Member, hc *http.Client, mgr *owner.Manager, val roster.Value) {
+func reconcileLoop(ctx context.Context, log *slog.Logger, rost *roster.Roster, dialer *overlayDialer, dyn *dynamicProposer, mon *healthMonitor, snap *rosterSnap, disco roster.Discovery, candidates func() []roster.Member, hc *http.Client, mgr *owner.Manager, dstore *ranges.Store, orch *ranges.Orchestrator, val roster.Value) {
 	ctrl := roster.NewController(rost).EnableCoreReconfig(roster.RegisterRF)
 	self := dialer.self
 	epoch := val.Epoch
 	cur := val
+	lastFP := ""
+	var reconfigBusy atomic.Bool
 	t := time.NewTicker(reconcileInterval)
 	defer t.Stop()
 	for {
@@ -432,17 +479,32 @@ func reconcileLoop(ctx context.Context, log *slog.Logger, rost *roster.Roster, d
 					continue
 				}
 				cur = applyView(log, dialer, dyn, snap, mon, mgr, cur, v, &epoch, "driver")
+				// §4.3: the driver is also the sole descriptor reader/writer —
+				// it seeds, triggers reconfigurations, and refreshes the
+				// snapshot's descriptor states, which followers pick up on
+				// their next /roster poll.
+				snap.storeDescs(driveRanges(ctx, log, dstore, orch, cur, replicationFactor, &reconfigBusy))
 			} else if v, ok := fetchCoreHint(ctx, hc, fetchTargets(candidates(), cur.Members)); ok && len(v.Core) > 0 {
 				// Follower: adopt the driver's view without touching consensus, so
 				// it can take over cleanly if it later becomes the driver.
 				rost.AdoptCore(v.Core)
-				cur = applyView(log, dialer, dyn, snap, mon, mgr, cur, v, &epoch, "follower")
+				snap.storeDescs(v.Descriptors)
+				cur = applyView(log, dialer, dyn, snap, mon, mgr, cur, v.Value, &epoch, "follower")
+			}
+			// Rebuild routing whenever descriptor state moved: descriptor
+			// epochs (joint publish, release, splits) advance WITHOUT a roster
+			// epoch bump, and the routing lease the orchestrator's settle
+			// waits out is exactly this loop observing the change per tick.
+			if fp := descFingerprint(snap, cur); fp != lastFP {
+				lastFP = fp
+				dyn.set(routerFor(self, cur, dialer, mgr, snap))
 			}
 			// Ownership grants ride the reconcile cadence: renew the session,
-			// acquire/release range locks per current HRW eligibility. Never on
-			// the write path; failures cost fast-path coverage, not correctness.
+			// acquire/release range locks per current HRW eligibility (joint
+			// ranges take no grant). Never on the write path; failures cost
+			// fast-path coverage, not correctness.
 			if mgr != nil {
-				if err := mgr.Maintain(ctx, placeRange(cur)); err != nil {
+				if err := mgr.Maintain(ctx, rmapFromSnap(snap, cur)); err != nil {
 					log.Warn("owner maintain", "err", err)
 				}
 			}
@@ -457,6 +519,7 @@ func reconcileLoop(ctx context.Context, log *slog.Logger, rost *roster.Roster, d
 func reconcileLoopReadOnly(ctx context.Context, log *slog.Logger, rost *roster.Roster, dialer *overlayDialer, dyn *dynamicProposer, snap *rosterSnap, candidates func() []roster.Member, hc *http.Client, val roster.Value) {
 	epoch := val.Epoch
 	cur := val
+	lastFP := ""
 	t := time.NewTicker(reconcileInterval)
 	defer t.Stop()
 	for {
@@ -469,7 +532,13 @@ func reconcileLoopReadOnly(ctx context.Context, log *slog.Logger, rost *roster.R
 				continue
 			}
 			rost.AdoptCore(v.Core)
-			cur = applyView(log, dialer, dyn, snap, nil, nil, cur, v, &epoch, "client")
+			snap.storeDescs(v.Descriptors)
+			cur = applyView(log, dialer, dyn, snap, nil, nil, cur, v.Value, &epoch, "client")
+			// Descriptor moves must retarget this client's routing too.
+			if fp := descFingerprint(snap, cur); fp != lastFP {
+				lastFP = fp
+				dyn.set(routerFor(dialer.self, cur, dialer, nil, snap))
+			}
 		}
 	}
 }
@@ -637,6 +706,176 @@ func (d *overlayDialer) clients(ids []uint64) []caspaxos.AcceptorClient {
 	for _, id := range ids {
 		if c, ok := d.Acceptor(id); ok {
 			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// --- §4.3: descriptor-driven placement ------------------------------------
+
+// proposerFunc adapts a closure to the ranges.Proposer seam.
+type proposerFunc func(ctx context.Context, key []byte, change caspaxos.ChangeFunc) ([]byte, error)
+
+func (f proposerFunc) Propose(ctx context.Context, key []byte, change caspaxos.ChangeFunc) ([]byte, error) {
+	return f(ctx, key, change)
+}
+
+// descriptorStore builds a ranges.Store whose proposals target the roster's
+// CURRENT Core, resolved from the snapshot at call time — the same late-
+// binding pattern the roster itself uses, so a Core reconfiguration
+// retargets automatically.
+func descriptorStore(self uint64, snap *rosterSnap, dialer *overlayDialer) *ranges.Store {
+	return ranges.NewStore(proposerFunc(func(ctx context.Context, key []byte, change caspaxos.ChangeFunc) ([]byte, error) {
+		v, ok := snap.load()
+		if !ok || len(v.Core) == 0 {
+			return nil, fmt.Errorf("descriptor store: no known core yet")
+		}
+		return proposerForGroups(self, [][]uint64{v.Core}, dialer).Propose(ctx, key, change)
+	}))
+}
+
+// rangeIDsOf returns the roster's live range ids; empty means the pre-§4.3
+// implicit single range.
+func rangeIDsOf(v roster.Value) []uint64 {
+	if len(v.RangeIDs) > 0 {
+		return v.RangeIDs
+	}
+	return []uint64{1}
+}
+
+// nodesOf converts roster members to placement candidates.
+func nodesOf(v roster.Value) []placement.Node {
+	nodes := make([]placement.Node, len(v.Members))
+	for i, m := range v.Members {
+		nodes[i] = placement.Node{ID: m.NodeID, Zone: m.Zone}
+	}
+	return nodes
+}
+
+// rmapFromSnap builds the routing map from the latest known descriptor
+// states, falling back to legacy roster-derived HRW placement until the first
+// descriptor is known (bootstrap, and clusters predating §4.3).
+func rmapFromSnap(snap *rosterSnap, val roster.Value) *ranges.Map {
+	if snap != nil {
+		if descs := snap.loadDescs(); len(descs) > 0 {
+			ds := make([]ranges.Descriptor, 0, len(descs))
+			for _, s := range descs {
+				if !s.Tombstoned {
+					ds = append(ds, s.Descriptor)
+				}
+			}
+			if len(ds) > 0 {
+				return ranges.NewMap(ds)
+			}
+		}
+	}
+	return placeRange(val)
+}
+
+// descFingerprint summarizes routing-relevant state; a change means the
+// routers must be rebuilt (descriptor epochs move without roster epochs).
+func descFingerprint(snap *rosterSnap, val roster.Value) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "e%d", val.Epoch)
+	for _, s := range snap.loadDescs() {
+		fmt.Fprintf(&b, "|%d:%d:%v", s.ID, s.Epoch, s.Tombstoned)
+	}
+	return b.String()
+}
+
+// readDescriptors linearizably reads every named descriptor from the Core.
+func readDescriptors(ctx context.Context, dstore *ranges.Store, ids []uint64) ([]ranges.State, error) {
+	out := make([]ranges.State, 0, len(ids))
+	for _, id := range ids {
+		st, ok, err := dstore.Get(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out = append(out, st)
+		}
+	}
+	return out, nil
+}
+
+// keyLister enumerates a node's acceptor-store keys for carry-forward: the
+// local store directly, remote nodes via their /rangekeys endpoint.
+func keyLister(self uint64, local caspaxos.Storage, dialer *overlayDialer, hc *http.Client) ranges.KeyLister {
+	return func(ctx context.Context, node uint64) ([][]byte, error) {
+		if node == self {
+			l, ok := local.(store.Lister)
+			if !ok {
+				return nil, fmt.Errorf("local store cannot enumerate keys")
+			}
+			return l.Keys(ctx)
+		}
+		addr, ok := dialer.addr(node)
+		if !ok {
+			return nil, fmt.Errorf("no address for node %d", node)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/rangekeys", nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := hc.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("rangekeys %d: %s", node, resp.Status)
+		}
+		var keys [][]byte
+		if err := json.NewDecoder(resp.Body).Decode(&keys); err != nil {
+			return nil, err
+		}
+		return keys, nil
+	}
+}
+
+// driveRanges is the driver's per-tick §4.3 duty: seed the genesis descriptor
+// if missing, trigger replica reconfiguration when placement wants it (or an
+// in-flight joint needs completing), and return the fresh descriptor states
+// for the snapshot. Reconfigurations run single-flight in the background —
+// they block on the routing-lease settle and the data carry.
+func driveRanges(ctx context.Context, log *slog.Logger, dstore *ranges.Store, orch *ranges.Orchestrator, cur roster.Value, rf int, busy *atomic.Bool) []ranges.State {
+	var out []ranges.State
+	for _, id := range rangeIDsOf(cur) {
+		st, ok, err := dstore.Get(ctx, id)
+		if err != nil {
+			log.Warn("descriptor read", "range", id, "err", err)
+			continue
+		}
+		if !ok {
+			if id != 1 {
+				log.Error("roster names a range with no descriptor", "range", id)
+				continue
+			}
+			seeded, err := orch.Seed(ctx, ranges.Descriptor{
+				ID:       id,
+				Replicas: placement.TargetReplicas(ranges.RangeKey(id), nodesOf(cur), rf),
+				Epoch:    1,
+			})
+			if err != nil {
+				log.Warn("descriptor seed", "range", id, "err", err)
+				continue
+			}
+			st = seeded
+			log.Info("seeded genesis descriptor", "range", id, "replicas", st.Replicas)
+		}
+		out = append(out, st)
+
+		target, need := placement.NeedsReconfig(ranges.RangeKey(id), st.Replicas, nodesOf(cur), rf)
+		if (need || st.Joint != nil) && busy.CompareAndSwap(false, true) {
+			go func(id uint64, target []uint64) {
+				defer busy.Store(false)
+				released, err := orch.ReconfigReplicas(ctx, id, target)
+				if err != nil {
+					log.Warn("range reconfig", "range", id, "target", target, "err", err)
+					return
+				}
+				log.Info("range reconfigured", "range", id, "replicas", released.Replicas, "epoch", released.Epoch)
+			}(id, target)
 		}
 	}
 	return out

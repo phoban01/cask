@@ -520,6 +520,44 @@ never driven from cmd — when HRW re-places the range's replicas on a roster
 change, committed data is not carried to the new acceptor set. §4.1 is the
 client-refresh half; the carry-forward driver is §4.3's replica-set-reconfig
 scope and is release-blocking for any multi-epoch churn claim.
+*(Closed 2026-07-15 by the §4.3 wiring below.)*
+
+### §4.3 — descriptor-driven placement + sound replica reconfig (landed 2026-07-15)
+
+The data-loss hole is closed end to end. Foundation (commit `9dcbf97`):
+descriptor registers at `\x00rd/<id>` on the Core, `Descriptor.Joint` making
+in-flight reconfigurations visible to routing (joint proposers), and
+`Orchestrator.ReconfigReplicas` — publish-joint → settle → majority-union
+carry-forward → release, resumable via the register's Joint marker. cmd
+wiring (this commit):
+
+- **Distribution channel**: descriptor states ride the existing `/roster`
+  snapshot (`snapPayload` embeds the roster value flat for wire-compat). The
+  DRIVER is the sole consensus reader/writer of descriptors (`driveRanges`
+  per tick: seed genesis from placement, trigger reconfig via
+  `placement.NeedsReconfig`, refresh states); followers and joiners learn
+  them from their normal poll — no consensus-read storms, no dueling.
+- **Routing rebuilds on a descriptor fingerprint** (ids+epochs+tombstones):
+  descriptor epochs move without roster epochs, and the orchestrator's
+  settle (2 reconcile ticks + slack) is calibrated to exactly this
+  observation latency. `rmapFromSnap` falls back to legacy HRW placement
+  until the genesis descriptor exists, so pre-§4.3 clusters upgrade in
+  place. `epochOf` (§4.1) and the M7 forwarder's owner hint now come from
+  descriptors too.
+- **Key enumeration**: `/rangekeys` endpoint (store.Lister) + majority-union
+  over the old replicas.
+- **Owner-manager hardening the analysis demanded**: fast-path rounds stamp
+  their grant's descriptor epoch (an owner that misses the joint publish is
+  fenced by §4.1 like any stale writer — owned writes previously carried NO
+  epoch), and `Maintain` takes no grant on a joint range (owned single-set
+  accepts cannot satisfy joint quorums).
+
+Tested: the full driver flow (seed from placement → membership change →
+background reconfig → all data served from the new set → fingerprint
+retarget) plus the ranges-layer suite from the foundation commit. Remaining
+§4.3 scope, deliberately deferred: split/merge (Variant 1) and roster
+`RangeIDs` management — the descriptor/orchestrator machinery they ride on
+is now in place.
 - A degraded read (guard refusal) lands on the owner's 1-RTT identity round,
   not the 2-RTT full path — reads never get slower than pre-W4.
 - `tla/OwnerReads.tla` proves the guard under adversarial skew
