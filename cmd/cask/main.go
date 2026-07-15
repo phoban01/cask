@@ -68,14 +68,29 @@ func main() {
 		token   = flag.String("token", "", "enrollment token presented to --mint")
 		zone    = flag.String("zone", "", "this node's failure domain (zone), sent at enrollment")
 		role    = flag.String("role", "replica", "enrollment role: replica or client")
+		dataDir = flag.String("data-dir", "", "directory for durable consensus state (Pebble); empty = in-memory (state lost on restart)")
 	)
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	// Local acceptor (durable consensus state for this node) plus its handler so
-	// peers can reach it over the chosen transport.
-	localAcc := caspaxos.NewAcceptor(store.NewMem())
+	// Local acceptor: durable consensus state for this node, served to peers
+	// over the chosen transport. With --data-dir, registers live in Pebble and
+	// survive restarts (every acknowledged Store is fsynced; group commit
+	// amortizes the syncs); without it, memory only — fine for tests and
+	// demos, but every "safe under crash" claim needs the durable store.
+	var acceptorStore caspaxos.Storage = store.NewMem()
+	if *dataDir != "" {
+		p, err := store.NewPebble(*dataDir, store.WithGroupCommit())
+		if err != nil {
+			log.Error("open data dir", "dir", *dataDir, "err", err)
+			os.Exit(1)
+		}
+		defer p.Close()
+		acceptorStore = p
+		log.Info("durable store open", "dir", *dataDir)
+	}
+	localAcc := caspaxos.NewAcceptor(acceptorStore)
 	clock := hlc.New(func() int64 { return time.Now().UnixNano() })
 
 	// prop drives mvcc/lease: a flat proposer over --peers, or a self-forming,
