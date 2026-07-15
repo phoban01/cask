@@ -49,6 +49,16 @@ type LocalInvalidator interface {
 	InvalidateLocal(key []byte)
 }
 
+// FullPathGate is implemented by fast paths whose cached reads a full-path
+// round could silently invalidate on ANOTHER node (M7): before running the
+// full path, the router asks permission. A non-nil error (owner.ErrOwnerLive)
+// aborts the proposal — the caller forwards to the owner or retries after its
+// lease lapses. Fast-path-handled proposals and internal keys never consult
+// the gate.
+type FullPathGate interface {
+	GateFullPath(ctx context.Context, rangeID uint64, key []byte) error
+}
+
 // StaticDialer is a fixed node-id -> acceptor mapping.
 type StaticDialer map[uint64]caspaxos.AcceptorClient
 
@@ -115,6 +125,11 @@ func (r *Router) Propose(ctx context.Context, key []byte, change caspaxos.Change
 	d, ok := r.rmap.Lookup(key)
 	if !ok {
 		return nil, ErrNoRange
+	}
+	if gate, ok := r.fast.(FullPathGate); ok {
+		if err := gate.GateFullPath(ctx, d.ID, key); err != nil {
+			return nil, err
+		}
 	}
 	p, err := r.proposerFor(d)
 	if err != nil {

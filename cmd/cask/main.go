@@ -16,6 +16,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"log/slog"
@@ -32,6 +33,7 @@ import (
 	"github.com/phoban01/cask/internal/hlc"
 	"github.com/phoban01/cask/internal/lease"
 	"github.com/phoban01/cask/internal/mvcc"
+	"github.com/phoban01/cask/internal/owner"
 	"github.com/phoban01/cask/internal/roster"
 	"github.com/phoban01/cask/internal/store"
 	"github.com/phoban01/cask/internal/transport"
@@ -116,14 +118,18 @@ func main() {
 		configYAML, useOverlay = string(raw), true
 	}
 
+	var (
+		fwd *forwarder
+		mgr *owner.Manager
+	)
 	if useOverlay {
 		disco := buildDisco(log, srvName, *seed)
-		dyn, overlayLn, self, mon, snap, err := nebulaCluster(ctx, log, configYAML, *ovPort, localAcc, clientOnly, *boot, disco)
+		dyn, overlayLn, self, mon, snap, f, m, err := nebulaCluster(ctx, log, configYAML, *ovPort, localAcc, clientOnly, *boot, disco)
 		if err != nil {
 			log.Error("nebula cluster", "err", err)
 			os.Exit(1)
 		}
-		prop, nodeID = dyn, self.NodeID
+		prop, nodeID, fwd, mgr = dyn, self.NodeID, f, m
 		// Peers probe this endpoint over the overlay; its reply is both a
 		// liveness heartbeat and this node's suspicion vector for cut detection.
 		// A client-only node is never in the roster, so nothing probes it (mon is nil).
@@ -147,10 +153,17 @@ func main() {
 		prop = caspaxos.NewProposer(*id, clients, caspaxos.WithBackoff(contentionBackoff()))
 	}
 
-	kv := mvcc.New(prop, clock, nodeID)
+	// With the M7 forwarder routing client writes to the range owner and the
+	// FullPathGate blocking writes around a live read lease, lease-guarded
+	// local reads are sound cluster-wide — enable them when a manager exists.
+	var kvOpts []mvcc.KVOption
+	if mgr != nil {
+		kvOpts = append(kvOpts, mvcc.WithLocalReader(mgr))
+	}
+	kv := mvcc.New(prop, clock, nodeID, kvOpts...)
 	sessions := lease.NewSessions(prop, func() int64 { return time.Now().UnixNano() })
 	locks := lease.NewLocks(prop, sessions, lease.WithAcquireBackoff(contentionBackoff()))
-	srv := &server{kv: kv, sessions: sessions, locks: locks, log: log}
+	srv := &server{kv: kv, sessions: sessions, locks: locks, fwd: fwd, log: log}
 
 	mux.HandleFunc("/kv/", srv.handleKV) // client KV API
 	mux.HandleFunc("/cas/", srv.handleCAS)
@@ -273,11 +286,19 @@ type server struct {
 	kv       *mvcc.KV
 	sessions *lease.Sessions
 	locks    *lease.Locks
+	fwd      *forwarder // nil outside the overlay topology
 	log      *slog.Logger
 }
 
 func (s *server) handleKV(w http.ResponseWriter, r *http.Request) {
 	key := []byte(strings.TrimPrefix(r.URL.Path, "/kv/"))
+	// M7: route the op to the range owner — its fast path serves writes in
+	// one accept round and reads with zero rounds, and its router keeps the
+	// read cache coherent. Local handling below remains correct either way
+	// (the FullPathGate turns an unsafe write-around into a retryable 503).
+	if s.fwd.maybeForward(w, r, key) {
+		return
+	}
 	ctx := r.Context()
 	switch r.Method {
 	case http.MethodGet:
@@ -311,6 +332,9 @@ func (s *server) handleKV(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleCAS(w http.ResponseWriter, r *http.Request) {
 	key := []byte(strings.TrimPrefix(r.URL.Path, "/cas/"))
+	if s.fwd.maybeForward(w, r, key) {
+		return
+	}
 	body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	var expect []byte
 	if e := r.URL.Query().Get("expect"); e != "" {
@@ -364,6 +388,13 @@ func (s *server) handleLock(w http.ResponseWriter, r *http.Request) {
 }
 
 func httpErr(w http.ResponseWriter, err error) {
+	// A live owner lease is a transient routing condition, not a conflict:
+	// the client retries (or the next forward attempt reaches the owner).
+	if errors.Is(err, owner.ErrOwnerLive) {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
 	http.Error(w, err.Error(), http.StatusConflict)
 }
 

@@ -464,6 +464,37 @@ one major scoping discovery and shipped with it handled honestly:
   cmd/cask until M7 forwarding. `TestCrossNodeWriteReadGapIsDocumented`
   pins the gap as a regression marker: when forwarding closes it, that test
   fails and the caveats come out together.
+  *(Closed 2026-07-15 by M7 — see the M7 notes below; the marker test was
+  repurposed as `TestBareProposerWriteIsOutOfContract`.)*
+
+### M7 — write-forwarding to the range owner (landed 2026-07-15)
+
+Three mechanisms make the writes-via-owner discipline hold cluster-wide,
+which turns W4's local reads on in production (`cmd/cask`):
+
+1. **Forwarding** (`cmd/cask/forward.go`): client `/kv/` and `/cas/` requests
+   entering a non-owner node are proxied one hop to the range-owner hint over
+   the overlay (the overlay listener already serves the full API mux). An
+   `X-Cask-Forwarded` header guarantees at most one hop — a mis-addressed
+   forward is handled locally under the gate, never bounced.
+2. **The full-path gate** (`owner.GateFullPath`, consulted by the Router):
+   when forwarding fails, a local full-path write for a client key is
+   REFUSED with `ErrOwnerLive` (HTTP 503, retryable) while another node's
+   ownership session is live or within MaxOffset of lapse — the Raft-lease
+   rule: you cannot commit around a live read lease. Once the lease lapses
+   past the margin, local writes proceed (and fence the dead owner's epoch).
+3. **Keyspace split**: the fast path (writes AND cached reads) now covers
+   ONLY client keys (no `\x00` prefix). Internal registers — sessions,
+   locks, roster — are written full-path by every node by design and are
+   never cached, which also subsumes the old rown-lock recursion exclusion.
+
+Scope notes: reads forward opportunistically (the owner serves them with
+zero rounds) but any node may always serve a full-round read locally —
+quorum reads are linearizable regardless. Bare `caspaxos.Proposer` writers
+bypass all three mechanisms and are out of contract (the repurposed test
+documents the resulting staleness and its recovery). The gate costs two
+control-plane reads per gated propose — only on the forward-failed path;
+cache the verdict if that ever shows up in profiles.
 - A degraded read (guard refusal) lands on the owner's 1-RTT identity round,
   not the 2-RTT full path — reads never get slower than pre-W4.
 - `tla/OwnerReads.tla` proves the guard under adversarial skew

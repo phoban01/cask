@@ -419,12 +419,14 @@ func TestFullPathFallbackInvalidatesReadCache(t *testing.T) {
 	}
 }
 
-// The documented M7 gap, pinned as a regression marker: a write entering
-// through ANOTHER node bypasses this router's invalidation, so the owner's
-// local read is stale until fencing evidence arrives. When forwarding (M7)
-// or a full-path lease check closes this, this test SHOULD start failing —
-// delete it and the doc caveats together.
-func TestCrossNodeWriteReadGapIsDocumented(t *testing.T) {
+// The deployment contract, pinned from the outside: client-key writes MUST
+// enter through a router (whose fast path, invalidation, and FullPathGate
+// keep owner caches coherent — enforced cluster-wide by M7 forwarding + the
+// gate). A BARE proposer scribbling on an owned key sidesteps all of it, so
+// the owner's local read is stale until fencing evidence arrives — exactly
+// like writing to etcd's bbolt file behind its back. This test documents
+// that out-of-contract behavior and that fencing evidence still recovers it.
+func TestBareProposerWriteIsOutOfContract(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, 1)
 	h.maintain(t)
@@ -445,7 +447,7 @@ func TestCrossNodeWriteReadGapIsDocumented(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(got) != "v1" {
-		t.Fatalf("owner read = %q — the M7 gap appears closed; update docs and remove this marker", got)
+		t.Fatalf("owner read = %q — bare-proposer writes now invalidate the cache somehow; update this contract test", got)
 	}
 
 	// Fencing evidence (a failed write) restores freshness.
@@ -491,5 +493,46 @@ func TestTakeoverWaitsOutReadWindow(t *testing.T) {
 	h.maintain(t)
 	if s := h.mgr.Stats(); s.Grants != 1 {
 		t.Fatalf("grants = %d after the wait, want 1", s.Grants)
+	}
+}
+
+// GateFullPath (M7): a full-path write around another node's live read lease
+// must be refused (ErrOwnerLive); it clears once the lease lapses past the
+// MaxOffset margin. Own grants and internal keys always pass.
+func TestGateFullPath(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, 1)
+	h.maintain(t) // h.mgr (the hint node) holds the range grant
+
+	// A different node's manager, sharing the same registers and clock.
+	other := (h.hint + 1) % 3
+	clock := func() int64 { return h.now.Load() }
+	mgrB := owner.New(other, h.dialer, h.sessions, h.locks,
+		owner.WithClock(clock), owner.WithMaxOffset(harnessMaxOffset))
+
+	// The owner's session is live: B must not write around it.
+	if err := mgrB.GateFullPath(ctx, 1, []byte("k")); !errors.Is(err, owner.ErrOwnerLive) {
+		t.Fatalf("gate with live owner = %v, want ErrOwnerLive", err)
+	}
+	// Internal keys are never cached: always pass.
+	if err := mgrB.GateFullPath(ctx, 1, []byte("\x00sess\x00x")); err != nil {
+		t.Fatalf("gate on internal key = %v, want nil", err)
+	}
+	// The owner itself always passes (its router invalidates its cache).
+	if err := h.mgr.GateFullPath(ctx, 1, []byte("k")); err != nil {
+		t.Fatalf("gate for the grant holder = %v, want nil", err)
+	}
+
+	// Lapsed but inside the read margin: still refused.
+	expiry := int64(1_000) + harnessTTL
+	h.now.Store(expiry + harnessMaxOffset/2)
+	if err := mgrB.GateFullPath(ctx, 1, []byte("k")); !errors.Is(err, owner.ErrOwnerLive) {
+		t.Fatalf("gate inside read margin = %v, want ErrOwnerLive", err)
+	}
+
+	// Past expiry + MaxOffset: the write may proceed.
+	h.now.Store(expiry + harnessMaxOffset + 1)
+	if err := mgrB.GateFullPath(ctx, 1, []byte("k")); err != nil {
+		t.Fatalf("gate past read margin = %v, want nil", err)
 	}
 }

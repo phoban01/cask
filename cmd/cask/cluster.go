@@ -55,15 +55,18 @@ const (
 // be nil. Returns a proposer for mvcc/lease, the overlay listener, the local
 // member, a health monitor (nil for client-only), and a roster snapshot holder
 // the caller serves at /roster so joining peers can learn the core.
-func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, caskPort int, local *caspaxos.Acceptor, clientOnly, bootstrap bool, disco roster.Discovery) (*dynamicProposer, net.Listener, roster.Member, *healthMonitor, *rosterSnap, error) {
+func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, caskPort int, local *caspaxos.Acceptor, clientOnly, bootstrap bool, disco roster.Discovery) (*dynamicProposer, net.Listener, roster.Member, *healthMonitor, *rosterSnap, *forwarder, *owner.Manager, error) {
+	fail := func(err error) (*dynamicProposer, net.Listener, roster.Member, *healthMonitor, *rosterSnap, *forwarder, *owner.Manager, error) {
+		return nil, nil, roster.Member{}, nil, nil, nil, nil, err
+	}
 	network, err := nebula.New(configYAML, log)
 	if err != nil {
-		return nil, nil, roster.Member{}, nil, nil, err
+		return fail(err)
 	}
 
 	self, err := nebula.SelfMember(configYAML, caskPort)
 	if err != nil {
-		return nil, nil, roster.Member{}, nil, nil, err
+		return fail(err)
 	}
 	// seeds are the lighthouse hosts (+self) — Nebula rendezvous points that are
 	// also where a joining node looks first for a live cask member to learn the
@@ -71,7 +74,7 @@ func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, cas
 	// cask member); querying one that isn't simply fails and is skipped.
 	seeds, err := nebula.SeedMembers(configYAML, caskPort)
 	if err != nil {
-		return nil, nil, roster.Member{}, nil, nil, err
+		return fail(err)
 	}
 	log.Info("nebula self-forming", "node", self.NodeID, "addr", self.Addr, "zone", self.Zone, "bootstrap", bootstrap, "clientOnly", clientOnly)
 
@@ -101,7 +104,7 @@ func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, cas
 	case bootstrap:
 		v, err := rost.Founder(ctx, self)
 		if err != nil {
-			return nil, nil, roster.Member{}, nil, nil, fmt.Errorf("roster founder: %w", err)
+			return fail(fmt.Errorf("roster founder: %w", err))
 		}
 		val = v
 		log.Info("founded roster", "node", self.NodeID)
@@ -111,7 +114,7 @@ func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, cas
 		// driver's reconfiguration.
 		v, err := joinCluster(ctx, log, rost, dialer, network.HTTPClient(), self, candidates, !clientOnly)
 		if err != nil {
-			return nil, nil, roster.Member{}, nil, nil, fmt.Errorf("roster join: %w", err)
+			return fail(fmt.Errorf("roster join: %w", err))
 		}
 		val = v
 	}
@@ -123,16 +126,14 @@ func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, cas
 	dyn := &dynamicProposer{}
 
 	// The ownership manager's control-plane traffic (session, range locks)
-	// rides the same dynamic proposer it serves; the rown key exclusion in
-	// FastPropose breaks the recursion. Client-only nodes are never replicas,
-	// so HRW never selects them and they run no manager.
+	// rides the same dynamic proposer it serves; the internal-keyspace
+	// exclusion in FastPropose breaks the recursion. Client-only nodes are
+	// never replicas, so HRW never selects them and they run no manager.
 	//
-	// Note: only the WRITE fast path is wired here. Lease-guarded local READS
-	// (owner.Manager.ReadLocal / mvcc.WithLocalReader) stay off in cmd until
-	// M7 write-forwarding lands: a write entering through another node's
-	// router bypasses this node's cache invalidation, so cluster-wide the
-	// writes-via-owner discipline the read guard requires does not hold yet
-	// (see internal/owner and tla/OwnerReads.tla).
+	// With M7 forwarding in place (the forwarder below + the router's
+	// FullPathGate), the writes-via-owner discipline holds cluster-wide for
+	// client keys, so main.go enables lease-guarded local reads
+	// (mvcc.WithLocalReader) over this manager.
 	var mgr *owner.Manager
 	if !clientOnly {
 		osess := lease.NewSessions(dyn, func() int64 { return time.Now().UnixNano() })
@@ -143,17 +144,19 @@ func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, cas
 
 	ln, err := network.Listen(ctx, fmt.Sprintf(":%d", caskPort))
 	if err != nil {
-		return nil, nil, roster.Member{}, nil, nil, fmt.Errorf("overlay listen: %w", err)
+		return fail(fmt.Errorf("overlay listen: %w", err))
 	}
+
+	fwd := newForwarder(self.NodeID, network.HTTPClient(), dialer, snap, log)
 
 	if clientOnly {
 		go reconcileLoopReadOnly(ctx, log, rost, dialer, dyn, snap, candidates, network.HTTPClient(), val)
-		return dyn, ln, self, nil, snap, nil
+		return dyn, ln, self, nil, snap, fwd, nil, nil
 	}
 
 	mon := newHealthMonitor(self.NodeID, network.HTTPClient())
 	go reconcileLoop(ctx, log, rost, dialer, dyn, mon, snap, disco, candidates, network.HTTPClient(), mgr, val)
-	return dyn, ln, self, mon, snap, nil
+	return dyn, ln, self, mon, snap, fwd, mgr, nil
 }
 
 // isDriver reports whether self is the single node responsible for driving
@@ -588,6 +591,14 @@ func (d *overlayDialer) learn(members []roster.Member) {
 			d.addrs[m.NodeID] = m.Addr
 		}
 	}
+}
+
+// addr returns the learned overlay address of node, if any.
+func (d *overlayDialer) addr(node uint64) (string, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	a, ok := d.addrs[node]
+	return a, ok
 }
 
 func (d *overlayDialer) Acceptor(node uint64) (caspaxos.AcceptorClient, bool) {

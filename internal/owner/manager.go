@@ -17,7 +17,6 @@
 package owner
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -41,12 +40,23 @@ type Dialer interface {
 // lockNamePrefix namespaces range-ownership locks in the lock keyspace.
 const lockNamePrefix = "rown/"
 
-// rownKeyPrefix is the raw register-key prefix of ownership locks. FastPropose
-// declines these keys: the manager's own lock operations route through the
-// same proposer stack, and fast-pathing them would recurse into the manager.
-var rownKeyPrefix = lease.LockKey(lockNamePrefix)
-
 func lockName(rangeID uint64) string { return fmt.Sprintf("%s%d", lockNamePrefix, rangeID) }
+
+// clientKey reports whether key belongs to the client keyspace. The fast path
+// (writes AND cached reads) covers ONLY client keys: internal registers (the
+// \x00-prefixed sessions, locks, roster, sim probes) are written full-path by
+// every node as a matter of design, so caching them would be stale-by-design
+// — and excluding them also breaks the recursion of the manager's own lock
+// and session traffic through the proposer stack it serves.
+func clientKey(key []byte) bool { return len(key) > 0 && key[0] != 0 }
+
+// ErrOwnerLive is returned by GateFullPath when a full-path write must not
+// proceed: another node's ownership session still covers reads (live, or
+// lapsed less than MaxOffset ago). Writing around it would invalidate nothing
+// on the owner and its zero-RTT reads would go stale. Callers surface this as
+// a retryable condition (HTTP 503); it clears when the owner's session lapses
+// past the margin — or never blocks at all if forwarding reaches the owner.
+var ErrOwnerLive = errors.New("owner: range owner's read lease is live; forward or retry")
 
 // Manager holds this node's range-ownership grants and serves the fast path.
 type Manager struct {
@@ -199,7 +209,7 @@ func (m *Manager) Stats() Stats {
 //   - Ownership-lock keys are declined outright: the manager's own lock
 //     traffic routes through this same stack (recursion guard).
 func (m *Manager) FastPropose(ctx context.Context, key []byte, change caspaxos.ChangeFunc) ([]byte, bool, error) {
-	if bytes.HasPrefix(key, rownKeyPrefix) {
+	if !clientKey(key) {
 		return nil, false, nil
 	}
 	g := m.grantFor(key)
@@ -257,13 +267,15 @@ func (m *Manager) FastPropose(ctx context.Context, key []byte, change caspaxos.C
 // owner can serve strictly precedes the first write a new owner can commit.
 //
 // Linearizability additionally requires the writes-via-owner discipline: any
-// write that bypasses this cache must invalidate it. The Router does this for
-// every full-path write it carries (InvalidateLocal); writes entering through
-// OTHER nodes' routers are the M7 forwarding gap, which is why cmd/cask does
-// not enable local reads by default yet — the sim topology (single router)
-// satisfies the discipline and exercises this path fully.
+// write that bypasses this cache must invalidate it. Three mechanisms enforce
+// it cluster-wide (M7): the local Router invalidates after every full-path
+// write it carries (InvalidateLocal); other nodes FORWARD client writes to
+// the owner (cmd's forwarder); and when forwarding fails, their local full
+// path is refused while this owner's read lease is live (GateFullPath /
+// ErrOwnerLive). Bare proposers that bypass all three are out of contract —
+// see TestBareProposerWriteIsOutOfContract.
 func (m *Manager) ReadLocal(ctx context.Context, key []byte) ([]byte, bool, error) {
-	if bytes.HasPrefix(key, rownKeyPrefix) {
+	if !clientKey(key) {
 		return nil, false, nil
 	}
 	g := m.grantFor(key)
@@ -302,6 +314,39 @@ func (m *Manager) InvalidateLocal(key []byte) {
 	if ok {
 		ko.op.Disown()
 	}
+}
+
+// GateFullPath decides whether a full-path proposal for key may run locally
+// (M7). The full path is how a non-owner writes AROUND an owner's cache —
+// safe for writes (epoch fencing) but fatal for the owner's zero-RTT reads,
+// which detect nothing. The rule mirrors Raft leader leases: you cannot
+// commit around a live read lease. nil = proceed; ErrOwnerLive = the owner's
+// session still covers reads (live, or lapsed less than MaxOffset ago) —
+// forward to it or retry later.
+//
+// Internal (\x00-prefixed) keys always pass: they are never cached, by the
+// clientKey rule. Keys in a range this node holds the grant for always pass:
+// the local router invalidates the local cache after every full round.
+func (m *Manager) GateFullPath(ctx context.Context, rangeID uint64, key []byte) error {
+	if !clientKey(key) {
+		return nil
+	}
+	if g := m.grantFor(key); g != nil {
+		return nil // our own range: the router's invalidation covers the cache
+	}
+	holder, live, _, err := m.locks.Owner(ctx, lockName(rangeID))
+	if err != nil || holder == "" || holder == m.sessionID {
+		return nil // unknown/none/ours: nothing to protect (or we own it)
+	}
+	if live {
+		return ErrOwnerLive
+	}
+	if prev, ok, err := m.sessions.Info(ctx, holder); err == nil && ok {
+		if m.clock() < prev.Expiry+m.maxOffset {
+			return ErrOwnerLive // inside the lapsed holder's read margin
+		}
+	}
+	return nil
 }
 
 // grantFor returns the live grant covering key, or nil.
