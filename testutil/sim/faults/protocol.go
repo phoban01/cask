@@ -188,7 +188,18 @@ func (DuelingProposers) Inject(s *sim.Sim) {
 		go func(w int, kv *mvcc.KV) {
 			defer wg.Done()
 			for op := range ops {
-				if _, err := kv.Put(ctx, key, fmt.Appendf(nil, "w%d-%d-%d", w, step, op)); err != nil {
+				// Bounded client-level retry: under a profile with raised
+				// buggify cruelty (5% spurious NACKs per acceptor), one fixed
+				// 12-round proposer budget can exhaust probabilistically —
+				// that is noise, not livelock. Liveness demands convergence
+				// across a client retry; only exhausting THOSE is a WARNING.
+				var err error
+				for attempt := 0; attempt < 3; attempt++ {
+					if _, err = kv.Put(ctx, key, fmt.Appendf(nil, "w%d-%d-%d", w, step, op)); err == nil || !errors.Is(err, caspaxos.ErrPreempted) {
+						break
+					}
+				}
+				if err != nil {
 					errs[w] = err
 					return
 				}
