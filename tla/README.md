@@ -9,6 +9,7 @@ code that depends on it is trusted.
 | `CasPaxosMvcc.tla` | the CASPaxos consensus engine under each key | `Consistency` (agreement — one chosen value), `OneValuePerBallot`, `VotesSafe` |
 | `OwnedRegister.tla` | the `OwnedProposer` fast path composed with a full proposer — the W0 ballot-space discipline (epoch-jump on conflict; `docs/plans/quepaxa-learnings-implementation.md`) | `ChosenChain` (no lost update: all chosen values form a subset chain), `OneValuePerBallot` |
 | `Lease.tla` | leases / locks + fencing, incl. the holder-side `Bump` | `SingleHolder`, `FenceLatest`, `FenceMonotone` |
+| `OwnerReads.tla` | W4 lease-guarded owner reads under adversarial clock skew — the double-sided MaxOffset guard (owner stops serving MaxOffset early; taker waits MaxOffset past expiry) | `NoStaleRead` (every served local read is the latest committed value) |
 | `Reconfig.tla` | per-range joint-consensus reconfiguration under elastic churn | `NoLostValue` (agreement across the transition), `CatchUpHeld` (Cold's chosen values are in Cnew before release) |
 | `RosterReconfig.tla` | reflexive reconfiguration of the membership register — the register stores its own acceptor core, and the membership value advances *during* the core handoff | `NoLostMembership` (the new core holds the latest committed membership before the old core is released), `AlwaysAvailable` |
 | `RangeDescriptors.tla` | the four-step split protocol (`docs/etcd-little-sister.md` §4.3 design C', Variant 1) | `NoSplitBrain` (no stale-belief write ever lands in the wrong range), `AuthorityExistsAndLive`, `TombstoneIsTerminal`; liveness `EventuallyCaughtUp` (L1) |
@@ -28,15 +29,16 @@ curl -L -o tla2tools.jar https://github.com/tlaplus/tlaplus/releases/latest/down
 java -jar tla2tools.jar -config CasPaxosMvcc.cfg     CasPaxosMvcc.tla
 java -jar tla2tools.jar -config OwnedRegister.cfg    OwnedRegister.tla
 java -jar tla2tools.jar -config Lease.cfg            Lease.tla
+java -jar tla2tools.jar -config OwnerReads.cfg       OwnerReads.tla
 java -jar tla2tools.jar -config Reconfig.cfg         Reconfig.tla
 java -jar tla2tools.jar -config RosterReconfig.cfg   RosterReconfig.tla
 java -jar tla2tools.jar -config RangeDescriptors.cfg RangeDescriptors.tla
 java -jar tla2tools.jar -config CrossRange.cfg       CrossRange.tla
 
-# negative control: the pre-W0 ballot rule (+1 bump into an owner's epoch
-# space). TLC MUST report a ChosenChain violation here — a passing run means
-# the model has lost its teeth.
-java -jar tla2tools.jar -config OwnedRegisterBug.cfg OwnedRegister.tla
+# negative controls — TLC MUST report a violation for each; a passing run
+# means that model has lost its teeth.
+java -jar tla2tools.jar -config OwnedRegisterBug.cfg OwnedRegister.tla  # pre-W0 ballot rule
+java -jar tla2tools.jar -config OwnerReadsBug.cfg    OwnerReads.tla     # naive lease checks
 ```
 
 Both models are deliberately small (3 acceptors / 2 clients, tiny ballot/time

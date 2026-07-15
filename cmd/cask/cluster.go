@@ -126,6 +126,13 @@ func nebulaCluster(ctx context.Context, log *slog.Logger, configYAML string, cas
 	// rides the same dynamic proposer it serves; the rown key exclusion in
 	// FastPropose breaks the recursion. Client-only nodes are never replicas,
 	// so HRW never selects them and they run no manager.
+	//
+	// Note: only the WRITE fast path is wired here. Lease-guarded local READS
+	// (owner.Manager.ReadLocal / mvcc.WithLocalReader) stay off in cmd until
+	// M7 write-forwarding lands: a write entering through another node's
+	// router bypasses this node's cache invalidation, so cluster-wide the
+	// writes-via-owner discipline the read guard requires does not hold yet
+	// (see internal/owner and tla/OwnerReads.tla).
 	var mgr *owner.Manager
 	if !clientOnly {
 		osess := lease.NewSessions(dyn, func() int64 { return time.Now().UnixNano() })

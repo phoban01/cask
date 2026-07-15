@@ -41,17 +41,26 @@ func (c counting) Accept(ctx context.Context, key []byte, b caspaxos.Ballot, val
 // mvcc.KV — for the node HRW picks as the range-owner hint.
 type harness struct {
 	prepares, accepts atomic.Int64
+	now               atomic.Int64 // the shared test clock (lease + manager + hlc)
 	hint              uint64
 	rmap              *ranges.Map
 	dialer            agent.StaticDialer
+	sessions          *lease.Sessions
+	locks             *lease.Locks
 	mgr               *owner.Manager
 	kv                *mvcc.KV
 	raw               []caspaxos.AcceptorClient // uncounted, for interlopers
 }
 
+const (
+	harnessTTL       = int64(1_000_000) // session TTL in test-clock units
+	harnessMaxOffset = int64(1_000)     // assumed skew bound
+)
+
 func newHarness(t *testing.T, epoch uint64) *harness {
 	t.Helper()
 	h := &harness{}
+	h.now.Store(1_000)
 	replicas := []uint64{0, 1, 2}
 	h.raw = make([]caspaxos.AcceptorClient, 3)
 	counted := make([]caspaxos.AcceptorClient, 3)
@@ -72,13 +81,17 @@ func newHarness(t *testing.T, epoch uint64) *harness {
 	// production routes it through the same router, guarded by the rown key
 	// exclusion — TestControlPlaneViaRouter covers that shape).
 	ctl := caspaxos.NewProposer(hint, counted)
-	now := int64(1_000)
-	sessions := lease.NewSessions(ctl, func() int64 { return now })
-	locks := lease.NewLocks(ctl, sessions)
+	clock := func() int64 { return h.now.Load() }
+	h.sessions = lease.NewSessions(ctl, clock)
+	h.locks = lease.NewLocks(ctl, h.sessions)
 
-	h.mgr = owner.New(hint, h.dialer, sessions, locks)
+	h.mgr = owner.New(hint, h.dialer, h.sessions, h.locks,
+		owner.WithClock(clock),
+		owner.WithSessionTTL(harnessTTL),
+		owner.WithMaxOffset(harnessMaxOffset))
 	router := agent.NewRouter(hint, h.rmap, h.dialer, agent.WithFastPath(h.mgr))
-	h.kv = mvcc.New(router, hlc.New(func() int64 { now++; return now }), hint)
+	h.kv = mvcc.New(router, hlc.New(func() int64 { return h.now.Add(1) }), hint,
+		mvcc.WithLocalReader(h.mgr))
 	return h
 }
 
@@ -322,5 +335,161 @@ func TestControlPlaneViaRouter(t *testing.T) {
 	}
 	if err := mgr.Maintain(ctx, h.rmap); err != nil {
 		t.Fatalf("re-maintain (session renew) via fast-path router: %v", err)
+	}
+}
+
+// The W4 headline: a read on an owned key is ZERO network rounds — served
+// from the lease-guarded cache — and returns the latest committed value.
+func TestReadLocalZeroRTT(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, 1)
+	h.maintain(t)
+	if _, err := h.kv.Put(ctx, []byte("k"), []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	h.drainStable()
+	h.prepares.Store(0)
+	h.accepts.Store(0)
+
+	got, found, err := h.kv.Get(ctx, []byte("k"))
+	if err != nil || !found || string(got) != "v1" {
+		t.Fatalf("get = %q found=%v err=%v, want v1", got, found, err)
+	}
+	if p, a := h.prepares.Load(), h.accepts.Load(); p != 0 || a != 0 {
+		t.Fatalf("owned read issued %d prepares, %d accepts; want 0/0 (zero-RTT)", p, a)
+	}
+	if s := h.mgr.Stats(); s.FastReads == 0 {
+		t.Fatal("stats recorded no fast reads")
+	}
+}
+
+// The owner-side lease guard: within MaxOffset of the session expiry, local
+// reads stop and the full round takes over — correct either way, one is just
+// slower. This is the half of the double-sided guard that makes the old
+// owner's last served read precede any successor's first write.
+func TestReadLocalStopsBeforeExpiry(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, 1)
+	h.maintain(t)
+	if _, err := h.kv.Put(ctx, []byte("k"), []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	h.drainStable()
+
+	// Jump the clock to just inside the guard margin (expiry - MaxOffset).
+	h.now.Store(1_000 + harnessTTL - harnessMaxOffset)
+	h.prepares.Store(0)
+	h.accepts.Store(0)
+	got, found, err := h.kv.Get(ctx, []byte("k"))
+	if err != nil || !found || string(got) != "v1" {
+		t.Fatalf("get = %q found=%v err=%v, want v1", got, found, err)
+	}
+	// The guard must force a NETWORK round (quorum-confirmed). Note it lands
+	// on the owner's 1-RTT identity round (an accept round, zero prepares),
+	// not the 2-RTT full path — degraded reads are still fast.
+	if h.prepares.Load()+h.accepts.Load() == 0 {
+		t.Fatal("read inside the expiry margin was served from the local cache; must be quorum-confirmed")
+	}
+}
+
+// Invalidation on full-path writes: a CAS conflict falls back to the full
+// path, whose round the cache cannot reflect — the router must poison the
+// cache, so the NEXT read re-takes ownership (a prepare round) instead of
+// serving the cache blind.
+func TestFullPathFallbackInvalidatesReadCache(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, 1)
+	h.maintain(t)
+	key := []byte("k")
+	if _, err := h.kv.Put(ctx, key, []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.kv.CAS(ctx, key, []byte("wrong"), []byte("x")); !errors.Is(err, caspaxos.ErrConflict) {
+		t.Fatalf("CAS = %v, want ErrConflict", err)
+	}
+	h.drainStable()
+	h.prepares.Store(0)
+
+	got, found, err := h.kv.Get(ctx, key)
+	if err != nil || !found || string(got) != "v1" {
+		t.Fatalf("get = %q found=%v err=%v, want v1", got, found, err)
+	}
+	if h.prepares.Load() == 0 {
+		t.Fatal("read after a full-path fallback served the stale cache (invalidation missing)")
+	}
+}
+
+// The documented M7 gap, pinned as a regression marker: a write entering
+// through ANOTHER node bypasses this router's invalidation, so the owner's
+// local read is stale until fencing evidence arrives. When forwarding (M7)
+// or a full-path lease check closes this, this test SHOULD start failing —
+// delete it and the doc caveats together.
+func TestCrossNodeWriteReadGapIsDocumented(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, 1)
+	h.maintain(t)
+	key := []byte("k")
+	if _, err := h.kv.Put(ctx, key, []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	h.drainStable()
+
+	// A different node writes v2 through its own full path (raw clients).
+	interKV := mvcc.New(caspaxos.NewProposer(9, h.raw), hlc.New(func() int64 { return h.now.Add(1) }), 9)
+	if _, err := interKV.Put(ctx, key, []byte("v2")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := h.kv.Get(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "v1" {
+		t.Fatalf("owner read = %q — the M7 gap appears closed; update docs and remove this marker", got)
+	}
+
+	// Fencing evidence (a failed write) restores freshness.
+	if _, err := h.kv.Put(ctx, key, []byte("v3")); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err = h.kv.Get(ctx, key)
+	if err != nil || string(got) != "v3" {
+		t.Fatalf("post-recovery read = %q err=%v, want v3", got, err)
+	}
+	chain, err := h.kv.History(ctx, key)
+	if err != nil || len(chain.Versions) != 3 {
+		t.Fatalf("chain = %d versions err=%v, want 3 (no lost writes)", len(chain.Versions), err)
+	}
+}
+
+// Taker side of the double-sided guard: a lapsed holder's lock is not taken
+// until MaxOffset past its observed expiry — the lapsed owner may still be
+// serving reads on its own (slow) clock inside that margin.
+func TestTakeoverWaitsOutReadWindow(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, 1)
+
+	// A victim session holds the range lock, then lapses.
+	const victimTTL = int64(500)
+	if _, err := h.sessions.Grant(ctx, "victim", "victim", victimTTL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.locks.Acquire(ctx, "rown/1", "victim"); err != nil {
+		t.Fatal(err)
+	}
+	victimExpiry := h.now.Load() + victimTTL
+
+	// Lapsed, but within the victim's possible read window: no takeover.
+	h.now.Store(victimExpiry + harnessMaxOffset/2)
+	h.maintain(t)
+	if s := h.mgr.Stats(); s.Grants != 0 {
+		t.Fatalf("grants = %d inside the takeover wait, want 0", s.Grants)
+	}
+
+	// Past expiry + MaxOffset: takeover proceeds.
+	h.now.Store(victimExpiry + harnessMaxOffset + 1)
+	h.maintain(t)
+	if s := h.mgr.Stats(); s.Grants != 1 {
+		t.Fatalf("grants = %d after the wait, want 1", s.Grants)
 	}
 }

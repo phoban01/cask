@@ -237,3 +237,32 @@ func (p *OwnedProposer) Owns() bool {
 	defer p.mu.Unlock()
 	return p.owning
 }
+
+// ReadLocal returns the owner's cached value with NO network round. The cache
+// is the latest committed value only while this owner is the sole writer —
+// which, unlike for writes, nothing here can verify: a write detects
+// deposition by its accept NACKing, but a read has no round to detect
+// anything. Callers MUST bound validity externally (the ownership manager's
+// lease guard: serve only while now + MaxOffset < session expiry, with the
+// taker waiting out the mirror margin) and must invalidate the cache when a
+// write bypasses this proposer. This method only vouches for "took ownership
+// and was never NACKed since"; the time part of the argument is deliberately
+// not this package's concern.
+func (p *OwnedProposer) ReadLocal() ([]byte, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.owning {
+		return nil, ErrLostOwnership
+	}
+	return p.value, nil
+}
+
+// Disown drops the fast path locally (as a preemption would), forcing the
+// next operation back through TakeOwnership's phase-1 read. The ownership
+// manager uses it to poison the cache when a write commits around this
+// proposer (a full-path fallback), whose result the cache cannot reflect.
+func (p *OwnedProposer) Disown() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.owning = false
+}

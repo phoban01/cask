@@ -40,6 +40,15 @@ type FastProposer interface {
 	FastPropose(ctx context.Context, key []byte, change caspaxos.ChangeFunc) (val []byte, handled bool, err error)
 }
 
+// LocalInvalidator is implemented by fast paths that also cache reads
+// (*owner.Manager): the router notifies it whenever a write runs the FULL
+// path, whose committed result the cache cannot reflect. Without this, the
+// owner's own CAS-conflict fallbacks would silently poison its read cache —
+// staleness within a single node, no clock skew or second writer required.
+type LocalInvalidator interface {
+	InvalidateLocal(key []byte)
+}
+
 // StaticDialer is a fixed node-id -> acceptor mapping.
 type StaticDialer map[uint64]caspaxos.AcceptorClient
 
@@ -111,7 +120,14 @@ func (r *Router) Propose(ctx context.Context, key []byte, change caspaxos.Change
 	if err != nil {
 		return nil, err
 	}
-	return p.Propose(ctx, key, change)
+	val, err := p.Propose(ctx, key, change)
+	// A full round may have committed (even on error paths — a failed CAS
+	// writes the current value back); anything the fast path cached for this
+	// key is now unreliable.
+	if inv, ok := r.fast.(LocalInvalidator); ok {
+		inv.InvalidateLocal(key)
+	}
+	return val, err
 }
 
 // Owner returns the storage node that owns key (HRW over its range's replicas).

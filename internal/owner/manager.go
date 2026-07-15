@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/phoban01/cask/internal/caspaxos"
 	"github.com/phoban01/cask/internal/lease"
@@ -54,13 +55,21 @@ type Manager struct {
 	sessions   *lease.Sessions
 	locks      *lease.Locks
 	sessionID  string
-	sessionTTL int64 // in the lease clock's units (nanos in production)
+	sessionTTL int64             // in the lease clock's units (nanos in production)
+	clock      func() int64      // must be the same clock the sessions use
+	maxOffset  int64             // assumed bound on inter-node clock skew
+
+	// sessionExpiry is the freshest session expiry this node has CONFIRMED
+	// (returned by a committed Grant). The read guard compares against this,
+	// never against a locally computed now+ttl.
+	sessionExpiry atomic.Int64
 
 	mu     sync.Mutex
 	grants map[uint64]*grant // by range id
 
 	// Telemetry (atomic): the input the deferred bandit-placement idea needs.
 	fastWrites atomic.Uint64
+	fastReads  atomic.Uint64
 	fallbacks  atomic.Uint64
 	bumps      atomic.Uint64
 }
@@ -70,6 +79,21 @@ type Option func(*Manager)
 
 // WithSessionTTL sets the ownership session TTL in the lease clock's units.
 func WithSessionTTL(ttl int64) Option { return func(m *Manager) { m.sessionTTL = ttl } }
+
+// WithClock sets the manager's time source. It MUST be the same clock the
+// injected lease.Sessions reads — the read guard compares this clock against
+// session expiries.
+func WithClock(now func() int64) Option { return func(m *Manager) { m.clock = now } }
+
+// WithMaxOffset sets the assumed bound on clock skew between any two nodes
+// (design A, docs/etcd-little-sister.md §4.4; default 500ms). The read guard
+// is double-sided around it: the owner stops serving local reads MaxOffset
+// BEFORE its session expires, and a takeover of a lapsed holder waits
+// MaxOffset AFTER the observed expiry. Under |skew| <= MaxOffset the old
+// owner's last served read strictly precedes the new owner's first write;
+// beyond the bound, reads may be stale — never lost writes (writes stay
+// epoch-fenced regardless of clocks).
+func WithMaxOffset(d int64) Option { return func(m *Manager) { m.maxOffset = d } }
 
 // New returns a Manager for nodeID. sessions and locks must operate on the
 // control-plane keyspace (in production they share the node's proposer stack;
@@ -82,6 +106,8 @@ func New(nodeID uint64, dialer Dialer, sessions *lease.Sessions, locks *lease.Lo
 		locks:      locks,
 		sessionID:  fmt.Sprintf("owner-%d", nodeID),
 		sessionTTL: 10_000_000_000, // 10s in nanos
+		clock:      func() int64 { return time.Now().UnixNano() },
+		maxOffset:  500_000_000, // 500ms in nanos
 		grants:     make(map[uint64]*grant),
 	}
 	for _, o := range opts {
@@ -141,6 +167,7 @@ func (g *grant) owner(m *Manager, key []byte) *keyOwner {
 // Stats is a point-in-time telemetry snapshot.
 type Stats struct {
 	FastWrites uint64
+	FastReads  uint64
 	Fallbacks  uint64
 	Bumps      uint64
 	Grants     int
@@ -153,6 +180,7 @@ func (m *Manager) Stats() Stats {
 	m.mu.Unlock()
 	return Stats{
 		FastWrites: m.fastWrites.Load(),
+		FastReads:  m.fastReads.Load(),
 		Fallbacks:  m.fallbacks.Load(),
 		Bumps:      m.bumps.Load(),
 		Grants:     grants,
@@ -219,6 +247,63 @@ func (m *Manager) FastPropose(ctx context.Context, key []byte, change caspaxos.C
 	return nil, false, nil
 }
 
+// ReadLocal serves a zero-RTT read from the owner's cache (W4). served=false
+// means the caller must run a full linearizable round.
+//
+// Validity is the double-sided lease guard: the cache is served only while
+// this node's CONFIRMED session expiry is more than MaxOffset away on its own
+// clock, and a takeover of a lapsed holder waits MaxOffset past the observed
+// expiry (acquireGrant). Under |skew| <= MaxOffset the last read the old
+// owner can serve strictly precedes the first write a new owner can commit.
+//
+// Linearizability additionally requires the writes-via-owner discipline: any
+// write that bypasses this cache must invalidate it. The Router does this for
+// every full-path write it carries (InvalidateLocal); writes entering through
+// OTHER nodes' routers are the M7 forwarding gap, which is why cmd/cask does
+// not enable local reads by default yet — the sim topology (single router)
+// satisfies the discipline and exercises this path fully.
+func (m *Manager) ReadLocal(ctx context.Context, key []byte) ([]byte, bool, error) {
+	if bytes.HasPrefix(key, rownKeyPrefix) {
+		return nil, false, nil
+	}
+	g := m.grantFor(key)
+	if g == nil {
+		return nil, false, nil
+	}
+	if m.clock()+m.maxOffset >= m.sessionExpiry.Load() {
+		return nil, false, nil // too close to expiry: a successor may be taking over
+	}
+	ko := g.owner(m, key)
+	if err := ko.take(ctx, key, g.currentFence()); err != nil {
+		// Reads stay cheap: no recovery dance, just the full path.
+		return nil, false, nil
+	}
+	val, err := ko.op.ReadLocal()
+	if err != nil {
+		return nil, false, nil
+	}
+	m.fastReads.Add(1)
+	return val, true, nil
+}
+
+// InvalidateLocal poisons the cached fast path for key after a write
+// committed around it (a full-path round the cache cannot reflect). The next
+// operation re-takes ownership, which re-reads through phase 1. The Router
+// calls this after every full-path propose it carries for a fast-path-enabled
+// keyspace.
+func (m *Manager) InvalidateLocal(key []byte) {
+	g := m.grantFor(key)
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	ko, ok := g.perKey[string(key)]
+	g.mu.Unlock()
+	if ok {
+		ko.op.Disown()
+	}
+}
+
 // grantFor returns the live grant covering key, or nil.
 func (m *Manager) grantFor(key []byte) *grant {
 	m.mu.Lock()
@@ -265,6 +350,15 @@ func (m *Manager) recoverFence(ctx context.Context, g *grant, cause error) bool 
 	if bumped {
 		g.fence = tok
 		m.bumps.Add(1)
+		// Fencing evidence means SOMETHING committed around this grant's
+		// caches — poison every key's fast path so the next op (read or
+		// write) re-takes ownership and re-reads through phase 1. Poison IN
+		// PLACE (Disown), never by replacing the keyOwner objects: a caller
+		// mid-retry holds a reference, and a replacement object would later
+		// self-conflict with whatever the retained one commits post-bump.
+		for _, ko := range g.perKey {
+			ko.op.Disown()
+		}
 	}
 	g.mu.Unlock()
 
@@ -285,8 +379,13 @@ func (m *Manager) dropGrant(rangeID uint64) {
 // owner hint, and release grants for ranges it no longer should (or can) own.
 // Call it from the reconcile loop; it is never on the write path.
 func (m *Manager) Maintain(ctx context.Context, rmap *ranges.Map) error {
-	if _, err := m.sessions.Grant(ctx, m.sessionID, m.sessionID, m.sessionTTL); err != nil {
+	sess, err := m.sessions.Grant(ctx, m.sessionID, m.sessionID, m.sessionTTL)
+	if err != nil {
 		return fmt.Errorf("owner: session renew: %w", err)
+	}
+	// The read guard trusts only expiries a committed Grant confirmed.
+	if sess.Expiry > m.sessionExpiry.Load() {
+		m.sessionExpiry.Store(sess.Expiry)
 	}
 
 	descs := rmap.All()
@@ -334,6 +433,18 @@ func (m *Manager) acquireGrant(ctx context.Context, d ranges.Descriptor) error {
 			return fmt.Errorf("owner: range %d replica %d not resolvable", d.ID, n)
 		}
 		acc = append(acc, a)
+	}
+	// Taker side of the double-sided read guard: a lapsed prior holder may,
+	// on ITS clock, still be inside the serve window (it stops MaxOffset
+	// early; we may be up to MaxOffset fast). Wait out the mirror margin
+	// before taking over — a skipped tick here costs fast-path coverage,
+	// never correctness. Writes need no such wait: they are epoch-fenced.
+	if holder, live, _, err := m.locks.Owner(ctx, lockName(d.ID)); err == nil && holder != "" && holder != m.sessionID && !live {
+		if prev, ok, err := m.sessions.Info(ctx, holder); err == nil && ok {
+			if m.clock() < prev.Expiry+m.maxOffset {
+				return nil // too soon; retry on a later Maintain tick
+			}
+		}
 	}
 	fence, err := m.locks.Acquire(ctx, lockName(d.ID), m.sessionID)
 	if err != nil {

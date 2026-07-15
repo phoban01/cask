@@ -445,6 +445,37 @@ including ReadLocal-served reads passes under partition nemesis.
 process-local and dies with the process (`owning=false` on restart); durable acceptor
 state is §3.0's separate concern.
 
+**Implementation notes (landed 2026-07-15).** The design survived contact with
+one major scoping discovery and shipped with it handled honestly:
+
+- **Epoch fencing cannot protect reads at all** — a write detects deposition
+  by its accept NACKing; a read has no round. Worse, the owner's own
+  CAS-conflict fallbacks commit via the full path AROUND its own cache:
+  staleness needs no second node and no clock skew. Two mechanisms close
+  this: the double-sided MaxOffset lease guard (owner stops serving
+  MaxOffset before its confirmed session expiry; a takeover of a lapsed
+  holder waits MaxOffset past it), and **cache invalidation on every
+  full-path write the router carries** (`agent.LocalInvalidator`). Together
+  they make local reads linearizable under the writes-via-owner discipline.
+- **That discipline holds per-node today, not cluster-wide**: a write
+  entering through another node's router bypasses this node's invalidation.
+  Hence local reads are wired in the sim topology (single router — the
+  discipline holds, the gate exercises the path fully) but stay OFF in
+  cmd/cask until M7 forwarding. `TestCrossNodeWriteReadGapIsDocumented`
+  pins the gap as a regression marker: when forwarding closes it, that test
+  fails and the caveats come out together.
+- A degraded read (guard refusal) lands on the owner's 1-RTT identity round,
+  not the 2-RTT full path — reads never get slower than pre-W4.
+- `tla/OwnerReads.tla` proves the guard under adversarial skew
+  (`NoStaleRead`, both clients' offsets universally quantified), with
+  `OwnerReadsBug.cfg` as the negative control (naive lapsed-checks: TLC
+  finds the fast-clock successor / slow-clock reader overlap). Both verified
+  by TLC this session.
+- Fence recovery must poison per-key caches IN PLACE (`Disown`), never by
+  replacing the keyOwner objects — a caller mid-retry holds a reference,
+  and a replacement would later self-conflict with what the retained object
+  commits post-bump.
+
 ---
 
 ## W5 — Validation: contention profile, new invariants, CI

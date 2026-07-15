@@ -22,10 +22,8 @@ import (
 )
 
 func init() {
-	// Declared for catalog completeness; the firing site lands with §3.1
-	// (lease-cached owner reads) — there is no owner cache to skip until then.
 	buggify.Register("mvcc_skip_owner_cache",
-		"mvcc.KV.read bypasses the owner cache and takes the full Paxos round (inactive until §3.1)", 0.05)
+		"mvcc.KV.read bypasses the owner cache and takes the full Paxos round, keeping the fallback exercised", 0.05)
 }
 
 // OpID uniquely identifies one logical mutation. It is generated once per
@@ -105,13 +103,29 @@ type Proposer interface {
 	Propose(ctx context.Context, key []byte, change caspaxos.ChangeFunc) ([]byte, error)
 }
 
+// LocalReader is an optional zero-RTT read source (the ownership manager's
+// lease-guarded cache, W4). served=false falls back to the full linearizable
+// round; a served read is trusted — its linearizability argument (lease guard
+// + cache invalidation on full-path writes) lives with the implementation.
+type LocalReader interface {
+	ReadLocal(ctx context.Context, key []byte) (raw []byte, served bool, err error)
+}
+
 // KV is an MVCC key-value view backed by a CASPaxos proposer and an HLC clock.
 type KV struct {
 	prop   Proposer
 	clock  *hlc.Clock
-	nodeID uint64 // identity for minting OpIDs
-	opSeq  uint64 // atomic counter for OpIDs
+	local  LocalReader // optional; nil = every read is a full round
+	nodeID uint64      // identity for minting OpIDs
+	opSeq  uint64      // atomic counter for OpIDs
 }
+
+// KVOption configures a KV.
+type KVOption func(*KV)
+
+// WithLocalReader lets reads try lr before the full round. Every read path
+// (Get, GetAt, History, SnapshotAt) inherits it through read().
+func WithLocalReader(lr LocalReader) KVOption { return func(kv *KV) { kv.local = lr } }
 
 // New returns a KV that proposes through prop and stamps versions with clock.
 //
@@ -121,8 +135,12 @@ type KV struct {
 // exists in a chain, and its mutation would be silently deduplicated). In
 // production this is a persisted node UUID combined with a boot epoch — the same
 // uniqueness the ballot counter needs.
-func New(prop Proposer, clock *hlc.Clock, nodeID uint64) *KV {
-	return &KV{prop: prop, clock: clock, nodeID: nodeID}
+func New(prop Proposer, clock *hlc.Clock, nodeID uint64, opts ...KVOption) *KV {
+	kv := &KV{prop: prop, clock: clock, nodeID: nodeID}
+	for _, o := range opts {
+		o(kv)
+	}
+	return kv
 }
 
 func (kv *KV) nextOp() OpID {
@@ -334,8 +352,16 @@ func (kv *KV) Compact(ctx context.Context, key []byte, keepFromSeq uint64) error
 	return err
 }
 
-// read runs a linearizable identity round and decodes the resulting history.
+// read returns the key's history: from the zero-RTT owner cache when one is
+// installed and vouches for itself, else via a linearizable identity round.
 func (kv *KV) read(ctx context.Context, key []byte) (history, error) {
+	// BUGGIFY: skip the owner cache and take the full round, keeping the
+	// fallback path continuously exercised alongside the fast one.
+	if kv.local != nil && !buggify.Maybe("mvcc_skip_owner_cache", 0.05) {
+		if raw, served, err := kv.local.ReadLocal(ctx, key); err == nil && served {
+			return decode(raw)
+		}
+	}
 	raw, err := kv.prop.Propose(ctx, key, caspaxos.Identity)
 	if err != nil {
 		return history{}, err

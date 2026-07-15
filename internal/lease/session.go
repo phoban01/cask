@@ -112,6 +112,14 @@ func (s *Sessions) Live(ctx context.Context, id string) (bool, error) {
 	return present && cur.Owner != "" && cur.Expiry > s.now(), nil
 }
 
+// Info returns the session record itself (linearizable read). Callers that
+// reason about time relative to the expiry — like the ownership manager's
+// takeover wait, which must outwait a lapsed holder's read window by
+// MaxOffset — need the raw Expiry, not just the Live verdict.
+func (s *Sessions) Info(ctx context.Context, id string) (Session, bool, error) {
+	return s.get(ctx, id)
+}
+
 func (s *Sessions) get(ctx context.Context, id string) (Session, bool, error) {
 	raw, err := s.prop.Propose(ctx, SessionKey(id), caspaxos.Identity)
 	if err != nil {

@@ -115,14 +115,21 @@ func (w OwnershipWorkload) Begin(s *Sim) (Round, error) {
 	bp := &boundProposer{}
 	sessions := lease.NewSessions(bp, func() int64 { return s.Clock.Now() })
 	locks := lease.NewLocks(bp, sessions)
-	// TTL far beyond the scenario's virtual-time horizon: lapse-under-skew is
-	// W4's territory; here the grant lifecycle is driven by Maintain.
-	mgr := owner.New(hint, dialer, sessions, locks, owner.WithSessionTTL(1<<50))
+	// TTL far beyond the scenario's virtual-time horizon: lapse-under-skew
+	// lives in the owner unit tests and OwnerReads.tla; here the grant
+	// lifecycle is driven by Maintain. The manager reads the SAME virtual
+	// clock as its sessions, per the WithClock contract.
+	mgr := owner.New(hint, dialer, sessions, locks,
+		owner.WithSessionTTL(1<<50),
+		owner.WithClock(func() int64 { return s.Clock.Now() }))
 	router := agent.NewRouter(hint, rmap, dialer,
 		agent.WithFastPath(mgr),
 		agent.WithBackoff(backoff.Seeded(100*time.Microsecond, 2*time.Millisecond, s.RNG.Int63())))
 	bp.p = router
-	kv := mvcc.New(router, clock, 1)
+	// Local reads are sound here: the single router carries every write, so
+	// the writes-via-owner discipline holds and full-path fallbacks
+	// invalidate the cache (agent.LocalInvalidator).
+	kv := mvcc.New(router, clock, 1, mvcc.WithLocalReader(mgr))
 
 	keys := make([][]byte, numKeys)
 	for i := range keys {
