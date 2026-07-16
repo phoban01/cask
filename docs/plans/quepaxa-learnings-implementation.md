@@ -722,3 +722,18 @@ visible and strongly consistent across every member cluster.
 **Done when.** Naming decided; paper outline + evaluation matrix drafted; blog draft
 review-ready; apiserver prototype serves get/list/watch/update for one CRD across 3
 demo clusters.
+
+**Status (2026-07-16).** All W6 deliverables landed except the vs-etcd benchmark
+harness (paper TBD rows remain). Naming: **cask stays** (decided 2026-07-15). Docs:
+`docs/paper/coordination-without-a-log.md`, `docs/blog/the-log-itself.md`,
+`docs/k8s-aggregation.md`. Prototype: `cmd/cask-apiserver` — a hand-rolled
+aggregated-API-style server (same Go module; `k8s.io/apiserver` dependency judged
+too heavy for a prototype, deviating from the plan above) serving
+`fleet.cask.dev/v1alpha1` `Device`/`DeviceClaim`; `resourceVersion` = per-key mvcc
+Seq, claim binding = fenced lock `Acquire`, watch = poll-diff over an index
+register. Demo: `demo/kind/` — **two kind clusters** (user directive) sharing one
+3-node cask fleet on the kind docker network, APIService per cluster, 4-act
+walkthrough (cross-cluster visibility, global single lease under a claim race,
+higher-fence handover, zombie holder fenced out). Multi-cluster semantics are also
+proven in-process by `cmd/cask-apiserver/server_test.go` (two apiservers, shared
+acceptors, fake clock) under `-race`.
