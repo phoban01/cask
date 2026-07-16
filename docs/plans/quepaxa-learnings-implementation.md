@@ -731,9 +731,15 @@ aggregated-API-style server (same Go module; `k8s.io/apiserver` dependency judge
 too heavy for a prototype, deviating from the plan above) serving
 `fleet.cask.dev/v1alpha1` `Device`/`DeviceClaim`; `resourceVersion` = per-key mvcc
 Seq, claim binding = fenced lock `Acquire`, watch = poll-diff over an index
-register. Demo: `demo/kind/` — **two kind clusters** (user directive) sharing one
-3-node cask fleet on the kind docker network, APIService per cluster, 4-act
-walkthrough (cross-cluster visibility, global single lease under a claim race,
-higher-fence handover, zombie holder fenced out). Multi-cluster semantics are also
-proven in-process by `cmd/cask-apiserver/server_test.go` (two apiservers, shared
-acceptors, fake clock) under `-race`.
+register. Demo: `demo/kind/` — **three kind clusters** (user directives: kind, and
+cask **embedded** in the extension servers) with NO external cask processes: each
+apiserver carries its own acceptor (`--listen-consensus`/`--advertise-consensus`,
+Pebble `--data-dir` on a hostPath so a restarted acceptor keeps its promises;
+hostNetwork because pod networks aren't routable across kind clusters), and the
+three apiservers form the consensus group among themselves. 4-act walkthrough:
+cross-cluster visibility, global single lease under a claim race, higher-fence
+handover, zombie holder fenced out while the surviving 2/3 keep committing.
+Verified in-environment by a 3-process localhost smoke (create via east/read via
+north, race → one Bound, write with a node down, durable restart) plus
+`cmd/cask-apiserver/server_test.go` under `-race`; the kind flow itself needs
+docker (run from the macOS host — this guest has none).
