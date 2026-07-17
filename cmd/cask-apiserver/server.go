@@ -190,8 +190,14 @@ func (s *apiServer) serveDelete(w http.ResponseWriter, r *http.Request, resource
 		httpStoreErr(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
-	writeJSON(w, http.StatusOK, map[string]any{"kind": "Status", "status": "Success"})
+	// A metav1.Status with an application/json content-type: kubectl decodes
+	// the delete response and errors ("serializer for text/plain ... doesn't
+	// exist") if the content-type is sniffed instead of set — which is what a
+	// premature WriteHeader before writeJSON would cause.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"kind": "Status", "apiVersion": "v1", "status": "Success",
+		"details": map[string]any{"name": name, "group": apiGroup, "kind": resource},
+	})
 }
 
 func (s *apiServer) serveList(w http.ResponseWriter, r *http.Request, resource string) {
@@ -351,14 +357,20 @@ func stampRV(raw []byte, rv uint64) json.RawMessage {
 }
 
 func httpStoreErr(w http.ResponseWriter, err error) {
+	// kubectl decodes error bodies as metav1.Status; a text/plain body (what
+	// http.Error emits) fails with "serializer for text/plain ... doesn't
+	// exist". Emit a real Status so 404/409 surface as clean kubectl errors.
+	code, reason := http.StatusInternalServerError, "InternalError"
 	switch {
 	case errors.Is(err, errNotFound):
-		http.Error(w, err.Error(), http.StatusNotFound)
+		code, reason = http.StatusNotFound, "NotFound"
 	case errors.Is(err, errConflict):
-		http.Error(w, err.Error(), http.StatusConflict)
-	default:
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		code, reason = http.StatusConflict, "Conflict"
 	}
+	writeJSON(w, code, map[string]any{
+		"kind": "Status", "apiVersion": "v1", "status": "Failure",
+		"message": err.Error(), "reason": reason, "code": code,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

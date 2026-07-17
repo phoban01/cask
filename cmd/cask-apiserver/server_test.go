@@ -309,6 +309,46 @@ func TestWatchStreamsCrossClusterEvents(t *testing.T) {
 	next("DELETED")
 }
 
+// Responses kubectl decodes as objects/Status must carry an
+// application/json content-type. A delete or error that emits text/plain
+// makes real kubectl fail with "serializer for text/plain ... doesn't
+// exist" — a bug invisible to status-code-only assertions.
+func TestResponsesAreJSON(t *testing.T) {
+	f := newFleetFixture(t)
+	if code, _ := doReq(t, f.a.ts, http.MethodPost, groupPrefix+"/devices",
+		`{"metadata":{"name":"cam-json"},"spec":{}}`); code != http.StatusCreated {
+		t.Fatalf("seed device = %d", code)
+	}
+
+	check := func(method, path, body string, wantCode int) {
+		t.Helper()
+		req, err := http.NewRequest(method, f.a.ts.URL+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := f.a.ts.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != wantCode {
+			t.Fatalf("%s %s = %d, want %d (%s)", method, path, resp.StatusCode, wantCode, raw)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+			t.Fatalf("%s %s content-type = %q, want application/json", method, path, ct)
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			t.Fatalf("%s %s body not JSON: %v (%s)", method, path, err, raw)
+		}
+	}
+	// The delete response: a Status kubectl must decode.
+	check(http.MethodDelete, groupPrefix+"/devices/cam-json", "", http.StatusOK)
+	// A 404 must also be a JSON Status, not text/plain.
+	check(http.MethodGet, groupPrefix+"/devices/cam-json", "", http.StatusNotFound)
+}
+
 // Discovery documents exist in the shapes APIService registration needs.
 func TestDiscoveryEndpoints(t *testing.T) {
 	f := newFleetFixture(t)

@@ -1,6 +1,9 @@
 # --- Go ---
 # Build output
 /bin/
+# Stray `go build` binaries at repo root (named after cmd/ dirs)
+/cask
+/cask-apiserver
 # Test binaries / profiles produced by `go test`
 *.test
 *.out
