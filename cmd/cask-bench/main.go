@@ -61,6 +61,15 @@ func main() {
 		}
 		return
 	}
+	// `cask-bench coldstart` measures a node joining a formed 100-node/50-range
+	// cluster (paper §5 cold-start row); fully in-process, no etcd/docker.
+	if len(os.Args) > 1 && os.Args[1] == "coldstart" {
+		if err := coldStart(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "cask-bench coldstart: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	var (
 		cfg     config

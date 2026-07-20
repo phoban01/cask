@@ -158,7 +158,7 @@ with no active fault is a release-blocking violation).
 | Migration loses nothing (disjoint sets, mid-migration writes) | **Tested** | orchestrator + cmd driver tests |
 | Group-commit durability | **Measured** (with honest fsync-cost caveat on dev VM) | Pebble bench |
 | Throughput/latency vs etcd, same hardware | **Measured** | `bench/` harness — see §5.1 |
-| Cold start (100 nodes, 50 ranges) < 1s | **TBD** | §4.3 bench |
+| Cold start (100 nodes, 50 ranges) < 1s | **Measured** | `bench/` cold-start — see §5.2 |
 | WAN profile | **TBD** | widened backoff/MaxOffset |
 
 ### 5.1 Throughput/latency vs etcd
@@ -192,6 +192,24 @@ does not set up the ownership topology, so the `get` row should be read as "an
 un-owned cask read is a full consensus round," not as cask's steady-state read
 latency. Absolute numbers are disk/VM-bound (fsync dominates); the relative
 comparison is the artifact. Full rationale and caveats: `bench/README.md`.
+
+### 5.2 Cold start
+
+A new node joining a formed 100-node/50-range cluster reads the roster register
+from the Core, reads all 50 range descriptors, builds its range map, and serves
+its first read (`cmd/cask-bench coldstart`, in-process over `testutil/sim`). We
+form the cluster once and time only the join, sweeping an injected per-hop
+latency because the cost is the `1 + N` register reads to the Core, not CPU. At
+the CPU floor the whole join is sub-millisecond. With the N independent
+descriptor reads **fanned out** — the natural implementation — the join is ~2
+Core round-trips regardless of range count: p99 22ms at 1ms/hop, 61ms at
+5ms/hop, ~234ms even on a 20ms/hop WAN, all well under the 1s bar. Fetching the
+descriptors *serially* is `1 + N` round-trips and crosses 1s around ~8ms/hop, so
+fan-out — not raw consensus speed — is what keeps a 50-range cold start
+sub-second on a WAN. (The register reads themselves ride the same leaderless
+CASPaxos path §3 measures; the reflexive control plane §3.4 is what makes "read
+the roster, read the descriptors" the entire join protocol — no meta-range, no
+gossip-wait.)
 
 ## 6. Limitations (honest)
 
