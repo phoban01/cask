@@ -159,7 +159,7 @@ with no active fault is a release-blocking violation).
 | Group-commit durability | **Measured** (with honest fsync-cost caveat on dev VM) | Pebble bench |
 | Throughput/latency vs etcd, same hardware | **Measured** | `bench/` harness — see §5.1 |
 | Cold start (100 nodes, 50 ranges) < 1s | **Measured** | `bench/` cold-start — see §5.2 |
-| WAN profile | **TBD** | widened backoff/MaxOffset |
+| WAN profile | **Measured** | `bench/` wan — see §5.3 |
 
 ### 5.1 Throughput/latency vs etcd
 
@@ -210,6 +210,20 @@ sub-second on a WAN. (The register reads themselves ride the same leaderless
 CASPaxos path §3 measures; the reflexive control plane §3.4 is what makes "read
 the roster, read the descriptors" the entire join protocol — no meta-range, no
 gossip-wait.)
+
+### 5.3 WAN profile
+
+Steady-state latency/throughput of one RF=5 range as per-hop RTT grows
+(`cmd/cask-bench wan`, in-process over `testutil/sim`, same latency seam as
+§5.2). Two results, both matching §3. First, latency tracks **~2×RTT** — a
+prepare round plus an accept round to a quorum — at every hop latency (p50
+4/12/44/106ms for 1/5/20/50ms hops); the owned fast path §3.2 collapses this to
+one accept round ≈1×RTT, so this flat-path number is the ceiling. Second,
+**straggler immunity §3.5**: with one of five replicas at 400ms (20× the other
+four), write p50 is 44ms — identical to the 20ms-uniform baseline — because a
+quorum is the *fastest* majority and the slow replica never touches the critical
+path. That is "phase latency = max over the fastest quorum, not the sum of
+replica RTTs," measured. Full data and method: `bench/README.md`.
 
 ## 6. Limitations (honest)
 

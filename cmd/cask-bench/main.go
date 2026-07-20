@@ -70,6 +70,15 @@ func main() {
 		}
 		return
 	}
+	// `cask-bench wan` measures steady-state latency/throughput vs inter-node
+	// RTT plus straggler immunity (paper §5 WAN row); in-process, no docker.
+	if len(os.Args) > 1 && os.Args[1] == "wan" {
+		if err := wanBench(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "cask-bench wan: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	var (
 		cfg     config

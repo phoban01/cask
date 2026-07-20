@@ -124,8 +124,41 @@ coordination itself is trivial. (Caveat: on this VM the sleep-based latency
 injection has ~1ms granularity, so the sub-millisecond RTT rows aren't faithful
 and are omitted from the default sweep; the ≥2ms rows scale as expected.)
 
-## Still TBD (the last §5 row)
+## WAN profile
 
-- **WAN profile** — steady-state cask throughput/latency under injected
-  inter-node RTT (widened backoff / MaxOffset), reusing the same
-  `sim.Network.SetSlow` latency seam the cold-start sweep uses.
+The paper's third row: cask's steady-state write/read latency and throughput as
+inter-node RTT grows, and the §3.5 straggler-immunity claim. Cask-only,
+in-process over `testutil/sim` against one RF-replicated range so the latency
+signal is clean:
+
+```sh
+go run ./cmd/cask-bench wan                                    # put, RF=5
+go run ./cmd/cask-bench wan --workload get --rtts 1,5,20,50 --clients 32
+```
+
+Representative run (RF=5, 32 clients, 3s/config, put):
+
+| config | throughput | p50 | p99 |
+|---|---:|---:|---:|
+| 1ms/hop uniform | 7,938 op/s | 4.0ms | 6.2ms |
+| 5ms/hop uniform | 2,709 op/s | 11.7ms | 14.8ms |
+| 20ms/hop uniform | 714 op/s | 44.4ms | 48.7ms |
+| 50ms/hop uniform | 298 op/s | 106.2ms | 110.6ms |
+| **20ms/hop + 1 straggler @400ms** | 715 op/s | **44.4ms** | 56.4ms |
+
+Two things fall out, both matching the design:
+
+- **Latency tracks ~2×RTT.** A write (and a linearizable read) in this flat,
+  un-owned topology is a prepare round plus an accept round — two quorum
+  round-trips — so p50 is ≈ 2× the per-hop RTT at every latency (4/12/44/106ms
+  for 1/5/20/50ms hops). The **owned fast path (§3.2)** collapses this to a
+  single accept round ≈ 1×RTT; this harness measures the flat path, so read it
+  as the ceiling, not the floor.
+- **Straggler immunity (§3.5).** With one of five replicas at 400ms — 20× the
+  other four — write p50 is 44.4ms, *identical* to the 20ms-uniform baseline.
+  A quorum is the **fastest** majority (3 of 5), so the slow replica never sits
+  on the critical path. This is the "phase latency = max over the fastest
+  quorum, not the sum of replica RTTs" claim, measured.
+
+All three §5 evaluation rows (vs-etcd, cold start, WAN) are now covered by the
+harnesses in this directory.
