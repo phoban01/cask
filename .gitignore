@@ -4,6 +4,7 @@
 # Stray `go build` binaries at repo root (named after cmd/ dirs)
 /cask
 /cask-apiserver
+/cask-bench
 # Test binaries / profiles produced by `go test`
 *.test
 *.out

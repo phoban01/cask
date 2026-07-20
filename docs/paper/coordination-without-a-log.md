@@ -157,9 +157,41 @@ with no active fault is a release-blocking violation).
 | Read lease sound under skew ≤ MaxOffset | **Machine-checked** | OwnerReads.tla + negative control |
 | Migration loses nothing (disjoint sets, mid-migration writes) | **Tested** | orchestrator + cmd driver tests |
 | Group-commit durability | **Measured** (with honest fsync-cost caveat on dev VM) | Pebble bench |
-| Throughput/latency vs etcd, same hardware | **TBD** | needs the benchmark harness (§6 plan) |
+| Throughput/latency vs etcd, same hardware | **Measured** | `bench/` harness — see §5.1 |
 | Cold start (100 nodes, 50 ranges) < 1s | **TBD** | §4.3 bench |
 | WAN profile | **TBD** | widened backoff/MaxOffset |
+
+### 5.1 Throughput/latency vs etcd
+
+`bench/run.sh` stands up a real 3-node cask cluster and a real 3-node etcd
+cluster on the same host and drives both through one load generator with
+identical workloads, key/value shapes, and percentile code (`cmd/cask-bench`).
+Both run as clustered processes, so both pay real client RPC, inter-node
+consensus RPC, and fsync. Writes use a fresh key per op (cask's MVCC register
+appends an unbounded per-key version chain, so a hot keyspace would measure
+history growth, not the commit path); reads are linearizable on both sides
+(etcd default `Get`, not `WithSerializable`). Representative run — same-host
+aarch64 VM, 10 vCPU, 64 clients, 10s, 256-byte values:
+
+| workload | cask ops/s | etcd ops/s | cask p50/p99 | etcd p50/p99 |
+|---|---:|---:|---|---|
+| put  | 10,626 | 13,168 | 5.3ms/19ms | 4.9ms/10ms |
+| get  |  9,586 | 65,282 | 5.8ms/22ms | 0.9ms/3.4ms |
+| cas (create) | 10,582 | 12,173 | 5.3ms/19ms | 5.2ms/13ms |
+| lock | 3,850 | 6,271 | 15.5ms/38ms | 9.0ms/39ms |
+
+The reading is honest in both directions. On **writes and CAS** cask is within
+the same order of magnitude as etcd (heavier p99 tail from full-jitter backoff
+between the three leaderless proposers) — dropping the log does not cost the
+write path. On **reads** etcd wins decisively, and this is cask's *worst case by
+construction*: the flat `--peers` topology establishes no range ownership, so a
+linearizable `Get` runs a full CASPaxos round while etcd's read-index is
+near-leader-local. cask's architectural answer — the owned read served in **zero
+rounds** — is the separately-measured row above (owner read tests); this harness
+does not set up the ownership topology, so the `get` row should be read as "an
+un-owned cask read is a full consensus round," not as cask's steady-state read
+latency. Absolute numbers are disk/VM-bound (fsync dominates); the relative
+comparison is the artifact. Full rationale and caveats: `bench/README.md`.
 
 ## 6. Limitations (honest)
 
