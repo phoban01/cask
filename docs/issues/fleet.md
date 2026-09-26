@@ -907,3 +907,50 @@ missing." Re-extract with `duvet extract -f markdown docs/spec/fleet.md -o docs/
 and commit the regenerated toml.
 
 Done when: `duvet report --ci` passes and the new sentence appears in the snapshot.
+
+## ci: quarantine TestDuelingProposersConvergeWithBackoff until the retry contract is fixed
+
+labels: ci, agent-5m
+
+Spec: docs/spec/fleet.md#10-verification
+> CI MUST run the unit tests with the race detector.
+
+`TestDuelingProposersConvergeWithBackoff` in `internal/caspaxos/backoff_test.go`
+fails about one run in four with "committed 31 ops, want 30". The test is
+not flaky. It asserts a property CASPaxos does not give: exactly-once for a
+non-idempotent change function. See the follow-up issue
+"caspaxos: report an unknown outcome after a failed accept phase".
+
+Task: keep the livelock check and drop the exact count. Make each writer
+append a unique op id and assert every id is present at least once and
+that the list is not shorter than `writers*ops`. Add a comment that names
+the follow-up issue.
+
+Files: `internal/caspaxos/backoff_test.go`
+
+Done when: `go test -race -count=50 -run TestDuelingProposers ./internal/caspaxos/` passes.
+
+## caspaxos: report an unknown outcome after a failed accept phase
+
+labels: quint, spec
+
+Spec: docs/spec/fleet.md#3-storage-model
+> An update MUST use a compare-and-set on the resourceVersion the client supplied.
+
+A proposer whose accept phase reaches a minority can still have its value
+chosen: the next prepare adopts the highest-ballot accepted value
+(`prepare` in `internal/caspaxos/proposer.go`). `Propose` then retries,
+reads its own change back, and applies the change again. For an append
+that is a duplicate. For the fleet path every change is a compare-and-set,
+so the worst case is a spurious conflict for a write that did land.
+
+Task, first slice: add a spec sentence to section 3: "A write that returns
+a conflict MAY have been committed, and the client MUST re-read before it
+retries." Model it in Quint as a negative control that applies a
+non-idempotent change on retry and shows a duplicate. Follow-ups: make
+`Propose` return `ErrUnknownOutcome` instead of retrying after a failed
+accept, and cite the sentence from `update` in `cmd/cask-apiserver/store.go`.
+
+Files: `docs/spec/fleet.md`, `quint/fleet.qnt`
+
+Done when: `devbox run spec` and `devbox run quint` pass and the new control fails as expected.

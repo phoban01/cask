@@ -50,7 +50,7 @@ for profile in $PROFILES; do
         count=$(( SEEDS - (start - 1) ))
       fi
       (( count <= 0 )) && continue
-      SIM_PROFILE="$profile" SIM_WORKLOAD="$workload" \
+      env SIM_PROFILE="$profile" SIM_WORKLOAD="$workload" \
         SIM_SEED_START="$start" SIM_SEEDS="$count" \
         ${RECORD_DIR:+SIM_RECORD_DIR="$RECORD_DIR"} \
         go test -run '^TestGate$' -count=1 "$PKG" \
