@@ -2,6 +2,7 @@ package caspaxos_test
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -63,8 +64,8 @@ func TestDuelingProposersConvergeWithBackoff(t *testing.T) {
 		wg.Add(1)
 		go func(w int, p *caspaxos.Proposer) {
 			defer wg.Done()
-			for range ops {
-				if _, err := p.Propose(ctx, []byte("hot"), appendChange("x")); err != nil {
+			for i := range ops {
+				if _, err := p.Propose(ctx, []byte("hot"), appendChange(fmt.Sprintf("w%d-%d", w, i))); err != nil {
 					errs[w] = err
 					return
 				}
@@ -78,16 +79,26 @@ func TestDuelingProposersConvergeWithBackoff(t *testing.T) {
 			t.Fatalf("writer %d: %v (livelock: backoff failed to converge)", w, err)
 		}
 	}
-
-	// Every op landed exactly once: the final list has writers*ops entries.
+	// Every op landed at least once. The count is a lower bound, not exact:
+	// a proposer whose accept reached only a minority can still have its
+	// value chosen by the next prepare, and its retry then applies the
+	// append again. CASPaxos gives exactly-once only for idempotent or
+	// compare-and-set changes. Tracked in issue #69.
 	reader := caspaxos.NewProposer(99, acc)
 	got, err := reader.Propose(ctx, []byte("hot"), caspaxos.Identity)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := writers * ops
-	if n := len(splitCommas(got)); n != want {
-		t.Fatalf("committed %d ops, want %d (lost or duplicated updates)", n, want)
+	seen := map[string]bool{}
+	for _, op := range splitCommas(got) {
+		seen[string(op)] = true
+	}
+	for w := range writers {
+		for i := range ops {
+			if id := fmt.Sprintf("w%d-%d", w, i); !seen[id] {
+				t.Fatalf("op %s lost; committed %q", id, got)
+			}
+		}
 	}
 }
 
