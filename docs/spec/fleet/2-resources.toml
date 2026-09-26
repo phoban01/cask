@@ -1,0 +1,60 @@
+target = "docs/spec/fleet.md#2-resources"
+
+# 2. Resources
+#
+# Cask MUST serve its resources through the Kubernetes aggregation layer as an APIService.
+# 
+# Every fleet resource MUST be cluster-scoped.
+# 
+# The extension server MUST be built on the generic server in k8s.io/apiserver.
+# 
+# The extension server MUST delegate authentication and authorization to the local kube-apiserver.
+# 
+# A client MUST be able to use kubectl, client-go informers, field selectors, and watch bookmarks against fleet resources without fleet-specific code.
+# 
+# The extension server MUST report not ready until its storage is reachable.
+# 
+# The extension server MUST report not ready until any pending migration import is complete.
+
+[[spec]]
+level = "MUST"
+quote = '''
+Cask MUST serve its resources through the Kubernetes aggregation layer as an APIService.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Every fleet resource MUST be cluster-scoped.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The extension server MUST be built on the generic server in k8s.io/apiserver.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The extension server MUST delegate authentication and authorization to the local kube-apiserver.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A client MUST be able to use kubectl, client-go informers, field selectors, and watch bookmarks against fleet resources without fleet-specific code.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The extension server MUST report not ready until its storage is reachable.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The extension server MUST report not ready until any pending migration import is complete.
+'''
+

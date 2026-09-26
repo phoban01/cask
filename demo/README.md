@@ -7,6 +7,11 @@ self-forms across clouds and NAT with no firewall/VPN config beyond one open UDP
 port — write a key or take a fenced lock on one cloud, read it on another and on
 your laptop.
 
+> 📐 **Diagrams:** see [`docs/diagrams/`](../docs/diagrams/) for the architecture,
+> request flow, self-forming bootstrap, failover, and deploy pipeline.
+
+![architecture](../docs/diagrams/architecture.svg)
+
 ```
 GCP  e2-micro  (x86,  FREE)  ┐
 Oracle A1.Flex (arm64, FREE) ├─ lighthouses + RF=3 replica set (the data lives here)

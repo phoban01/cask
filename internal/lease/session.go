@@ -21,10 +21,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
+	"github.com/phoban01/cask/internal/buggify"
 	"github.com/phoban01/cask/internal/caspaxos"
 )
+
+// errKeepAliveDropped models a keepalive RPC that was silently dropped on the
+// wire (the keepalive_blackhole fault). The caller sees a failed heartbeat; the
+// session may then lapse, exercising the reaper.
+var errKeepAliveDropped = errors.New("lease: keepalive dropped (buggify)")
+
+func init() {
+	buggify.Register("session_drop_keepalive",
+		"Sessions.KeepAlive drops the heartbeat as if the RPC were blackholed", 0.05)
+}
 
 // Proposer is the consensus operation leases need (satisfied by
 // *caspaxos.Proposer and by the agent Router).
@@ -69,6 +81,10 @@ func (s *Sessions) Grant(ctx context.Context, id, owner string, ttl int64) (Sess
 // KeepAlive extends a live session held by owner. It fails if the session has
 // lapsed or belongs to someone else (the caller has lost it).
 func (s *Sessions) KeepAlive(ctx context.Context, id, owner string, ttl int64) (Session, error) {
+	// BUGGIFY: drop the heartbeat as if blackholed on the wire.
+	if buggify.Maybe("session_drop_keepalive", 0.05) {
+		return Session{}, errKeepAliveDropped
+	}
 	return s.commit(ctx, id, func(cur Session, present bool) (Session, error) {
 		now := s.now()
 		if !present || cur.Owner != owner || cur.Expiry <= now {
@@ -94,6 +110,14 @@ func (s *Sessions) Live(ctx context.Context, id string) (bool, error) {
 		return false, err
 	}
 	return present && cur.Owner != "" && cur.Expiry > s.now(), nil
+}
+
+// Info returns the session record itself (linearizable read). Callers that
+// reason about time relative to the expiry — like the ownership manager's
+// takeover wait, which must outwait a lapsed holder's read window by
+// MaxOffset — need the raw Expiry, not just the Live verdict.
+func (s *Sessions) Info(ctx context.Context, id string) (Session, bool, error) {
+	return s.get(ctx, id)
 }
 
 func (s *Sessions) get(ctx context.Context, id string) (Session, bool, error) {

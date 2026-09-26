@@ -19,11 +19,24 @@ import (
 // Descriptor describes one range: the half-open key interval [Start, End), the
 // node ids replicating it, and a configuration epoch (bumped on reconfiguration).
 type Descriptor struct {
-	ID       uint64
-	Start    []byte // inclusive lower bound; empty == unbounded below (-inf)
-	End      []byte // exclusive upper bound; empty == unbounded above (+inf)
-	Replicas []uint64
-	Epoch    uint64
+	ID       uint64   `json:"id"`
+	Start    []byte   `json:"start,omitempty"` // inclusive lower bound; empty == unbounded below (-inf)
+	End      []byte   `json:"end,omitempty"`   // exclusive upper bound; empty == unbounded above (+inf)
+	Replicas []uint64 `json:"replicas"`
+	Epoch    uint64   `json:"epoch"`
+
+	// Joint is non-nil only while the range's replica set is being
+	// reconfigured (§4.3): proposals must then gather a quorum in BOTH the
+	// old and new sets (the router builds a joint proposer), which is what
+	// makes the data migration safe against concurrent writes. Cleared by the
+	// release step.
+	Joint *ReplicaJoint `json:"joint,omitempty"`
+}
+
+// ReplicaJoint is the two replica sets of an in-flight reconfiguration.
+type ReplicaJoint struct {
+	Old []uint64 `json:"old"`
+	New []uint64 `json:"new"`
 }
 
 // Contains reports whether key falls in this range.

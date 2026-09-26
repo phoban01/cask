@@ -1,0 +1,96 @@
+SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
+  SECTION: [2. Resources](#2-resources)
+    TEXT[!MUST]: Cask MUST serve its resources through the Kubernetes aggregation layer as an APIService.
+    TEXT[!MUST]: Every fleet resource MUST be cluster-scoped.
+    TEXT[!MUST]: The extension server MUST be built on the generic server in k8s.io/apiserver.
+    TEXT[!MUST]: The extension server MUST delegate authentication and authorization to the local kube-apiserver.
+    TEXT[!MUST]: A client MUST be able to use kubectl, client-go informers, field selectors, and watch bookmarks against fleet resources without fleet-specific code.
+    TEXT[!MUST]: The extension server MUST report not ready until its storage is reachable.
+    TEXT[!MUST]: The extension server MUST report not ready until any pending migration import is complete.
+
+  SECTION: [3. Storage model](#3-storage-model)
+    TEXT[!MUST,implementation]: Each object MUST be stored in one cask register keyed by resource type and name.
+    TEXT[!MUST]: Each resource type MUST have one index register that maps every object name to that object's latest sequence.
+    TEXT[!MUST]: An object's resourceVersion MUST be the sequence of its object register.
+    TEXT[!MUST]: A list's resourceVersion MUST be the sequence of the index register.
+    TEXT[!MUST,implementation]: A mutation MUST write the object register before the index register.
+    TEXT[!MUST,implementation]: The index register MUST NOT record a sequence higher than the object register holds.
+    TEXT[!MUST,implementation]: When the index write of a mutation did not complete, the next index write for that object MUST record the object register's current sequence.
+    TEXT[!MUST,implementation]: The extension server MUST reconcile the index register against the object registers at startup.
+    TEXT[!MUST]: The extension server MUST reconcile the index register against the object registers at a fixed interval.
+    TEXT[!MUST,implementation]: A create MUST use a compare-and-set that requires the object register to be absent.
+    TEXT[!MUST,implementation]: An update MUST use a compare-and-set on the resourceVersion the client supplied.
+    TEXT[!MUST,implementation]: An update whose compare-and-set fails MUST return a conflict.
+    TEXT[!MUST,implementation]: A delete MUST tombstone the object register before it removes the name from the index register.
+    TEXT[!MUST]: An object value MUST NOT exceed 1 MiB.
+
+  SECTION: [4. List and watch](#4-list-and-watch)
+    TEXT[!MUST]: A list MUST return every object that the index register names at the index sequence the list reports.
+    TEXT[!MUST]: A watch from a resourceVersion MUST deliver every index change after that version, in order, with no gaps.
+    TEXT[!MUST]: A watch whose start version is compacted MUST end with 410 Gone.
+    TEXT[!MUST]: Each watch event MUST carry the object at the sequence the index recorded.
+    TEXT[!SHOULD]: Watch events SHOULD be pushed from the index register's change feed rather than polled.
+
+  SECTION: [5. Claims and fencing](#5-claims-and-fencing)
+    TEXT[!MUST,implementation]: Binding a claim to an object MUST be the acquisition of that object's cask lock under the claim's session.
+    TEXT[!MUST,implementation,test]: At most one claim MUST be Bound to an object at the object's current fence.
+    TEXT[!MUST,implementation,test]: Every successful acquisition MUST mint a fence strictly greater than every fence previously minted for that object.
+    TEXT[!MUST,implementation]: A Bound claim MUST carry its fence in its status.
+    TEXT[!MUST]: A controller MUST include the claim's fence in every effect it applies for that object.
+    TEXT[!MUST,implementation]: A receiver MUST reject an effect whose fence is lower than the highest fence it has accepted for that object.
+    TEXT[!MUST,implementation,test]: A status write MUST NOT lower an advertised fence.
+    TEXT[!MUST,implementation]: A controller MUST reconcile only claims whose status names its own cluster.
+    TEXT[!MUST,implementation,test]: When a claim's session lapses, the controller MUST set the claim to Lost.
+    TEXT[!MUST]: A controller MUST NOT apply an effect for a claim it knows to be Lost.
+    TEXT[!MUST,implementation,test]: Deleting a Bound claim MUST release the object's lock.
+    TEXT[!MAY]: Fencing rejects effects that are older than the newest holder's fence; it MAY accept an expired holder's effect while no successor exists.
+
+  SECTION: [6. Membership](#6-membership)
+    TEXT[!MUST]: A fleet MUST start from exactly one founding member.
+    TEXT[!MUST]: Every member MUST be either a voter or a participant.
+    TEXT[!MUST]: A participant MUST be able to read, watch, and propose without holding register replicas.
+    TEXT[!MUST]: Only voters MUST hold register replicas.
+    TEXT[!MUST]: The voter set MUST change only by joint-consensus reconfiguration of the roster.
+    TEXT[!MUST]: An operator MUST NOT grow the voter set by restarting members with a longer static peer list.
+    TEXT[!MUST]: The voter count MUST be odd.
+    TEXT[!MUST]: The voter count MUST NOT exceed five.
+    TEXT[!SHOULD]: The voter set SHOULD contain at most one voter per management cluster once three or more clusters exist.
+    TEXT[!MUST]: The founding member MUST remain available until the voter set has grown to three.
+    TEXT[!MUST]: The extension server MUST join the fleet through the dynamic roster path.
+    TEXT[!MUST]: A new member MUST be able to join with a seed address and a minted certificate and nothing else.
+
+  SECTION: [7. Migration](#7-migration)
+    TEXT[!MUST]: The extension server MUST serve the same API group, version, and kinds that the CRD served.
+    TEXT[!MUST]: The migration MUST preserve each object's uid.
+    TEXT[!MUST]: The migration MUST preserve each object's creationTimestamp.
+    TEXT[!MUST]: Writers MUST be frozen from the start of the export until the APIService is available.
+    TEXT[!MUST]: The APIService MUST NOT become available before the import has completed.
+    TEXT[!MUST]: The initial index sequence for each resource type MUST be greater than the source etcd revision at export time.
+    TEXT[!MUST]: A continuous export of all fleet objects MUST run from the first day of phase one.
+    TEXT[!MUST]: The cutover MUST be rehearsed on a copy of the management cluster before it runs on the real one.
+
+  SECTION: [8. Security](#8-security)
+    TEXT[!MUST]: Consensus traffic between members MUST use mutual TLS.
+    TEXT[!MUST]: The extension server MUST serve HTTPS with a certificate the kube-apiserver can verify.
+    TEXT[!MUST]: The cask client API and control endpoints MUST NOT be reachable outside the pod without authentication.
+
+  SECTION: [9. Operations](#9-operations)
+    TEXT[!MUST]: Every voter MUST persist its acceptor state to a durable volume.
+    TEXT[!MUST]: A rolling upgrade MUST keep a majority of voters available at all times.
+    TEXT[!MUST]: A majority-loss recovery procedure MUST be documented.
+    TEXT[!MUST]: The majority-loss recovery procedure MUST be rehearsed before phase two.
+    TEXT[!MUST]: Cask MUST expose a health signal for quorum state.
+    TEXT[!MUST]: Cask MUST expose counters for lease expiries and for rejected fence regressions.
+
+  SECTION: [10. Verification](#10-verification)
+    TEXT[!MUST]: Every safety rule in sections 3 and 5 MUST be an invariant in the Quint model.
+    TEXT[!MUST,implementation]: The Quint model MUST include a negative control for each invariant that fails when the rule is omitted.
+    TEXT[!MUST]: Every requirement in this document MUST have a Duvet citation or a Duvet exception with a reason.
+    TEXT[!MUST]: Every MUST in sections 3, 4, and 5 MUST have a Duvet test citation.
+    TEXT[!MUST]: Traces generated from the Quint model MUST be replayed against the extension server in a Go test.
+    TEXT[!MUST]: End-to-end tests MUST use sigs.k8s.io/e2e-framework against kind clusters.
+    TEXT[!MUST]: End-to-end tests MUST NOT use Ginkgo.
+    TEXT[!MUST]: End-to-end tests MUST NOT use envtest.
+    TEXT[!MUST,implementation]: CI MUST run the unit tests with the race detector.
+    TEXT[!MUST]: CI MUST run the Quint checks, the Duvet report, the simulator gate, and the end-to-end suite.
+    TEXT[!MUST,implementation]: A change that lowers Duvet coverage MUST fail CI.

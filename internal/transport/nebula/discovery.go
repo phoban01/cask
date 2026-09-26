@@ -53,7 +53,7 @@ func SeedMembers(yamlConfig string, caskPort int) ([]roster.Member, error) {
 		if err != nil {
 			return nil, fmt.Errorf("nebula: lighthouse host %q: %w", h, err)
 		}
-		id := nodeIDFromIP(ip)
+		id := NodeIDFromIP(ip)
 		if _, ok := byID[id]; ok {
 			continue // already have it (likely ourselves)
 		}
@@ -85,7 +85,7 @@ func GenesisMembers(yamlConfig string, caskPort int) ([]roster.Member, error) {
 		if err != nil {
 			return nil, fmt.Errorf("nebula: lighthouse host %q: %w", h, err)
 		}
-		id := nodeIDFromIP(ip)
+		id := NodeIDFromIP(ip)
 		byID[id] = roster.Member{NodeID: id, Addr: overlayAddr(ip, caskPort)}
 	}
 	// A lighthouse does not list itself in lighthouse.hosts, so add it here; the
@@ -134,14 +134,14 @@ func selfMember(c *config.C, caskPort int) (roster.Member, error) {
 		return roster.Member{}, fmt.Errorf("nebula: pki.cert has no overlay network")
 	}
 	ip := nets[0].Addr()
-	id := nodeIDFromIP(ip)
+	id := NodeIDFromIP(ip)
 	return roster.Member{NodeID: id, Addr: overlayAddr(ip, caskPort), Zone: zoneFromGroups(crt.Groups())}, nil
 }
 
-// nodeIDFromIP maps an overlay IP to a stable node id. An IPv4 overlay address
+// NodeIDFromIP maps an overlay IP to a stable node id. An IPv4 overlay address
 // packs losslessly into the low 32 bits; an IPv6 address is folded into 64 bits.
 // Either way the mapping is deterministic and collision-free within one overlay.
-func nodeIDFromIP(ip netip.Addr) uint64 {
+func NodeIDFromIP(ip netip.Addr) uint64 {
 	if ip.Is4() {
 		b := ip.As4()
 		return uint64(binary.BigEndian.Uint32(b[:]))

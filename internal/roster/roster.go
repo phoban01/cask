@@ -4,14 +4,23 @@
 // view, which may flap. A node is added or removed here only by consensus, so a
 // transient gossip false positive can never destabilise placement; only a
 // multiply-witnessed, committed change does.
+//
+// The register is REFLEXIVE: its value records its own acceptor set (the Core).
+// The cluster founds from a single node and the Core grows or shrinks as
+// membership changes, via joint-consensus reconfiguration on the register's own
+// key (see reconfig.go) — there is no static, baked-in genesis member set. The
+// full Members list (every node) drives data placement; the Core is a bounded
+// subset that physically stores this register.
 package roster
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
+	"sync"
 
 	"github.com/phoban01/cask/internal/caspaxos"
 )
@@ -24,11 +33,37 @@ type Member struct {
 	Zone   string `json:"zone"`
 }
 
-// Value is the register's contents: the membership set plus a configuration
-// epoch bumped on every change.
+// Joint records an in-flight reconfiguration of the register's own acceptor set.
+// It is non-nil only between the start and finalisation of a Core change; while
+// it is set, every writer must use a joint quorum (a majority in BOTH Old and
+// New), which is what makes the transition lossless.
+type Joint struct {
+	Old []uint64 `json:"old"`
+	New []uint64 `json:"new"`
+}
+
+// Value is the register's contents.
 type Value struct {
-	Epoch   uint64   `json:"epoch"`
+	// Epoch is bumped on every Members change; it is the version data placement
+	// keys off.
+	Epoch uint64 `json:"epoch"`
+	// Members is the full membership set — the input to zone-aware HRW placement.
 	Members []Member `json:"members"`
+	// Core is the register's own CASPaxos acceptor set (sorted node ids): the
+	// bounded subset of Members that physically stores this register.
+	Core []uint64 `json:"core"`
+	// Joint is non-nil only while the Core is being reconfigured.
+	Joint *Joint `json:"joint,omitempty"`
+	// ConfigGen is bumped ONLY when Core/Joint changes, so a reader can cheaply
+	// detect that the register's acceptor set has moved.
+	ConfigGen uint64 `json:"cfg_gen"`
+	// RangeIDs is the authoritative list of live range ids (§4.3): the roster
+	// is the index, each range's descriptor register (\x00rd/<id>, hosted on
+	// the Core) is the placement authority. Empty means the pre-§4.3 implicit
+	// single range (id 1) — readers treat the two identically, so existing
+	// clusters upgrade in place. Split/merge commits update this list; that
+	// update IS the routing cutover.
+	RangeIDs []uint64 `json:"range_ids,omitempty"`
 }
 
 // Proposer is the consensus operation the roster needs (satisfied by
@@ -37,38 +72,119 @@ type Proposer interface {
 	Propose(ctx context.Context, key []byte, change caspaxos.ChangeFunc) ([]byte, error)
 }
 
+// ProposerFactory builds a consensus proposer over the given acceptor groups,
+// each a set of node ids. A single group is ordinary CASPaxos; two groups give
+// joint consensus for reconfiguration. The roster calls this to target its
+// current Core (or, mid-reconfiguration, the joint Old+New sets); the caller's
+// closure resolves node ids to acceptor links (over the overlay, or the sim
+// network in tests).
+type ProposerFactory func(groups [][]uint64) Proposer
+
 // Key is the reserved register key the roster lives at.
 var Key = []byte("\x00roster")
 
+// errConfigShifted aborts a write whose proposer was built for a configuration
+// that the register has since moved past; the caller refreshes and retries.
+var errConfigShifted = errors.New("roster: configuration shifted under write")
+
 // Roster is a handle to the membership register.
 type Roster struct {
-	prop Proposer
+	self uint64
+	mk   ProposerFactory
 	key  []byte
+
+	// believed is the acceptor set this handle currently proposes against,
+	// learned from the last successful read and advanced as the Core moves.
+	mu       sync.Mutex
+	believed []uint64
+	gen      uint64
 }
 
-// New returns a Roster proposing through prop at the default key.
-func New(prop Proposer) *Roster { return &Roster{prop: prop, key: Key} }
+// New returns a Roster for node self whose proposers are built by mk. The
+// handle has no believed acceptor set yet: a founder establishes it via
+// Founder/Genesis; a joiner seeds it via AdoptCore (from a peer's snapshot)
+// before its first read.
+func New(self uint64, mk ProposerFactory) *Roster {
+	return &Roster{self: self, mk: mk, key: Key}
+}
 
-// Genesis installs the initial membership if the register is empty. It is a
-// no-op (returning the existing value) if a roster already exists, so concurrent
-// seeders converge instead of clobbering one another.
+// NewWithProposer returns a Roster backed by a single fixed proposer, ignoring
+// acceptor-group selection. It is for the static, single-group case (tests and
+// any deployment with a fixed roster acceptor set).
+func NewWithProposer(self uint64, p Proposer) *Roster {
+	return New(self, func([][]uint64) Proposer { return p })
+}
+
+// AdoptCore seeds the believed acceptor set from an out-of-band hint (e.g. a
+// peer's roster snapshot) so a joining node can read the register before it
+// knows the authoritative Core. The first successful read corrects it.
+func (r *Roster) AdoptCore(ids []uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.believed = normalizeIDs(ids)
+}
+
+// believedCore returns a copy of the current believed acceptor set.
+func (r *Roster) believedCore() []uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]uint64(nil), r.believed...)
+}
+
+// learn advances the believed acceptor set from a freshly read value. During a
+// joint phase the believed set is the union of Old and New, so reads and writes
+// keep a quorum that overlaps wherever the latest value was chosen.
+func (r *Roster) learn(v Value) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if v.ConfigGen < r.gen {
+		return
+	}
+	if v.Joint != nil {
+		r.believed = normalizeIDs(append(append([]uint64(nil), v.Joint.Old...), v.Joint.New...))
+	} else {
+		r.believed = normalizeIDs(v.Core)
+	}
+	r.gen = v.ConfigGen
+}
+
+// Genesis installs the initial membership if the register is empty, with the
+// member set as the initial Core. It is a no-op (returning the existing value)
+// if a roster already exists, so concurrent seeders converge instead of
+// clobbering one another. It proposes against the members being founded — for a
+// single-node Founder that is just {self}, a trivially available quorum.
 func (r *Roster) Genesis(ctx context.Context, members []Member) (Value, error) {
-	return r.commit(ctx, func(cur Value, present bool) (Value, error) {
+	ids := memberIDs(members)
+	prop := r.mk([][]uint64{ids})
+	v, err := commitWith(ctx, prop, r.key, func(cur Value, present bool) (Value, error) {
 		if present {
 			return cur, nil
 		}
-		return Value{Epoch: 1, Members: normalize(members)}, nil
+		return Value{Epoch: 1, Members: normalize(members), Core: normalizeIDs(ids), ConfigGen: 1}, nil
 	})
+	if err == nil {
+		r.learn(v)
+	}
+	return v, err
 }
 
-// Add inserts m (idempotent: re-adding an existing node id is a no-op).
+// Founder bootstraps the cluster as a single-node register: it founds the
+// roster with Core {self}. Exactly one node (the one started with --bootstrap)
+// calls this; every other node joins via Add against the discovered Core. This
+// asymmetry is the split-brain defence — a node that is not the founder never
+// creates a register, it only joins one.
+func (r *Roster) Founder(ctx context.Context, self Member) (Value, error) {
+	return r.Genesis(ctx, []Member{self})
+}
+
+// Add inserts m (idempotent: re-adding an existing node id is a no-op). It is
+// joint-aware: while a reconfiguration is in flight it proposes against the
+// joint quorum so the membership change survives the transition.
 func (r *Roster) Add(ctx context.Context, m Member) (Value, error) {
-	return r.commit(ctx, func(cur Value, present bool) (Value, error) {
-		if !present {
-			return Value{}, fmt.Errorf("roster: not initialised")
-		}
+	return r.write(ctx, func(cur Value) (Value, error) {
 		for _, e := range cur.Members {
 			if e.NodeID == m.NodeID {
+				cur.Members = normalize(cur.Members) // canonicalise, no change
 				return cur, nil
 			}
 		}
@@ -78,12 +194,11 @@ func (r *Roster) Add(ctx context.Context, m Member) (Value, error) {
 	})
 }
 
-// Remove deletes the node with the given id (idempotent if absent).
+// Remove deletes the node with the given id (idempotent if absent). It also
+// strips the id from the Core and from any in-flight Joint.New, so a
+// reconfiguration never finalises onto a removed node.
 func (r *Roster) Remove(ctx context.Context, nodeID uint64) (Value, error) {
-	return r.commit(ctx, func(cur Value, present bool) (Value, error) {
-		if !present {
-			return Value{}, fmt.Errorf("roster: not initialised")
-		}
+	return r.write(ctx, func(cur Value) (Value, error) {
 		out := cur.Members[:0:0]
 		removed := false
 		for _, e := range cur.Members {
@@ -92,6 +207,10 @@ func (r *Roster) Remove(ctx context.Context, nodeID uint64) (Value, error) {
 				continue
 			}
 			out = append(out, e)
+		}
+		cur.Core = dropID(cur.Core, nodeID)
+		if cur.Joint != nil {
+			cur.Joint.New = dropID(cur.Joint.New, nodeID)
 		}
 		if !removed {
 			return cur, nil
@@ -102,14 +221,109 @@ func (r *Roster) Remove(ctx context.Context, nodeID uint64) (Value, error) {
 	})
 }
 
-// Get returns the current membership (linearizable read).
+// UpdateRangeIDs atomically rewrites the live range-id list (§4.3). This is
+// the split/merge CUTOVER commit: the moment it lands, snapshot polls route
+// clients to the new ranges. mutate receives the current list — the implicit
+// single range materialized as [1] so mutations compose — and returns the
+// desired list; an actual change bumps Epoch (a new range is observable like
+// any membership change).
+func (r *Roster) UpdateRangeIDs(ctx context.Context, mutate func(ids []uint64) []uint64) (Value, error) {
+	return r.write(ctx, func(cur Value) (Value, error) {
+		in := cur.RangeIDs
+		if len(in) == 0 {
+			in = []uint64{1}
+		}
+		out := normalizeIDs(mutate(append([]uint64(nil), in...)))
+		if idsEqual(out, normalizeIDs(in)) {
+			return cur, nil
+		}
+		cur.RangeIDs = out
+		cur.Epoch++
+		return cur, nil
+	})
+}
+
+// Get returns the current membership (linearizable read). It reads against the
+// believed acceptor set and, if a reconfiguration is in flight, re-reads against
+// the joint union so the value returned is the latest chosen one. Either way it
+// advances the believed set so subsequent operations target the live Core.
 func (r *Roster) Get(ctx context.Context) (Value, error) {
-	raw, err := r.prop.Propose(ctx, r.key, caspaxos.Identity)
+	core := r.believedCore()
+	if len(core) == 0 {
+		return Value{}, fmt.Errorf("roster: no believed acceptor set (adopt a core or found first)")
+	}
+	v, err := r.read(ctx, [][]uint64{core})
+	if err != nil {
+		return Value{}, err
+	}
+	r.learn(v)
+	if v.Joint != nil {
+		v, err = r.read(ctx, [][]uint64{v.Joint.Old, v.Joint.New})
+		if err != nil {
+			return Value{}, err
+		}
+		r.learn(v)
+	}
+	return v, nil
+}
+
+// read runs a linearizable read against the given acceptor groups.
+func (r *Roster) read(ctx context.Context, groups [][]uint64) (Value, error) {
+	raw, err := r.mk(groups).Propose(ctx, r.key, caspaxos.Identity)
 	if err != nil {
 		return Value{}, err
 	}
 	return decode(raw)
 }
+
+// write applies mutate under the register's current configuration: it reads to
+// learn the live Core/Joint, builds the matching proposer (single-group when
+// quiescent, joint while reconfiguring), and commits with a guard that aborts if
+// the configuration shifted under it (then refreshes and retries). The guard is
+// load-bearing: CASPaxos surfaces the current value during prepare, so a write
+// that began single-group sees a freshly-published Joint and bails rather than
+// committing under a now-insufficient quorum.
+func (r *Roster) write(ctx context.Context, mutate func(cur Value) (Value, error)) (Value, error) {
+	const attempts = 16
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		cur, err := r.Get(ctx)
+		if err != nil {
+			return Value{}, err
+		}
+		var groups [][]uint64
+		if cur.Joint != nil {
+			groups = [][]uint64{cur.Joint.Old, cur.Joint.New}
+		} else {
+			groups = [][]uint64{cur.Core}
+		}
+		expectGen := cur.ConfigGen
+		v, err := commitWith(ctx, r.mk(groups), r.key, func(raw Value, present bool) (Value, error) {
+			if !present {
+				return Value{}, fmt.Errorf("roster: not initialised")
+			}
+			if raw.ConfigGen != expectGen || jointDiffers(raw.Joint, cur.Joint) {
+				return Value{}, errConfigShifted
+			}
+			return mutate(raw)
+		})
+		if err == nil {
+			r.learn(v)
+			return v, nil
+		}
+		if errors.Is(err, errConfigShifted) || errors.Is(err, caspaxos.ErrPreempted) {
+			lastErr = err
+			continue
+		}
+		return Value{}, err
+	}
+	if lastErr == nil {
+		lastErr = caspaxos.ErrPreempted
+	}
+	return Value{}, lastErr
+}
+
+// Get-derived helpers --------------------------------------------------------
 
 // NodeIDs returns the member node ids in sorted order — the input to HRW
 // placement.
@@ -125,10 +339,9 @@ func (r *Roster) NodeIDs(ctx context.Context) ([]uint64, error) {
 	return ids, nil
 }
 
-// commit applies mutate as a CASPaxos change on the register and returns the
-// resulting value.
-func (r *Roster) commit(ctx context.Context, mutate func(cur Value, present bool) (Value, error)) (Value, error) {
-	raw, err := r.prop.Propose(ctx, r.key, func(current []byte) ([]byte, error) {
+// commitWith applies mutate as a CASPaxos change on the register through prop.
+func commitWith(ctx context.Context, prop Proposer, key []byte, mutate func(cur Value, present bool) (Value, error)) (Value, error) {
+	raw, err := prop.Propose(ctx, key, func(current []byte) ([]byte, error) {
 		cur, err := decode(current)
 		if err != nil {
 			return nil, err
@@ -145,6 +358,14 @@ func (r *Roster) commit(ctx context.Context, mutate func(cur Value, present bool
 	return decode(raw)
 }
 
+func memberIDs(members []Member) []uint64 {
+	ids := make([]uint64, len(members))
+	for i, m := range members {
+		ids[i] = m.NodeID
+	}
+	return normalizeIDs(ids)
+}
+
 func normalize(ms []Member) []Member {
 	// Dedup by node id (last wins) and sort, so the encoded value is canonical.
 	seen := map[uint64]Member{}
@@ -157,6 +378,52 @@ func normalize(ms []Member) []Member {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].NodeID < out[j].NodeID })
 	return out
+}
+
+// normalizeIDs dedups and sorts a node-id set so the encoded value is canonical.
+func normalizeIDs(ids []uint64) []uint64 {
+	seen := map[uint64]bool{}
+	for _, id := range ids {
+		seen[id] = true
+	}
+	out := make([]uint64, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+func dropID(ids []uint64, id uint64) []uint64 {
+	out := ids[:0:0]
+	for _, x := range ids {
+		if x != id {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+func jointDiffers(a, b *Joint) bool {
+	if (a == nil) != (b == nil) {
+		return true
+	}
+	if a == nil {
+		return false
+	}
+	return !idsEqual(a.Old, b.Old) || !idsEqual(a.New, b.New)
+}
+
+func idsEqual(a, b []uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func decode(raw []byte) (Value, error) {

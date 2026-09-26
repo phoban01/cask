@@ -16,9 +16,15 @@ import (
 	"errors"
 	"sort"
 
+	"github.com/phoban01/cask/internal/buggify"
 	"github.com/phoban01/cask/internal/hlc"
 	"github.com/phoban01/cask/internal/mvcc"
 )
+
+func init() {
+	buggify.Register("watch_spurious_compacted",
+		"KeyWatcher.Poll returns ErrCompacted spuriously, forcing a re-list", 0.02)
+}
 
 // ErrCompacted means a watcher's resume point is older than the retained
 // history; the client must re-read current state and resume from there.
@@ -57,6 +63,11 @@ func (w *KeyWatcher) Cursor() uint64 { return w.cursor }
 // the cursor past them. It returns ErrCompacted if the cursor has fallen below
 // the retained history.
 func (w *KeyWatcher) Poll(ctx context.Context) ([]Event, error) {
+	// BUGGIFY: signal compaction spuriously; a correct client re-lists current
+	// state and resumes, so this must never lose events.
+	if buggify.Maybe("watch_spurious_compacted", 0.02) {
+		return nil, ErrCompacted
+	}
 	chain, err := w.src.History(ctx, w.key)
 	if err != nil {
 		return nil, err

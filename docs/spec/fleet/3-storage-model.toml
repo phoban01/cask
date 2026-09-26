@@ -1,0 +1,116 @@
+target = "docs/spec/fleet.md#3-storage-model"
+
+# 3. Storage model
+#
+# Each object MUST be stored in one cask register keyed by resource type and name.
+# 
+# Each resource type MUST have one index register that maps every object name to that object's latest sequence.
+# 
+# An object's resourceVersion MUST be the sequence of its object register.
+# 
+# A list's resourceVersion MUST be the sequence of the index register.
+# 
+# A mutation MUST write the object register before the index register.
+# 
+# The index register MUST NOT record a sequence higher than the object register holds.
+# 
+# When the index write of a mutation did not complete, the next index write for that object MUST record the object register's current sequence.
+# 
+# The extension server MUST reconcile the index register against the object registers at startup.
+# 
+# The extension server MUST reconcile the index register against the object registers at a fixed interval.
+# 
+# A create MUST use a compare-and-set that requires the object register to be absent.
+# 
+# An update MUST use a compare-and-set on the resourceVersion the client supplied.
+# 
+# An update whose compare-and-set fails MUST return a conflict.
+# 
+# A delete MUST tombstone the object register before it removes the name from the index register.
+# 
+# An object value MUST NOT exceed 1 MiB.
+
+[[spec]]
+level = "MUST"
+quote = '''
+Each object MUST be stored in one cask register keyed by resource type and name.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Each resource type MUST have one index register that maps every object name to that object's latest sequence.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+An object's resourceVersion MUST be the sequence of its object register.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A list's resourceVersion MUST be the sequence of the index register.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A mutation MUST write the object register before the index register.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The index register MUST NOT record a sequence higher than the object register holds.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+When the index write of a mutation did not complete, the next index write for that object MUST record the object register's current sequence.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The extension server MUST reconcile the index register against the object registers at startup.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The extension server MUST reconcile the index register against the object registers at a fixed interval.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A create MUST use a compare-and-set that requires the object register to be absent.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+An update MUST use a compare-and-set on the resourceVersion the client supplied.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+An update whose compare-and-set fails MUST return a conflict.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A delete MUST tombstone the object register before it removes the name from the index register.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+An object value MUST NOT exceed 1 MiB.
+'''
+

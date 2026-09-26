@@ -1,0 +1,97 @@
+# The fleet.cask.dev extension apiserver for ONE member cluster.
+#
+# cask is EMBEDDED: each apiserver carries its own cask acceptor
+# (--listen-consensus) and the fleet's apiservers form the consensus group
+# among themselves — there are no external cask processes anywhere.
+#
+# hostNetwork: pod networks are not routable between kind clusters, but the
+# kind nodes all sit on the shared "kind" docker network, so the consensus
+# port rides the node IP. The pod learns that IP from the downward API.
+#
+# demo.sh substitutes __CLUSTER__ (this cluster's name), __ID__ (a unique
+# proposer id per apiserver), and __CASK_PEERS__ (every member's node
+# IP:8001, including this one's).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cask-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cask-apiserver
+  namespace: cask-system
+  labels: {app: cask-apiserver}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: cask-apiserver}
+  template:
+    metadata:
+      labels: {app: cask-apiserver}
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: apiserver
+          image: cask-demo:latest
+          imagePullPolicy: Never # loaded via `kind load docker-image`
+          command: ["/usr/local/bin/cask-apiserver"]
+          env:
+            - name: HOST_IP
+              valueFrom:
+                fieldRef: {fieldPath: status.hostIP}
+          args:
+            - --listen=:9443
+            - --cluster=__CLUSTER__
+            - --id=__ID__
+            - --listen-consensus=:8001
+            - --advertise-consensus=$(HOST_IP):8001
+            - --cask-peers=__CASK_PEERS__
+            - --data-dir=/var/lib/cask
+            - --self-signed-tls
+          ports:
+            - containerPort: 9443
+            - containerPort: 8001
+          # Durable acceptor state: an embedded acceptor that restarted empty
+          # would forget its promises, which is unsafe for consensus. The
+          # hostPath survives pod restarts (the zombie act depends on this).
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/cask
+          readinessProbe:
+            httpGet: {path: /healthz, port: 9443, scheme: HTTPS}
+            initialDelaySeconds: 1
+      volumes:
+        - name: data
+          hostPath:
+            path: /var/lib/cask-demo
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cask-apiserver
+  namespace: cask-system
+spec:
+  selector: {app: cask-apiserver}
+  ports:
+    - port: 443
+      targetPort: 9443
+---
+# Registers the group with THIS cluster's kube-apiserver: from here,
+# `kubectl get devices` anywhere in the fleet reads the same cask registers.
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1alpha1.fleet.cask.dev
+spec:
+  group: fleet.cask.dev
+  version: v1alpha1
+  groupPriorityMinimum: 1000
+  versionPriority: 15
+  insecureSkipTLSVerify: true # demo: the backend serves a self-signed cert
+  service:
+    name: cask-apiserver
+    namespace: cask-system
+    port: 443

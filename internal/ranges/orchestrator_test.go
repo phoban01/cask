@@ -1,0 +1,430 @@
+package ranges_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"testing"
+
+	"github.com/phoban01/cask/internal/agent"
+	"github.com/phoban01/cask/internal/caspaxos"
+	"github.com/phoban01/cask/internal/hlc"
+	"github.com/phoban01/cask/internal/mvcc"
+	"github.com/phoban01/cask/internal/ranges"
+	"github.com/phoban01/cask/internal/store"
+)
+
+// fixture: six data nodes (0-2 the old replica set, 3-5 the new), a separate
+// three-node Core hosting the descriptor register, and a KeyLister reading
+// each node's store directly.
+type reconfigFixture struct {
+	stores map[uint64]*store.Mem
+	dialer agent.StaticDialer
+	rstore *ranges.Store
+	orch   *ranges.Orchestrator
+	now    int64
+}
+
+func newReconfigFixture(t *testing.T, settle func(ctx context.Context) error) *reconfigFixture {
+	t.Helper()
+	f := &reconfigFixture{stores: map[uint64]*store.Mem{}, dialer: agent.StaticDialer{}, now: 1}
+	for id := uint64(0); id < 6; id++ {
+		f.stores[id] = store.NewMem()
+		f.dialer[id] = caspaxos.NewAcceptor(f.stores[id])
+	}
+	core := make([]caspaxos.AcceptorClient, 3)
+	for i := range core {
+		core[i] = caspaxos.NewAcceptor(store.NewMem())
+	}
+	f.rstore = ranges.NewStore(caspaxos.NewProposer(99, core))
+
+	lister := func(_ context.Context, node uint64) ([][]byte, error) {
+		s, ok := f.stores[node]
+		if !ok {
+			return nil, errors.New("no such node")
+		}
+		return s.Keys(context.Background())
+	}
+	f.orch = ranges.NewOrchestrator(99, f.rstore, f.dialer, lister, settle)
+	return f
+}
+
+// routerNow builds a router whose placement reflects the descriptor register
+// RIGHT NOW (what a refreshed client sees), with §4.1 refresh wired to the
+// register too.
+func (f *reconfigFixture) routerNow(t *testing.T, id uint64) *mvcc.KV {
+	t.Helper()
+	fetch := func() *ranges.Map {
+		s, ok, err := f.rstore.Get(context.Background(), 1)
+		if err != nil || !ok {
+			return nil
+		}
+		return ranges.NewMap([]ranges.Descriptor{s.Descriptor})
+	}
+	r := agent.NewRouter(id, fetch(), f.dialer, agent.WithRefresh(fetch))
+	return mvcc.New(r, hlc.New(func() int64 { f.now++; return f.now }), id)
+}
+
+// The release-blocking property: every committed write — pre-joint and
+// during-joint — survives a replica-set move onto a DISJOINT set, and is
+// served by the new replicas alone after release.
+func TestReconfigCarriesAllData(t *testing.T) {
+	ctx := context.Background()
+	var jointWriteErr error
+	var f *reconfigFixture
+	// settle models the routing-lease wait; here a refreshed writer commits
+	// DURING the joint phase — the migration must not lose it.
+	settle := func(ctx context.Context) error {
+		kv := f.routerNow(t, 7)
+		_, jointWriteErr = kv.Put(ctx, []byte("k-joint"), []byte("written-mid-migration"))
+		return nil
+	}
+	f = newReconfigFixture(t, settle)
+
+	if _, err := f.orch.Seed(ctx, ranges.Descriptor{ID: 1, Replicas: []uint64{0, 1, 2}, Epoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Commit data on the old set.
+	writer := f.routerNow(t, 6)
+	for i := range 10 {
+		key := fmt.Appendf(nil, "k%d", i)
+		if _, err := writer.Put(ctx, key, fmt.Appendf(nil, "v%d", i)); err != nil {
+			t.Fatalf("seed put %d: %v", i, err)
+		}
+	}
+
+	released, err := f.orch.ReconfigReplicas(ctx, 1, []uint64{3, 4, 5})
+	if err != nil {
+		t.Fatalf("reconfig: %v", err)
+	}
+	if jointWriteErr != nil {
+		t.Fatalf("joint-era write failed: %v", jointWriteErr)
+	}
+	if released.Joint != nil || !equal(released.Replicas, []uint64{3, 4, 5}) {
+		t.Fatalf("released state = %+v, want replicas [3 4 5], no joint", released)
+	}
+
+	// A refreshed reader — routing ONLY to the new set — sees everything.
+	reader := f.routerNow(t, 8)
+	for i := range 10 {
+		key := fmt.Appendf(nil, "k%d", i)
+		got, found, err := reader.Get(ctx, key)
+		if err != nil || !found || string(got) != fmt.Sprintf("v%d", i) {
+			t.Fatalf("key %d after release = %q found=%v err=%v (lost in migration)", i, got, found, err)
+		}
+	}
+	got, found, err := reader.Get(ctx, []byte("k-joint"))
+	if err != nil || !found || string(got) != "written-mid-migration" {
+		t.Fatalf("joint-era key after release = %q found=%v err=%v (lost in migration)", got, found, err)
+	}
+}
+
+// An in-flight joint from a crashed driver is completed toward ITS target
+// before any new move is considered — resumability.
+func TestReconfigResumesInFlightJoint(t *testing.T) {
+	ctx := context.Background()
+	f := newReconfigFixture(t, nil)
+	if _, err := f.orch.Seed(ctx, ranges.Descriptor{ID: 1, Replicas: []uint64{0, 1, 2}, Epoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+	writer := f.routerNow(t, 6)
+	if _, err := writer.Put(ctx, []byte("k"), []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+
+	// A "crashed driver" published the joint but never carried or released.
+	if _, err := f.rstore.Publish(ctx, 1, func(s ranges.State, _ bool) (ranges.State, error) {
+		s.Joint = &ranges.ReplicaJoint{Old: []uint64{0, 1, 2}, New: []uint64{3, 4, 5}}
+		s.Epoch++
+		return s, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The successor asks for a DIFFERENT target; the in-flight joint wins.
+	released, err := f.orch.ReconfigReplicas(ctx, 1, []uint64{0, 1, 5})
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	if !equal(released.Replicas, []uint64{3, 4, 5}) {
+		t.Fatalf("resumed onto %v, want the in-flight target [3 4 5]", released.Replicas)
+	}
+	got, found, err := f.routerNow(t, 8).Get(ctx, []byte("k"))
+	if err != nil || !found || string(got) != "v" {
+		t.Fatalf("key after resume = %q found=%v err=%v", got, found, err)
+	}
+}
+
+// Key enumeration needs only a MAJORITY of old replicas — one dead lister is
+// tolerated; a dead majority fails loudly rather than migrating partially.
+func TestReconfigKeyEnumerationMajority(t *testing.T) {
+	ctx := context.Background()
+
+	run := func(dead int) error {
+		f := newReconfigFixture(t, nil)
+		deadSet := map[uint64]bool{}
+		for id := uint64(0); id < uint64(dead); id++ {
+			deadSet[id] = true
+		}
+		base := f.orch
+		_ = base
+		lister := func(_ context.Context, node uint64) ([][]byte, error) {
+			if deadSet[node] {
+				return nil, errors.New("down")
+			}
+			return f.stores[node].Keys(context.Background())
+		}
+		f.orch = ranges.NewOrchestrator(99, f.rstore, f.dialer, lister, nil)
+
+		if _, err := f.orch.Seed(ctx, ranges.Descriptor{ID: 1, Replicas: []uint64{0, 1, 2}, Epoch: 1}); err != nil {
+			return err
+		}
+		if _, err := f.routerNow(t, 6).Put(ctx, []byte("k"), []byte("v")); err != nil {
+			return err
+		}
+		_, err := f.orch.ReconfigReplicas(ctx, 1, []uint64{3, 4, 5})
+		return err
+	}
+
+	if err := run(1); err != nil {
+		t.Fatalf("reconfig with 1 dead lister: %v (majority should suffice)", err)
+	}
+	if err := run(2); err == nil {
+		t.Fatal("reconfig with a dead majority succeeded; must fail loudly")
+	}
+}
+
+// No-op moves and mid-lifecycle ranges are left alone.
+func TestReconfigNoOpAndGuards(t *testing.T) {
+	ctx := context.Background()
+	f := newReconfigFixture(t, nil)
+	if _, err := f.orch.Seed(ctx, ranges.Descriptor{ID: 1, Replicas: []uint64{0, 1, 2}, Epoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := f.orch.ReconfigReplicas(ctx, 1, []uint64{2, 1, 0}) // same set, any order
+	if err != nil || s.Epoch != 1 {
+		t.Fatalf("no-op reconfig = %+v err=%v, want untouched epoch 1", s, err)
+	}
+
+	if _, err := f.rstore.Publish(ctx, 1, func(st ranges.State, _ bool) (ranges.State, error) {
+		st.Split = &ranges.SplitIntent{At: []byte("m"), Left: 2, Right: 3}
+		return st, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s, err = f.orch.ReconfigReplicas(ctx, 1, []uint64{3, 4, 5})
+	if err != nil || !equal(s.Replicas, []uint64{0, 1, 2}) {
+		t.Fatalf("reconfig of a splitting range = %+v err=%v, want untouched", s, err)
+	}
+}
+
+func equal(a, b []uint64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := map[uint64]int{}
+	for _, x := range a {
+		seen[x]++
+	}
+	for _, x := range b {
+		seen[x]--
+	}
+	for _, c := range seen {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// rosterList fakes the roster's RangeIDs for cutover: idempotent set arithmetic.
+type rosterList struct{ ids map[uint64]bool }
+
+func newRosterList(ids ...uint64) *rosterList {
+	l := &rosterList{ids: map[uint64]bool{}}
+	for _, id := range ids {
+		l.ids[id] = true
+	}
+	return l
+}
+
+func (l *rosterList) cutover(_ context.Context, remove, add []uint64) error {
+	for _, id := range remove {
+		delete(l.ids, id)
+	}
+	for _, id := range add {
+		l.ids[id] = true
+	}
+	return nil
+}
+
+func (l *rosterList) list() []uint64 {
+	var out []uint64
+	for id := range l.ids {
+		out = append(out, id)
+	}
+	return out
+}
+
+// Variant 1 split then merge, with data committed before, between, and after:
+// routing follows the roster cutover, every key stays readable, no data moves
+// (both halves inherit the replica set), and old descriptors tombstone with
+// forwarding pointers.
+func TestSplitThenMergeRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	f := newReconfigFixture(t, nil)
+	list := newRosterList(1)
+	f.orch.SetCutover(list.cutover)
+
+	if _, err := f.orch.Seed(ctx, ranges.Descriptor{ID: 1, Replicas: []uint64{0, 1, 2}, Epoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	// rmap over the CURRENT roster list + descriptor registers.
+	kvNow := func(id uint64) *mvcc.KV {
+		fetch := func() *ranges.Map {
+			var ds []ranges.Descriptor
+			for _, rid := range list.list() {
+				if s, ok, err := f.rstore.Get(ctx, rid); err == nil && ok && !s.Tombstoned {
+					ds = append(ds, s.Descriptor)
+				}
+			}
+			if len(ds) == 0 {
+				return nil
+			}
+			return ranges.NewMap(ds)
+		}
+		r := agent.NewRouter(id, fetch(), f.dialer, agent.WithRefresh(fetch))
+		return mvcc.New(r, hlc.New(func() int64 { f.now++; return f.now }), id)
+	}
+
+	pre := kvNow(6)
+	for _, k := range []string{"apple", "mango", "zebra"} {
+		if _, err := pre.Put(ctx, []byte(k), []byte("v-"+k)); err != nil {
+			t.Fatalf("pre-split put %s: %v", k, err)
+		}
+	}
+
+	left, right, err := f.orch.Split(ctx, 1, []byte("m"), 2, 3)
+	if err != nil {
+		t.Fatalf("split: %v", err)
+	}
+	if string(left.End) != "m" || string(right.Start) != "m" || left.Epoch != 2 || right.Epoch != 2 {
+		t.Fatalf("split halves = %+v / %+v, want cut at m with epoch old+1", left.Descriptor, right.Descriptor)
+	}
+	if got := list.list(); len(got) != 2 || !containsU64(got, 2) || !containsU64(got, 3) {
+		t.Fatalf("roster after split = %v, want {2 3}", got)
+	}
+	if old, ok, _ := f.rstore.Get(ctx, 1); !ok || !old.Tombstoned || len(old.ReplacedBy) != 2 {
+		t.Fatalf("old descriptor = %+v, want tombstoned with ReplacedBy", old)
+	}
+
+	mid := kvNow(7)
+	if _, err := mid.Put(ctx, []byte("banana"), []byte("v-banana")); err != nil { // left half
+		t.Fatalf("post-split put: %v", err)
+	}
+	if _, err := mid.Put(ctx, []byte("pear"), []byte("v-pear")); err != nil { // right half
+		t.Fatalf("post-split put: %v", err)
+	}
+	for _, k := range []string{"apple", "mango", "zebra", "banana", "pear"} {
+		got, found, err := mid.Get(ctx, []byte(k))
+		if err != nil || !found || string(got) != "v-"+k {
+			t.Fatalf("post-split get %s = %q found=%v err=%v", k, got, found, err)
+		}
+	}
+
+	// A repeat call with the same parameters is a no-op resume... of a range
+	// that is now tombstoned: it must error cleanly, not re-split.
+	if _, _, err := f.orch.Split(ctx, 1, []byte("m"), 2, 3); err == nil {
+		t.Fatal("re-splitting a tombstoned range succeeded")
+	}
+
+	merged, err := f.orch.Merge(ctx, 2, 3, 4)
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if merged.Start != nil || merged.End != nil {
+		t.Fatalf("merged bounds = [%q, %q), want full keyspace", merged.Start, merged.End)
+	}
+	if got := list.list(); len(got) != 1 || !containsU64(got, 4) {
+		t.Fatalf("roster after merge = %v, want {4}", got)
+	}
+
+	post := kvNow(8)
+	for _, k := range []string{"apple", "mango", "zebra", "banana", "pear"} {
+		got, found, err := post.Get(ctx, []byte(k))
+		if err != nil || !found || string(got) != "v-"+k {
+			t.Fatalf("post-merge get %s = %q found=%v err=%v", k, got, found, err)
+		}
+	}
+}
+
+// A split interrupted after recording its intent resumes to completion; a
+// conflicting split of the same range is refused.
+func TestSplitResumeAndConflict(t *testing.T) {
+	ctx := context.Background()
+	f := newReconfigFixture(t, nil)
+	list := newRosterList(1)
+	f.orch.SetCutover(list.cutover)
+	if _, err := f.orch.Seed(ctx, ranges.Descriptor{ID: 1, Replicas: []uint64{0, 1, 2}, Epoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	// "Crash" after step 1: the intent is committed, nothing else happened.
+	if _, err := f.rstore.Publish(ctx, 1, func(s ranges.State, _ bool) (ranges.State, error) {
+		s.Split = &ranges.SplitIntent{At: []byte("m"), Left: 2, Right: 3}
+		return s, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := f.orch.Split(ctx, 1, []byte("q"), 8, 9); err == nil {
+		t.Fatal("conflicting split parameters accepted while an intent is recorded")
+	}
+
+	left, right, err := f.orch.Split(ctx, 1, []byte("m"), 2, 3)
+	if err != nil {
+		t.Fatalf("resume split: %v", err)
+	}
+	if left.ID != 2 || right.ID != 3 {
+		t.Fatalf("resumed halves = %d/%d, want 2/3", left.ID, right.ID)
+	}
+	if got := list.list(); len(got) != 2 {
+		t.Fatalf("roster after resumed split = %v, want two ranges", got)
+	}
+}
+
+// Merging halves whose replica sets differ is refused: reconfigure first.
+func TestMergeRequiresCommonReplicas(t *testing.T) {
+	ctx := context.Background()
+	f := newReconfigFixture(t, nil)
+	list := newRosterList(1)
+	f.orch.SetCutover(list.cutover)
+	if _, err := f.orch.Seed(ctx, ranges.Descriptor{ID: 1, Replicas: []uint64{0, 1, 2}, Epoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.orch.Split(ctx, 1, []byte("m"), 2, 3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.rstore.Publish(ctx, 3, func(s ranges.State, _ bool) (ranges.State, error) {
+		s.Replicas = []uint64{3, 4, 5}
+		s.Epoch++
+		return s, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.orch.Merge(ctx, 2, 3, 4); err == nil {
+		t.Fatal("merge across differing replica sets accepted")
+	}
+}
+
+func containsU64(ids []uint64, want uint64) bool {
+	for _, id := range ids {
+		if id == want {
+			return true
+		}
+	}
+	return false
+}

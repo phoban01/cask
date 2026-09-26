@@ -1,0 +1,28 @@
+target = "docs/spec/fleet.md#8-security"
+
+# 8. Security
+#
+# Consensus traffic between members MUST use mutual TLS.
+# 
+# The extension server MUST serve HTTPS with a certificate the kube-apiserver can verify.
+# 
+# The cask client API and control endpoints MUST NOT be reachable outside the pod without authentication.
+
+[[spec]]
+level = "MUST"
+quote = '''
+Consensus traffic between members MUST use mutual TLS.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The extension server MUST serve HTTPS with a certificate the kube-apiserver can verify.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The cask client API and control endpoints MUST NOT be reachable outside the pod without authentication.
+'''
+

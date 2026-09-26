@@ -19,7 +19,11 @@ EXTENDS Integers
 
 CONSTANTS Client,   \* the set of clients that may take the lease
           MaxTime,  \* time horizon for the model
-          TTL       \* lease duration granted on acquire/renew
+          TTL,      \* lease duration granted on acquire/renew
+          MaxFence, \* fence horizon (Bump can jump, so time no longer bounds it)
+          NoClient  \* model value: the "nobody" owner (an unbounded CHOOSE is not TLC-evaluable)
+
+ASSUME NoClient \notin Client
 
 VARIABLES owner,    \* the client currently granted the lease, or NoClient
           expiry,   \* absolute time the current grant expires
@@ -27,15 +31,13 @@ VARIABLES owner,    \* the client currently granted the lease, or NoClient
           held,     \* held[c]  = the fence token client c believes it holds (0 = none)
           now       \* current time
 
-NoClient == CHOOSE x : x \notin Client
-
 vars == <<owner, expiry, fence, held, now>>
 
 TypeOK ==
   /\ owner  \in Client \cup {NoClient}
   /\ expiry \in 0..(MaxTime + TTL)
-  /\ fence  \in 0..(MaxTime + 1)
-  /\ held   \in [Client -> 0..(MaxTime + 1)]
+  /\ fence  \in 0..MaxFence
+  /\ held   \in [Client -> 0..MaxFence]
   /\ now    \in 0..MaxTime
 
 Init ==
@@ -52,11 +54,27 @@ Live == owner # NoClient /\ expiry > now
 \* strictly higher fence token and hands it to the acquirer.
 Acquire(c) ==
   /\ ~Live
+  /\ fence < MaxFence
   /\ fence'  = fence + 1
   /\ owner'  = c
   /\ expiry' = now + TTL
   /\ held'   = [held EXCEPT ![c] = fence + 1]
   /\ UNCHANGED now
+
+\* The live holder raises its own fence, possibly by more than one — the
+\* Locks.Bump operation (W0): when the consensus layer reports the register at
+\* a higher epoch (a full proposer's synthetic epoch), the holder must jump
+\* its fence past it without releasing. Ownership does not change and the
+\* holder still carries the latest token, so SingleHolder and FenceLatest are
+\* preserved; the jump width does not matter, only monotonicity.
+Bump(c) ==
+  /\ owner = c
+  /\ Live
+  /\ fence < MaxFence
+  /\ \E f \in (fence + 1)..MaxFence :
+       /\ fence' = f
+       /\ held'  = [held EXCEPT ![c] = f]
+  /\ UNCHANGED <<owner, expiry, now>>
 
 \* The current holder may renew while still live, extending expiry. Renewal does
 \* not change ownership; we leave the fence token unchanged on renew.
@@ -81,6 +99,7 @@ Tick ==
 Next ==
   \/ \E c \in Client : Acquire(c)
   \/ \E c \in Client : Renew(c)
+  \/ \E c \in Client : Bump(c)
   \/ \E c \in Client : Release(c)
   \/ Tick
 

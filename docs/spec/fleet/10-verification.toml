@@ -1,0 +1,92 @@
+target = "docs/spec/fleet.md#10-verification"
+
+# 10. Verification
+#
+# Every safety rule in sections 3 and 5 MUST be an invariant in the Quint model.
+# 
+# The Quint model MUST include a negative control for each invariant that fails when the rule is omitted.
+# 
+# Every requirement in this document MUST have a Duvet citation or a Duvet exception with a reason.
+# 
+# Every MUST in sections 3, 4, and 5 MUST have a Duvet test citation.
+# 
+# Traces generated from the Quint model MUST be replayed against the extension server in a Go test.
+# 
+# End-to-end tests MUST use sigs.k8s.io/e2e-framework against kind clusters.
+# 
+# End-to-end tests MUST NOT use Ginkgo.
+# 
+# End-to-end tests MUST NOT use envtest.
+# 
+# CI MUST run the unit tests with the race detector.
+# 
+# CI MUST run the Quint checks, the Duvet report, the simulator gate, and the end-to-end suite.
+# 
+# A change that lowers Duvet coverage MUST fail CI.
+
+[[spec]]
+level = "MUST"
+quote = '''
+Every safety rule in sections 3 and 5 MUST be an invariant in the Quint model.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The Quint model MUST include a negative control for each invariant that fails when the rule is omitted.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Every requirement in this document MUST have a Duvet citation or a Duvet exception with a reason.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Every MUST in sections 3, 4, and 5 MUST have a Duvet test citation.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Traces generated from the Quint model MUST be replayed against the extension server in a Go test.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+End-to-end tests MUST use sigs.k8s.io/e2e-framework against kind clusters.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+End-to-end tests MUST NOT use Ginkgo.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+End-to-end tests MUST NOT use envtest.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+CI MUST run the unit tests with the race detector.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+CI MUST run the Quint checks, the Duvet report, the simulator gate, and the end-to-end suite.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A change that lowers Duvet coverage MUST fail CI.
+'''
+

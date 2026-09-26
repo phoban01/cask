@@ -4,6 +4,8 @@ import (
 	"context"
 	"hash/fnv"
 	"sync"
+
+	"github.com/phoban01/cask/internal/buggify"
 )
 
 // Storage is the durable home of acceptor [Register] state, keyed by opaque
@@ -43,6 +45,13 @@ func (a *Acceptor) Prepare(ctx context.Context, key []byte, b Ballot) (PrepareRe
 	reg, err := a.store.Load(ctx, key)
 	if err != nil {
 		return PrepareReply{}, err
+	}
+	// BUGGIFY: reject this prepare as if a higher ballot had been promised. The
+	// proposer must advance past the reported conflict and retry — exercising the
+	// dueling-proposer path. Reporting the real promise/accepted state keeps the
+	// reply well-formed.
+	if buggify.Maybe("acceptor_spurious_preempted", 0.01) {
+		return PrepareReply{Promised: false, Conflict: reg.Promise, Accepted: reg.Accepted, Value: reg.Value}, nil
 	}
 	// Accept the prepare only if b strictly exceeds the current promise. Because
 	// Accept sets Promise == Accepted, the promise already dominates the

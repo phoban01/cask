@@ -1,6 +1,10 @@
 # --- Go ---
 # Build output
 /bin/
+# Stray `go build` binaries at repo root (named after cmd/ dirs)
+/cask
+/cask-apiserver
+/cask-bench
 # Test binaries / profiles produced by `go test`
 *.test
 *.out
@@ -50,3 +54,6 @@ MC.tla
 
 # --- Claude Code ---
 .claude/
+
+# quint verify scratch output
+_apalache-out/

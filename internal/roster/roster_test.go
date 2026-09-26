@@ -18,7 +18,7 @@ func newRoster(rf int) *roster.Roster {
 		stores[i] = store.NewMem()
 	}
 	nw := sim.NewNetwork(stores)
-	return roster.New(caspaxos.NewProposer(1, nw.Clients()))
+	return roster.NewWithProposer(1, caspaxos.NewProposer(1, nw.Clients()))
 }
 
 func member(id uint64) roster.Member {
