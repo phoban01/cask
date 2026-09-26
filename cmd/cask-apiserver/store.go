@@ -31,7 +31,11 @@ var errConflict = errors.New("apiserver: conflict")
 // errNotFound maps to HTTP 404.
 var errNotFound = errors.New("apiserver: not found")
 
+// objectKey names an object's register. Duvet citations live inside
+// function bodies: gofmt rewrites "//=" in doc comments to "// =".
 func objectKey(resource, name string) []byte {
+	//= docs/spec/fleet.md#3-storage-model
+	//# Each object MUST be stored in one cask register keyed by resource type and name.
 	return fmt.Appendf(nil, "fleet/%s/%s", resource, name)
 }
 
@@ -64,6 +68,10 @@ func (s *fleetStore) get(ctx context.Context, resource, name string) ([]byte, ui
 // create commits raw as a new object (fails if one exists) and registers the
 // name in the type index. Returns the new resourceVersion.
 func (s *fleetStore) create(ctx context.Context, resource, name string, raw []byte) (uint64, error) {
+	//= docs/spec/fleet.md#3-storage-model
+	//# A create MUST use a compare-and-set that requires the object register to be absent.
+	//= docs/spec/fleet.md#3-storage-model
+	//# A mutation MUST write the object register before the index register.
 	v, err := s.kv.CAS(ctx, objectKey(resource, name), nil, raw)
 	if errors.Is(err, caspaxos.ErrConflict) {
 		return 0, fmt.Errorf("%w: %s %q already exists", errConflict, resource, name)
@@ -84,9 +92,13 @@ func (s *fleetStore) update(ctx context.Context, resource, name string, raw []by
 	if err != nil {
 		return 0, err
 	}
+	//= docs/spec/fleet.md#3-storage-model
+	//# An update whose compare-and-set fails MUST return a conflict.
 	if rv != expectRV {
 		return 0, fmt.Errorf("%w: resourceVersion %d is stale (current %d)", errConflict, expectRV, rv)
 	}
+	//= docs/spec/fleet.md#3-storage-model
+	//# An update MUST use a compare-and-set on the resourceVersion the client supplied.
 	v, err := s.kv.CAS(ctx, objectKey(resource, name), cur, raw)
 	if errors.Is(err, caspaxos.ErrConflict) {
 		return 0, fmt.Errorf("%w: concurrent update of %s %q", errConflict, resource, name)
@@ -101,6 +113,8 @@ func (s *fleetStore) delete(ctx context.Context, resource, name string) error {
 	if _, _, err := s.get(ctx, resource, name); err != nil {
 		return err
 	}
+	//= docs/spec/fleet.md#3-storage-model
+	//# A delete MUST tombstone the object register before it removes the name from the index register.
 	if _, err := s.kv.Delete(ctx, objectKey(resource, name)); err != nil {
 		return err
 	}

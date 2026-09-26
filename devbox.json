@@ -2,6 +2,12 @@
   "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.16.0/.schema/devbox.schema.json",
   "packages": [
     "go@latest",
+    "quint@latest",
+    "jdk@21",
+    "kind@latest",
+    "kubectl@latest",
+    "cargo@latest",
+    "rustc@latest",
     "google-cloud-sdk@latest",
     "awscli2@latest",
     "oci-cli@latest",
@@ -10,24 +16,31 @@
   "env": {
     "GOPATH": "$PWD/.devbox/go",
     "GOBIN":  "$PWD/.devbox/go/bin",
-    "PATH":   "$GOBIN:$PATH"
+    "PATH":   "$GOBIN:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
   },
   "shell": {
     "init_hook": [
       "go version"
     ],
     "scripts": {
-      "build": [
-        "go build ./..."
+      "build":         ["go build ./..."],
+      "test":          ["go test -race ./..."],
+      "tidy":          ["go mod tidy"],
+      "sim-gate":      ["scripts/sim-gate.sh"],
+      "quint":         ["scripts/quint-check.sh"],
+      "quint-verify":  ["scripts/quint-check.sh --verify"],
+      "duvet-install": ["command -v duvet >/dev/null || cargo install duvet --locked"],
+      "spec":          [
+        "duvet extract -f markdown docs/spec/fleet.md -o docs/spec",
+        "duvet report --html .duvet/report.html"
       ],
-      "test": [
-        "go test ./..."
-      ],
-      "run": [
-        "go run ."
-      ],
-      "tidy": [
-        "go mod tidy"
+      "duvet-ci":      ["duvet report --ci"],
+      "e2e":           ["go test ./test/e2e -timeout 30m"],
+      "issues":        ["scripts/file-issues.sh docs/issues/fleet.md"],
+      "verify":        [
+        "go test -race ./...",
+        "scripts/quint-check.sh",
+        "duvet report --ci"
       ]
     }
   }

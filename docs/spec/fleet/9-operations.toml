@@ -1,0 +1,52 @@
+target = "docs/spec/fleet.md#9-operations"
+
+# 9. Operations
+#
+# Every voter MUST persist its acceptor state to a durable volume.
+# 
+# A rolling upgrade MUST keep a majority of voters available at all times.
+# 
+# A majority-loss recovery procedure MUST be documented.
+# 
+# The majority-loss recovery procedure MUST be rehearsed before phase two.
+# 
+# Cask MUST expose a health signal for quorum state.
+# 
+# Cask MUST expose counters for lease expiries and for rejected fence regressions.
+
+[[spec]]
+level = "MUST"
+quote = '''
+Every voter MUST persist its acceptor state to a durable volume.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A rolling upgrade MUST keep a majority of voters available at all times.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A majority-loss recovery procedure MUST be documented.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The majority-loss recovery procedure MUST be rehearsed before phase two.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Cask MUST expose a health signal for quorum state.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Cask MUST expose counters for lease expiries and for rejected fence regressions.
+'''
+

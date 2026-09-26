@@ -157,6 +157,15 @@ func TestDeviceCRUDAcrossClusters(t *testing.T) {
 // binds, the other stays Pending. Releasing the winner's claim hands the
 // device over with a STRICTLY HIGHER fencing token.
 func TestSingleGlobalLease(t *testing.T) {
+	//= docs/spec/fleet.md#5-claims-and-fencing
+	//= type=test
+	//# At most one claim MUST be Bound to an object at the object's current fence.
+	//= docs/spec/fleet.md#5-claims-and-fencing
+	//= type=test
+	//# Every successful acquisition MUST mint a fence strictly greater than every fence previously minted for that object.
+	//= docs/spec/fleet.md#5-claims-and-fencing
+	//= type=test
+	//# Deleting a Bound claim MUST release the object's lock.
 	f := newFleetFixture(t)
 	ctx := context.Background()
 
@@ -209,6 +218,12 @@ func TestSingleGlobalLease(t *testing.T) {
 // waking up — discovers its claim is Lost. The device's advertised lease
 // never regresses to the zombie's lower fence.
 func TestZombieHolderIsFenced(t *testing.T) {
+	//= docs/spec/fleet.md#5-claims-and-fencing
+	//= type=test
+	//# A status write MUST NOT lower an advertised fence.
+	//= docs/spec/fleet.md#5-claims-and-fencing
+	//= type=test
+	//# When a claim's session lapses, the controller MUST set the claim to Lost.
 	f := newFleetFixture(t)
 	ctx := context.Background()
 

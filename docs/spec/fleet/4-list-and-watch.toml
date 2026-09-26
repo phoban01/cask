@@ -1,0 +1,44 @@
+target = "docs/spec/fleet.md#4-list-and-watch"
+
+# 4. List and watch
+#
+# A list MUST return every object that the index register names at the index sequence the list reports.
+# 
+# A watch from a resourceVersion MUST deliver every index change after that version, in order, with no gaps.
+# 
+# A watch whose start version is compacted MUST end with 410 Gone.
+# 
+# Each watch event MUST carry the object at the sequence the index recorded.
+# 
+# Watch events SHOULD be pushed from the index register's change feed rather than polled.
+
+[[spec]]
+level = "MUST"
+quote = '''
+A list MUST return every object that the index register names at the index sequence the list reports.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A watch from a resourceVersion MUST deliver every index change after that version, in order, with no gaps.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A watch whose start version is compacted MUST end with 410 Gone.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Each watch event MUST carry the object at the sequence the index recorded.
+'''
+
+[[spec]]
+level = "SHOULD"
+quote = '''
+Watch events SHOULD be pushed from the index register's change feed rather than polled.
+'''
+

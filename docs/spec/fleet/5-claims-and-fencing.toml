@@ -1,0 +1,100 @@
+target = "docs/spec/fleet.md#5-claims-and-fencing"
+
+# 5. Claims and fencing
+#
+# Binding a claim to an object MUST be the acquisition of that object's cask lock under the claim's session.
+# 
+# At most one claim MUST be Bound to an object at the object's current fence.
+# 
+# Every successful acquisition MUST mint a fence strictly greater than every fence previously minted for that object.
+# 
+# A Bound claim MUST carry its fence in its status.
+# 
+# A controller MUST include the claim's fence in every effect it applies for that object.
+# 
+# A receiver MUST reject an effect whose fence is lower than the highest fence it has accepted for that object.
+# 
+# A status write MUST NOT lower an advertised fence.
+# 
+# A controller MUST reconcile only claims whose status names its own cluster.
+# 
+# When a claim's session lapses, the controller MUST set the claim to Lost.
+# 
+# A controller MUST NOT apply an effect for a claim it knows to be Lost.
+# 
+# Deleting a Bound claim MUST release the object's lock.
+# 
+# Fencing rejects effects that are older than the newest holder's fence; it MAY accept an expired holder's effect while no successor exists.
+
+[[spec]]
+level = "MUST"
+quote = '''
+Binding a claim to an object MUST be the acquisition of that object's cask lock under the claim's session.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+At most one claim MUST be Bound to an object at the object's current fence.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Every successful acquisition MUST mint a fence strictly greater than every fence previously minted for that object.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A Bound claim MUST carry its fence in its status.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A controller MUST include the claim's fence in every effect it applies for that object.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A receiver MUST reject an effect whose fence is lower than the highest fence it has accepted for that object.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A status write MUST NOT lower an advertised fence.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A controller MUST reconcile only claims whose status names its own cluster.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+When a claim's session lapses, the controller MUST set the claim to Lost.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A controller MUST NOT apply an effect for a claim it knows to be Lost.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Deleting a Bound claim MUST release the object's lock.
+'''
+
+[[spec]]
+level = "MAY"
+quote = '''
+Fencing rejects effects that are older than the newest holder's fence; it MAY accept an expired holder's effect while no successor exists.
+'''
+

@@ -1,0 +1,55 @@
+'$schema' = "https://awslabs.github.io/duvet/config/v0.4.0.json"
+
+# Requirement traceability for docs/spec/fleet.md.
+#
+#   duvet extract -f markdown docs/spec/fleet.md -o docs/spec   # refresh rules
+#   duvet report --html .duvet/report.html                     # local report
+#   duvet report --ci                                          # CI gate
+#
+# Cite a requirement from Go, Quint, or shell with:
+#
+#   //= docs/spec/fleet.md#<section-id>
+#   //= type=test            (omit for an implementation citation)
+#   //# <the requirement sentence, quoted exactly>
+#
+# Section ids are the headings slugified, e.g. "#3-storage-model".
+# In Go, cite inside the function body: gofmt rewrites "//=" in a doc
+# comment to "// =", which is not parsed.
+# A known gap is an exception, never a silent omission:
+#
+#   //= docs/spec/fleet.md#2-resources
+#   //= type=exception
+#   //= reason=tracked in issue #NN
+#   //# <sentence>
+
+[[source]]
+pattern = "cmd/**/*.go"
+
+[[source]]
+pattern = "internal/**/*.go"
+
+[[source]]
+pattern = "test/**/*.go"
+
+[[source]]
+pattern = "quint/**/*.qnt"
+comment-style = { meta = "//=", content = "//#" }
+
+[[source]]
+pattern = "scripts/**/*.sh"
+comment-style = { meta = "#=", content = "##" }
+
+[[source]]
+pattern = ".github/workflows/*.yml"
+comment-style = { meta = "#=", content = "##" }
+
+[[specification]]
+source = "docs/spec/fleet.md"
+format = "markdown"
+
+[report.html]
+enabled = true
+
+# Snapshots make a drop in coverage a CI failure.
+[report.snapshot]
+enabled = true

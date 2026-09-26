@@ -54,3 +54,6 @@ MC.tla
 
 # --- Claude Code ---
 .claude/
+
+# quint verify scratch output
+_apalache-out/

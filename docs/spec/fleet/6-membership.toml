@@ -1,0 +1,100 @@
+target = "docs/spec/fleet.md#6-membership"
+
+# 6. Membership
+#
+# A fleet MUST start from exactly one founding member.
+# 
+# Every member MUST be either a voter or a participant.
+# 
+# A participant MUST be able to read, watch, and propose without holding register replicas.
+# 
+# Only voters MUST hold register replicas.
+# 
+# The voter set MUST change only by joint-consensus reconfiguration of the roster.
+# 
+# An operator MUST NOT grow the voter set by restarting members with a longer static peer list.
+# 
+# The voter count MUST be odd.
+# 
+# The voter count MUST NOT exceed five.
+# 
+# The voter set SHOULD contain at most one voter per management cluster once three or more clusters exist.
+# 
+# The founding member MUST remain available until the voter set has grown to three.
+# 
+# The extension server MUST join the fleet through the dynamic roster path.
+# 
+# A new member MUST be able to join with a seed address and a minted certificate and nothing else.
+
+[[spec]]
+level = "MUST"
+quote = '''
+A fleet MUST start from exactly one founding member.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Every member MUST be either a voter or a participant.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A participant MUST be able to read, watch, and propose without holding register replicas.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Only voters MUST hold register replicas.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The voter set MUST change only by joint-consensus reconfiguration of the roster.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+An operator MUST NOT grow the voter set by restarting members with a longer static peer list.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The voter count MUST be odd.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The voter count MUST NOT exceed five.
+'''
+
+[[spec]]
+level = "SHOULD"
+quote = '''
+The voter set SHOULD contain at most one voter per management cluster once three or more clusters exist.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The founding member MUST remain available until the voter set has grown to three.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The extension server MUST join the fleet through the dynamic roster path.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A new member MUST be able to join with a seed address and a minted certificate and nothing else.
+'''
+

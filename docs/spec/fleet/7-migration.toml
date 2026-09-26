@@ -1,0 +1,68 @@
+target = "docs/spec/fleet.md#7-migration"
+
+# 7. Migration
+#
+# The extension server MUST serve the same API group, version, and kinds that the CRD served.
+# 
+# The migration MUST preserve each object's uid.
+# 
+# The migration MUST preserve each object's creationTimestamp.
+# 
+# Writers MUST be frozen from the start of the export until the APIService is available.
+# 
+# The APIService MUST NOT become available before the import has completed.
+# 
+# The initial index sequence for each resource type MUST be greater than the source etcd revision at export time.
+# 
+# A continuous export of all fleet objects MUST run from the first day of phase one.
+# 
+# The cutover MUST be rehearsed on a copy of the management cluster before it runs on the real one.
+
+[[spec]]
+level = "MUST"
+quote = '''
+The extension server MUST serve the same API group, version, and kinds that the CRD served.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The migration MUST preserve each object's uid.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The migration MUST preserve each object's creationTimestamp.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Writers MUST be frozen from the start of the export until the APIService is available.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The APIService MUST NOT become available before the import has completed.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The initial index sequence for each resource type MUST be greater than the source etcd revision at export time.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A continuous export of all fleet objects MUST run from the first day of phase one.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The cutover MUST be rehearsed on a copy of the management cluster before it runs on the real one.
+'''
+

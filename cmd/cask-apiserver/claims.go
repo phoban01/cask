@@ -41,6 +41,8 @@ func (c *claimController) reconcileOnce(ctx context.Context) {
 			c.log.Warn("claim decode", "claim", names[i], "err", err)
 			continue
 		}
+		//= docs/spec/fleet.md#5-claims-and-fencing
+		//# A controller MUST reconcile only claims whose status names its own cluster.
 		if claim.Status.Cluster != c.cluster {
 			continue // another cluster's apiserver manages this claim
 		}
@@ -81,6 +83,8 @@ func (c *claimController) tryBind(ctx context.Context, claim DeviceClaim, rv uin
 		return fmt.Errorf("session grant: %w", err)
 	}
 
+	//= docs/spec/fleet.md#5-claims-and-fencing
+	//# Binding a claim to an object MUST be the acquisition of that object's cask lock under the claim's session.
 	fence, err := c.store.locks.Acquire(ctx, deviceLockName(device), session)
 	switch {
 	case errors.Is(err, lease.ErrHeld):
@@ -93,6 +97,8 @@ func (c *claimController) tryBind(ctx context.Context, claim DeviceClaim, rv uin
 		return fmt.Errorf("acquire: %w", err)
 	}
 
+	//= docs/spec/fleet.md#5-claims-and-fencing
+	//# A Bound claim MUST carry its fence in its status.
 	if err := c.setClaimStatus(ctx, claim, rv, DeviceClaimStatus{
 		Phase: ClaimBound, Cluster: c.cluster, Fence: fence,
 	}); err != nil {
@@ -111,6 +117,8 @@ func (c *claimController) renew(ctx context.Context, claim DeviceClaim, rv uint6
 	if _, err := c.store.sessions.KeepAlive(ctx, session, session, ttl*1_000_000_000); err != nil {
 		// The session lapsed (or the keepalive lost): this claim's lease is
 		// gone, and a successor may already hold a HIGHER fence. Terminal.
+		//= docs/spec/fleet.md#5-claims-and-fencing
+		//# When a claim's session lapses, the controller MUST set the claim to Lost.
 		return c.setClaimStatus(ctx, claim, rv, DeviceClaimStatus{
 			Phase: ClaimLost, Cluster: c.cluster, Fence: claim.Status.Fence,
 			Reason: "lease session lapsed; a successor may hold a higher fence",
@@ -125,6 +133,8 @@ func (c *claimController) release(ctx context.Context, claim DeviceClaim) {
 		return
 	}
 	session := claimSessionID(c.cluster, claim.Name)
+	//= docs/spec/fleet.md#5-claims-and-fencing
+	//# Deleting a Bound claim MUST release the object's lock.
 	if err := c.store.locks.Release(ctx, deviceLockName(claim.Spec.DeviceName), session); err != nil {
 		c.log.Warn("lock release", "device", claim.Spec.DeviceName, "err", err)
 	}
@@ -165,6 +175,10 @@ func (c *claimController) setDeviceLease(ctx context.Context, name string, ref *
 	}
 	// Fencing on the STATUS write itself: never regress the advertised fence
 	// — a zombie's stale clear/downgrade must not mask a live higher lease.
+	//= docs/spec/fleet.md#5-claims-and-fencing
+	//# A status write MUST NOT lower an advertised fence.
+	//= docs/spec/fleet.md#5-claims-and-fencing
+	//# A receiver MUST reject an effect whose fence is lower than the highest fence it has accepted for that object.
 	if ref != nil && dev.Status.Lease != nil && dev.Status.Lease.Fence > ref.Fence {
 		return nil
 	}
