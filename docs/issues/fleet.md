@@ -883,6 +883,31 @@ proposals.
 
 Done when: the file exists and the `--force-new-fleet` flag is tracked in a follow-up issue.
 
+## ops: add --force-new-fleet to cask-apiserver
+
+labels: ops
+
+Spec: docs/spec/fleet.md#9-operations
+> A majority-loss recovery procedure MUST be documented.
+
+Task: add a `--force-new-fleet` flag to `cmd/cask-apiserver/main.go`.
+The flag needs `--data-dir`. It opens the Pebble store and builds a
+one-acceptor proposer over the local acceptor. Through that proposer it
+rewrites the roster register at `roster.Key`: `Core` and `Members` become
+this node only, `Joint` becomes nil, and `ConfigGen` and `Epoch` go up by
+one. Then the process exits. Put the rewrite in a `roster.ForceCore`
+helper. Add a Duvet citation for the sentence above. This depends on #43,
+because the apiserver has no roster until then.
+
+The runbook `docs/runbooks/majority-loss.md` (#64) calls this flag.
+
+Files: `cmd/cask-apiserver/main.go`, `internal/roster/roster.go`,
+`internal/roster/roster_test.go`
+
+Done when: a test writes a three-member roster to a Pebble dir, runs
+`ForceCore` for one member, and reads back `Core` equal to that member
+with a higher `ConfigGen`.
+
 ## ops: PodDisruptionBudget for voters
 
 labels: ops
