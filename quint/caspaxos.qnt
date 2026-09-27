@@ -23,6 +23,13 @@
 //   - The negative control `stepNoPromise` is new. It drops the promise
 //     check (maxBal[a] =< b) from VoteFor and MUST violate Consistency and
 //     VotesSafe.
+//
+// Gate checks, read by scripts/quint-check.sh. The shortest stepNoPromise
+// trace that breaks Consistency has 6 steps. At 10 steps Apalache ran for
+// more than 40 minutes on the good step (quint/PARITY.md).
+// quint-check: invariants=Consistency,OneValuePerBallot,VotesSafe
+// quint-check: control=stepNoPromise:Consistency
+// quint-check: verify-steps=6
 module caspaxos {
   pure val ACCEPTORS = Set("a1", "a2", "a3")
   pure val VALUES = Set("v1", "v2")

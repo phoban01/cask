@@ -13,6 +13,11 @@
 // The outcome of an unknown write is fixed when the client re-reads,
 // because the re-read is itself a consensus round: it either adopts the
 // value or supersedes it. So the model picks the outcome at the attempt.
+//
+// Gate checks, read by scripts/quint-check.sh:
+// quint-check: invariants=AppliedAtMostOnce
+// quint-check: control=stepBlindRetry:AppliedAtMostOnce
+// quint-check: verify-steps=12
 module retry {
   type Status = Idle | Unknown | Done
 

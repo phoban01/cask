@@ -16,6 +16,23 @@ When every row is filled, `tla/` is retired (#17).
 | `RangeDescriptors.tla` | not ported | | | | #15 |
 | `CrossRange.tla` | not ported | | | | #16 |
 
+## Add the port to the gate
+
+`scripts/quint-check.sh` checks every module that has `quint-check:`
+header comments. Do not edit the script. Put these lines above `module`:
+
+```
+// quint-check: invariants=Consistency,OneValuePerBallot,VotesSafe
+// quint-check: control=stepNoPromise:Consistency
+// quint-check: verify-steps=6
+```
+
+- `invariants=` lists the invariants that the good step must keep.
+- `control=step:invariant` names one negative control. Add one line per
+  control. The gate fails if a module has no control.
+- `verify-steps=` sets the `quint verify` bound. The default is 12.
+- `step=` names the good step. The default is `step`.
+
 ## How to reproduce a row
 
 TLC needs `tla2tools.jar`. The compiled module also needs `Apalache.tla` and

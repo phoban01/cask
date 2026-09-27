@@ -19,6 +19,15 @@
 // `stepNoFenceCheck`, `stepDeleteIndexFirst`, `stepWatchJump`) each drop one
 // rule and MUST violate the matching invariant. scripts/quint-check.sh runs
 // both directions.
+//
+// Gate checks, read by scripts/quint-check.sh:
+// quint-check: invariants=IndexNeverAhead,IndexRepaired,SingleHolder,FenceBounded,NoStaleEffect,WatchGapFree
+// quint-check: control=stepIndexFirst:IndexNeverAhead
+// quint-check: control=stepIncrementIndex:IndexRepaired
+// quint-check: control=stepNoFenceCheck:NoStaleEffect
+// quint-check: control=stepDeleteIndexFirst:IndexNeverAhead
+// quint-check: control=stepWatchJump:WatchGapFree
+// quint-check: verify-steps=12
 module fleet {
   pure val NAMES = Set("a", "b")
   pure val CLUSTERS = Set("east", "west")
