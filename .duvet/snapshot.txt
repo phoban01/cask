@@ -28,11 +28,11 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST]: An object value MUST NOT exceed 1 MiB.
 
   SECTION: [4. List and watch](#4-list-and-watch)
-    TEXT[!MUST]: A list MUST return every object that the index register names at the index sequence the list reports.
-    TEXT[!MUST,implementation]: A watch from a resourceVersion MUST deliver every index change after that version, in order, with no gaps.
-    TEXT[!MUST]: A watch whose start version is compacted MUST end with 410 Gone.
-    TEXT[!MUST]: Each watch event MUST carry the object at the sequence the index recorded.
-    TEXT[!SHOULD]: Watch events SHOULD be pushed from the index register's change feed rather than polled.
+    TEXT[!MUST,exception]: A list MUST return every object that the index register names at the index sequence the list reports.
+    TEXT[!MUST,implementation,exception]: A watch from a resourceVersion MUST deliver every index change after that version, in order, with no gaps.
+    TEXT[!MUST,exception]: A watch whose start version is compacted MUST end with 410 Gone.
+    TEXT[!MUST,exception]: Each watch event MUST carry the object at the sequence the index recorded.
+    TEXT[!SHOULD,exception]: Watch events SHOULD be pushed from the index register's change feed rather than polled.
 
   SECTION: [5. Claims and fencing](#5-claims-and-fencing)
     TEXT[!MUST,implementation]: Binding a claim to an object MUST be the acquisition of that object's cask lock under the claim's session.

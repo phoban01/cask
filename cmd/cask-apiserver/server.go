@@ -201,6 +201,12 @@ func (s *apiServer) serveDelete(w http.ResponseWriter, r *http.Request, resource
 }
 
 func (s *apiServer) serveList(w http.ResponseWriter, r *http.Request, resource string) {
+	// The list reads the index name set and then each object at its head.
+	// The index records no sequence, and the list reports no resourceVersion.
+	//= docs/spec/fleet.md#4-list-and-watch
+	//= type=exception
+	//= reason=the list reports no index sequence; tracked in issue #33
+	//# A list MUST return every object that the index register names at the index sequence the list reports.
 	_, raws, rvs, err := s.store.list(r.Context(), resource)
 	if err != nil {
 		httpStoreErr(w, err)
@@ -223,6 +229,25 @@ func (s *apiServer) serveList(w http.ResponseWriter, r *http.Request, resource s
 // interim shape §3.5's Plumtree push upgrades later. Correctness over
 // promptness: every event reflects a linearizable read.
 func (s *apiServer) serveWatch(w http.ResponseWriter, r *http.Request, resource string) {
+	// The watch ignores the start resourceVersion and diffs one poll against
+	// the next. Two changes between polls merge into one event, and each
+	// event carries the object at its head, not at an index sequence.
+	//= docs/spec/fleet.md#4-list-and-watch
+	//= type=exception
+	//= reason=poll-diff can merge changes and ignores the start version; tracked in issue #34
+	//# A watch from a resourceVersion MUST deliver every index change after that version, in order, with no gaps.
+	//= docs/spec/fleet.md#4-list-and-watch
+	//= type=exception
+	//= reason=no compaction check and no 410 yet; tracked in issue #34, modelled in issue #4
+	//# A watch whose start version is compacted MUST end with 410 Gone.
+	//= docs/spec/fleet.md#4-list-and-watch
+	//= type=exception
+	//= reason=the index records no sequence yet; tracked in issues #32 and #34
+	//# Each watch event MUST carry the object at the sequence the index recorded.
+	//= docs/spec/fleet.md#4-list-and-watch
+	//= type=exception
+	//= reason=poll-diff until the index change feed lands; tracked in issue #34
+	//# Watch events SHOULD be pushed from the index register's change feed rather than polled.
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
