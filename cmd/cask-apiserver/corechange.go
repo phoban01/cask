@@ -5,33 +5,33 @@ package main
 // Every data register in the extension server uses the roster core as its
 // acceptor set. The roster changes its core in three steps: publish a joint
 // core {Old, New}, carry forward, release to New (internal/roster). The
-// roster carries its own key. This file carries the data registers, the way
-// internal/ranges carries a range:
+// roster carries its own key, which leaves the joint value on a majority of
+// the old core. Then this file carries the data registers:
 //
-//  1. Publish the joint view on this member. From here this member proposes
-//     to a quorum of both cores, and its acceptor rejects a write that names
-//     an older core configuration (the write fence).
-//  2. Wait for every member to see the joint view (Settle). After that no
-//     write can commit on the old core alone, because every old-core voter
-//     rejects it.
-//  3. List the keys on a majority of the old core. Every committed key is on
-//     every majority, so the union has every committed key.
-//  4. Run a joint Identity round on each key (reconfig.CarryForwardKeys). It
-//     writes the committed value to a quorum of the new core.
+//  1. Publish the joint view on this member, so its own writes use a quorum
+//     of both cores. Wait Settle so other members can switch too. The wait
+//     is for liveness only: safety comes from the fence (fence.go).
+//  2. List the data keys on old voters in parallel. Count only voters whose
+//     accepted roster value is the joint one or newer, and stop at a
+//     majority of the old core. Each listing is atomic with the voter's
+//     fence. So any write that commits on an old quorum without the joint
+//     quorum is on a listed voter, or a listed voter rejects it.
+//  3. Run a joint Identity round on each listed key
+//     (reconfig.CarryForwardKeys). It writes the committed value to a quorum
+//     of the new core. A write that names the joint configuration already
+//     reached a quorum of the new core, so a key created after the listing
+//     needs no carry.
 //
 // The roster then releases the old core. quint/core_change.qnt models the
 // rules, with a negative control for each.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
-	"github.com/phoban01/cask/internal/caspaxos"
 	"github.com/phoban01/cask/internal/cluster"
 	"github.com/phoban01/cask/internal/ranges"
 	"github.com/phoban01/cask/internal/reconfig"
@@ -41,12 +41,9 @@ import (
 // dataKeysPath lists the keys the member's acceptor holds.
 const dataKeysPath = "/roster/keys"
 
-// errStaleAccept stands in for a fenced accept. The proposer counts it as
-// a missing vote, so a fenced accept never makes it run change again.
-var errStaleAccept = errors.New("membership: accept fenced by a newer core")
-
 // coreChange is a request to the run loop to move the core to target.
 type coreChange struct {
+	ctx    context.Context
 	target []uint64
 	done   chan coreResult
 }
@@ -58,9 +55,11 @@ type coreResult struct {
 
 // changeCore moves the roster core to target through joint consensus and
 // carries every data register with it. Only the driver runs it, inside its
-// run loop. The promote endpoint (issue #45) will call it.
+// run loop. Cancelling ctx stops the change; the roster keeps the joint
+// value, and the driver's run loop resumes it. The promote endpoint
+// (issue #45) will call it.
 func (m *membership) changeCore(ctx context.Context, target []uint64) (roster.Value, error) {
-	req := coreChange{target: target, done: make(chan coreResult, 1)}
+	req := coreChange{ctx: ctx, target: target, done: make(chan coreResult, 1)}
 	select {
 	case m.coreReqs <- req:
 	case <-ctx.Done():
@@ -74,8 +73,14 @@ func (m *membership) changeCore(ctx context.Context, target []uint64) (roster.Va
 	}
 }
 
-// runCoreChange is changeCore on the run loop.
-func (m *membership) runCoreChange(ctx context.Context, target []uint64) coreResult {
+// runCoreChange is changeCore on the run loop. It stops when the caller's
+// context, the run loop's context, or the carry deadline ends.
+func (m *membership) runCoreChange(runCtx, reqCtx context.Context, target []uint64) coreResult {
+	ctx, cancel := context.WithTimeout(reqCtx, m.cfg.CarryTimeout)
+	defer cancel()
+	stop := context.AfterFunc(runCtx, cancel)
+	defer stop()
+
 	prev, _ := m.snap.Load()
 	if !cluster.IsDriver(m.self.NodeID, prev.Core) {
 		return coreResult{err: fmt.Errorf("membership: node %d is not the driver of core %v", m.self.NodeID, prev.Core)}
@@ -113,7 +118,7 @@ func (m *membership) carry(ctx context.Context, v roster.Value) error {
 	if err != nil {
 		return err
 	}
-	keys, err := m.majorityKeys(ctx, v.Joint.Old)
+	keys, err := m.majorityKeys(ctx, v)
 	if err != nil {
 		return err
 	}
@@ -125,143 +130,124 @@ func (m *membership) carry(ctx context.Context, v roster.Value) error {
 	return nil
 }
 
-// majorityKeys returns the union of the data keys held by at least a
-// majority of the old core. The roster key is left out: the roster carries
-// it itself.
-func (m *membership) majorityKeys(ctx context.Context, old []uint64) ([][]byte, error) {
-	need := len(old)/2 + 1
-	got := 0
-	union := map[string]struct{}{}
-	var lastErr error
-	for _, id := range old {
-		keys, err := m.nodeKeys(ctx, id)
-		if err != nil {
-			lastErr = err
-			continue
+// majorityKeys lists the data keys on a majority of the old core whose
+// voters hold the joint roster value. If too few hold it, it reads the
+// roster through the joint quorum, which writes the value to the voters
+// that answer, and lists again.
+func (m *membership) majorityKeys(ctx context.Context, v roster.Value) ([][]byte, error) {
+	for {
+		keys, err := m.listOnce(ctx, v)
+		if err == nil {
+			return keys, nil
 		}
-		got++
-		for _, k := range keys {
-			if bytes.HasPrefix(k, roster.Key) {
-				continue
-			}
-			union[string(k)] = struct{}{}
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("%w (last: %v)", ctx.Err(), err)
+		}
+		m.log.Warn("key listing", "err", err)
+		_, _ = m.rost.Get(ctx)
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("%w (last: %v)", ctx.Err(), err)
+		case <-time.After(m.cfg.Interval):
 		}
 	}
-	if got < need {
-		return nil, fmt.Errorf("membership: listed keys on %d of %d old voters, need %d: %w", got, len(old), need, lastErr)
-	}
-	out := make([][]byte, 0, len(union))
-	for k := range union {
-		out = append(out, []byte(k))
-	}
-	return out, nil
 }
 
-// nodeKeys lists the keys on one voter: the local store directly, a peer
-// through its keys endpoint.
-func (m *membership) nodeKeys(ctx context.Context, id uint64) ([][]byte, error) {
-	if id == m.self.NodeID {
-		if m.cfg.Keys == nil {
-			return nil, errors.New("membership: local store cannot list keys")
+// listOnce asks every old voter at once and returns as soon as a majority
+// of them, each holding the joint roster value, has answered.
+func (m *membership) listOnce(ctx context.Context, v roster.Value) ([][]byte, error) {
+	//= docs/spec/fleet.md#6-membership
+	//# A core change MUST finish while a majority of the old core and a majority of the new core answer.
+	old := v.Joint.Old
+	need := len(old)/2 + 1
+	lctx, cancel := context.WithCancel(ctx)
+	defer cancel() // stops the stragglers once a majority answered
+
+	type answer struct {
+		l   keyListing
+		err error
+	}
+	answers := make(chan answer, len(old))
+	for _, id := range old {
+		go func(id uint64) {
+			l, err := m.nodeKeys(lctx, id)
+			answers <- answer{l, err}
+		}(id)
+	}
+	union := map[string]struct{}{}
+	fresh, stale := 0, 0
+	var lastErr error
+	for range old {
+		var a answer
+		select {
+		case a = <-answers:
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
-		return m.cfg.Keys(ctx)
+		if a.err != nil {
+			lastErr = a.err
+			continue
+		}
+		//= docs/spec/fleet.md#6-membership
+		//# A core change MUST list data keys only on old voters that have accepted the joint roster value.
+		if a.l.Gen < v.ConfigGen {
+			stale++
+			continue
+		}
+		fresh++
+		for _, k := range a.l.Keys {
+			union[string(k)] = struct{}{}
+		}
+		if fresh >= need {
+			out := make([][]byte, 0, len(union))
+			for k := range union {
+				out = append(out, []byte(k))
+			}
+			return out, nil
+		}
+	}
+	return nil, fmt.Errorf("membership: %d of %d old voters hold the joint roster value, need %d (%d behind; last error: %v)", fresh, len(old), need, stale, lastErr)
+}
+
+// nodeKeys lists the keys on one voter: the local acceptor directly, a
+// peer through its keys endpoint.
+func (m *membership) nodeKeys(ctx context.Context, id uint64) (keyListing, error) {
+	if id == m.self.NodeID {
+		return m.fence.listKeys(ctx)
 	}
 	m.mu.Lock()
 	addr, ok := m.addrs[id]
 	m.mu.Unlock()
 	if !ok {
-		return nil, fmt.Errorf("membership: no address for node %d", id)
+		return keyListing{}, fmt.Errorf("membership: no address for node %d", id)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+dataKeysPath, nil)
 	if err != nil {
-		return nil, err
+		return keyListing{}, err
 	}
 	resp, err := m.cfg.HTTP.Do(req)
 	if err != nil {
-		return nil, err
+		return keyListing{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("membership: keys from node %d: %s", id, resp.Status)
+		return keyListing{}, fmt.Errorf("membership: keys from node %d: %s", id, resp.Status)
 	}
-	var keys [][]byte
-	if err := json.NewDecoder(resp.Body).Decode(&keys); err != nil {
-		return nil, err
+	var l keyListing
+	if err := json.NewDecoder(resp.Body).Decode(&l); err != nil {
+		return keyListing{}, err
 	}
-	return keys, nil
+	return l, nil
 }
 
-// serveDataKeys answers GET /roster/keys with the local acceptor's keys.
+// serveDataKeys answers GET /roster/keys with the local acceptor's roster
+// ConfigGen and data keys.
 func (m *membership) serveDataKeys(w http.ResponseWriter, r *http.Request) {
-	if m.cfg.Keys == nil {
-		http.Error(w, "store cannot list keys", http.StatusNotImplemented)
-		return
-	}
-	keys, err := m.cfg.Keys(r.Context())
+	l, err := m.fence.listKeys(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(keys)
-}
-
-// coreGen is the write fence: the core configuration (ConfigGen) this
-// member knows, for every data key. The transport rejects a data write that
-// names an older one. The roster key has its own ConfigGen guard, so it is
-// not fenced here.
-func (m *membership) coreGen(key []byte) (uint64, bool) {
-	//= docs/spec/fleet.md#6-membership
-	//# A voter MUST reject a data write that names an older core configuration than the one it knows.
-	if bytes.HasPrefix(key, roster.Key) {
-		return 0, false
-	}
-	v, ok := m.snap.Load()
-	if !ok {
-		return 0, false
-	}
-	return v.ConfigGen, true
-}
-
-// fencedClient wraps an acceptor client. With gen set it applies the write
-// fence itself, for the local acceptor, which no transport handler guards.
-// It also turns a fenced accept into a missing vote. A fenced prepare stays
-// caspaxos.ErrRangeChanged: it ends the round before change runs, so the
-// caller may refresh its core view and run again. A fenced accept may come
-// after other acceptors took the value, and running change again then would
-// apply it twice. As a missing vote it ends in ErrUnknownOutcome instead,
-// which callers already handle by re-reading.
-type fencedClient struct {
-	caspaxos.AcceptorClient
-	gen func(key []byte) (uint64, bool)
-}
-
-func (c *fencedClient) fenced(ctx context.Context, key []byte) bool {
-	if c.gen == nil {
-		return false
-	}
-	claimed, ok := ranges.ClaimedEpoch(ctx)
-	if !ok {
-		return false
-	}
-	cur, ok := c.gen(key)
-	return ok && claimed < cur
-}
-
-func (c *fencedClient) Prepare(ctx context.Context, key []byte, b caspaxos.Ballot) (caspaxos.PrepareReply, error) {
-	if c.fenced(ctx, key) {
-		return caspaxos.PrepareReply{}, caspaxos.ErrRangeChanged
-	}
-	return c.AcceptorClient.Prepare(ctx, key, b)
-}
-
-func (c *fencedClient) Accept(ctx context.Context, key []byte, b caspaxos.Ballot, val []byte) (caspaxos.AcceptReply, error) {
-	if c.fenced(ctx, key) {
-		return caspaxos.AcceptReply{}, errStaleAccept
-	}
-	r, err := c.AcceptorClient.Accept(ctx, key, b, val)
-	if errors.Is(err, caspaxos.ErrRangeChanged) {
-		return caspaxos.AcceptReply{}, errStaleAccept
-	}
-	return r, err
+	_ = json.NewEncoder(w).Encode(l)
 }

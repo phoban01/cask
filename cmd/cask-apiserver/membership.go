@@ -27,17 +27,19 @@ type membershipConfig struct {
 	Local     *caspaxos.Acceptor // the embedded acceptor
 	HTTP      *http.Client       // client for peer consensus and roster traffic
 
-	// Keys lists the keys the embedded acceptor holds. A core change uses
-	// it to find every data register it must carry to the new core.
-	Keys func(ctx context.Context) ([][]byte, error)
+	// Store is the embedded acceptor's store. The write fence reads the
+	// accepted roster value from it, and a core change lists its keys.
+	Store caspaxos.Storage
 
 	// Interval is the reconcile tick and the join poll. JoinTimeout bounds
 	// the wait for a live member to add this one. Settle is how long a
-	// core change waits for every member to see the joint core before it
-	// carries the data registers (default: three intervals).
-	Interval    time.Duration
-	JoinTimeout time.Duration
-	Settle      time.Duration
+	// core change waits for members to see the joint core before it
+	// carries the data registers (default: three intervals). CarryTimeout
+	// bounds one attempt at a core change (default: one minute).
+	Interval     time.Duration
+	JoinTimeout  time.Duration
+	Settle       time.Duration
+	CarryTimeout time.Duration
 }
 
 // membership is this apiserver's place in the fleet. It founds the roster or
@@ -61,7 +63,8 @@ type membership struct {
 
 	viewMu sync.Mutex // orders snapshot stores so the view never moves back
 
-	local    *fencedClient   // the embedded acceptor behind the write fence
+	fence    *fencedAcceptor // the embedded acceptor behind the write fence
+	local    *fencedClient   // the proposer side of fence, for local rounds
 	coreReqs chan coreChange // core changes for the run loop to drive
 
 	mu      sync.Mutex
@@ -80,6 +83,9 @@ func newMembership(cfg membershipConfig, log *slog.Logger) *membership {
 	}
 	if cfg.Settle == 0 {
 		cfg.Settle = 3 * cfg.Interval
+	}
+	if cfg.CarryTimeout == 0 {
+		cfg.CarryTimeout = time.Minute
 	}
 	m := &membership{
 		cfg:   cfg,
@@ -102,7 +108,8 @@ func newMembership(cfg membershipConfig, log *slog.Logger) *membership {
 		}
 		return caspaxos.NewJointProposer(cfg.ID, acl, caspaxos.WithBackoff(contentionBackoff()))
 	})
-	m.local = &fencedClient{AcceptorClient: cfg.Local, gen: m.coreGen}
+	m.fence = newFencedAcceptor(cfg.Local, cfg.Store)
+	m.local = &fencedClient{AcceptorClient: m.fence}
 	m.coreReqs = make(chan coreChange)
 	m.rost.SetCarry(m.carry)
 	m.learn([]roster.Member{m.self})
@@ -116,7 +123,7 @@ func contentionBackoff() func(ctx context.Context, attempt int) error {
 // handler serves the acceptor and the roster endpoints on one listener.
 func (m *membership) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle(transport.ConnectHandler(m.cfg.Local, transport.WithEpochOf(m.coreGen)))
+	mux.Handle(transport.ConnectHandler(m.fence))
 	mux.HandleFunc("/roster", m.snap.Serve)
 	mux.HandleFunc("/roster/join", m.snap.ServeJoin)
 	mux.HandleFunc(dataKeysPath, m.serveDataKeys)
@@ -164,24 +171,47 @@ func (m *membership) run(ctx context.Context) {
 		case req := <-m.coreReqs:
 			// A core change runs here, so the driver stays the one roster
 			// writer and does not duel with its own reconcile.
-			req.done <- m.runCoreChange(ctx, req.target)
+			req.done <- m.runCoreChange(ctx, req.ctx, req.target)
 			continue
 		case <-t.C:
 		}
 		cur, _ := m.snap.Load()
 		if cluster.IsDriver(m.self.NodeID, cur.Core) {
-			v, err := ctrl.Reconcile(ctx, m.snap.DrainJoins(), nil)
+			rctx, cancel := context.WithTimeout(ctx, m.tickTimeout())
+			v, err := ctrl.Reconcile(rctx, m.snap.DrainJoins(), nil)
+			cancel()
 			if err != nil {
 				m.log.Warn("roster reconcile", "err", err)
 				continue
 			}
 			m.apply(cur, v)
+			if v.Joint != nil {
+				// A core change stopped part way (a deadline, a cancel, or a
+				// restart of the driver). Finish it toward its own target.
+				if r := m.runCoreChange(ctx, ctx, v.Joint.New); r.err != nil {
+					m.log.Warn("resume core change", "err", r.err)
+				}
+			}
 			continue
 		}
-		if v, ok := cluster.FetchCoreHint(ctx, m.cfg.HTTP, cluster.FetchTargets(m.seeds, cur.Members)); ok && len(v.Core) > 0 {
-			m.rost.AdoptCore(v.Core)
-			m.apply(cur, v.Value)
-		}
+		m.refresh(ctx)
+	}
+}
+
+// tickTimeout bounds one roster step of the run loop, so a hung peer costs
+// one tick, not the loop.
+func (m *membership) tickTimeout() time.Duration {
+	return max(5*m.cfg.Interval, time.Second)
+}
+
+// refresh learns the roster from the freshest peer snapshot.
+func (m *membership) refresh(ctx context.Context) {
+	cur, _ := m.snap.Load()
+	hctx, cancel := context.WithTimeout(ctx, m.tickTimeout())
+	defer cancel()
+	if v, ok := cluster.FetchCoreHint(hctx, m.cfg.HTTP, cluster.FetchTargets(m.seeds, cur.Members)); ok && len(v.Core) > 0 && !olderView(v.Value, cur) {
+		m.rost.AdoptCore(v.Core)
+		m.apply(cur, v.Value)
 	}
 }
 
@@ -241,22 +271,27 @@ func (m *membership) Propose(ctx context.Context, key []byte, change caspaxos.Ch
 }
 
 // awaitNewerCore waits until this member's view names a core configuration
-// newer than gen, or a few intervals pass.
+// newer than gen, or a few intervals pass. It asks peers itself, so a
+// stalled run loop does not leave the member stuck on an old view.
 func (m *membership) awaitNewerCore(ctx context.Context, gen uint64) error {
-	t := time.NewTicker(m.cfg.Interval / 4)
-	defer t.Stop()
 	deadline := time.Now().Add(4 * m.cfg.Interval)
-	for time.Now().Before(deadline) {
+	for {
 		if v, ok := m.snap.Load(); ok && v.ConfigGen > gen {
+			return nil
+		}
+		m.refresh(ctx)
+		if v, ok := m.snap.Load(); ok && v.ConfigGen > gen {
+			return nil
+		}
+		if time.Now().After(deadline) {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-t.C:
+		case <-time.After(m.cfg.Interval / 4):
 		}
 	}
-	return nil
 }
 
 // proposer returns a proposer over the current core and the ConfigGen it

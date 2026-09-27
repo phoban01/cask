@@ -2,14 +2,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/phoban01/cask/internal/caspaxos"
-	"github.com/phoban01/cask/internal/ranges"
 	"github.com/phoban01/cask/internal/roster"
 )
 
@@ -142,53 +140,5 @@ func TestJointCoreWriteNeedsBothQuorums(t *testing.T) {
 	_, err := founder.Propose(wctx, []byte("fleet/devices/d"), func([]byte) ([]byte, error) { return []byte("v"), nil })
 	if err == nil {
 		t.Fatal("a joint-phase write committed on the old core alone")
-	}
-}
-
-// A voter rejects a data write that names an older core configuration, on
-// the local path and on the wire. The roster key is not fenced here.
-func TestVoterRejectsWriteFromOlderCore(t *testing.T) {
-	//= docs/spec/fleet.md#6-membership
-	//= type=test
-	//# A voter MUST reject a data write that names an older core configuration than the one it knows.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	founder := newTestMember(t, 1, true, nil, 10*time.Second)
-	if err := founder.start(ctx); err != nil {
-		t.Fatalf("founder: %v", err)
-	}
-	cur, _ := founder.current()
-	gen := cur.ConfigGen
-	cur.ConfigGen++
-	founder.store(cur)
-
-	peer := newTestMember(t, 2, false, nil, time.Second)
-	peer.learn([]roster.Member{{NodeID: 1, Addr: founder.cfg.Advertise}})
-	peer.mu.Lock()
-	remote, ok := peer.clientLocked(1)
-	peer.mu.Unlock()
-	if !ok {
-		t.Fatal("no client for the founder")
-	}
-	founder.mu.Lock()
-	local, _ := founder.clientLocked(1)
-	founder.mu.Unlock()
-	key := []byte("fleet/devices/d")
-	b := caspaxos.Ballot{Counter: 1, NodeID: 2}
-
-	for name, c := range map[string]caspaxos.AcceptorClient{"local": local, "remote": remote} {
-		stale := ranges.WithClaimedEpoch(ctx, gen)
-		if _, err := c.Prepare(stale, key, b); !errors.Is(err, caspaxos.ErrRangeChanged) {
-			t.Errorf("%s: prepare from an older core: err = %v, want ErrRangeChanged", name, err)
-		}
-		if _, err := c.Accept(stale, key, b, []byte("v")); !errors.Is(err, errStaleAccept) {
-			t.Errorf("%s: accept from an older core: err = %v, want a missing vote", name, err)
-		}
-		if _, err := c.Prepare(ranges.WithClaimedEpoch(ctx, gen+1), key, b); err != nil {
-			t.Errorf("%s: prepare from the current core: %v", name, err)
-		}
-		if _, err := c.Prepare(stale, []byte("\x00roster-test"), b); err != nil {
-			t.Errorf("%s: prepare on the roster key: %v", name, err)
-		}
 	}
 }

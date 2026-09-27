@@ -129,7 +129,15 @@ A core change MUST carry every data register forward to the new core before it r
 
 During a core change, a data write MUST reach a quorum of both the old and the new core.
 
-A voter MUST reject a data write that names an older core configuration than the one it knows.
+A voter MUST reject a data write that names an older core configuration than the roster value it has accepted.
+
+A voter MUST NOT list its data keys while a data write that passed its fence is still in progress.
+
+A core change MUST list data keys only on old voters that have accepted the joint roster value.
+
+A core change MUST finish while a majority of the old core and a majority of the new core answer.
+
+The extension server MUST answer a data write that a voter rejected as stale with a retryable status.
 
 An operator MUST NOT grow the voter set by restarting members with a longer static peer list.
 

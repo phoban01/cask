@@ -40,11 +40,11 @@ func newTestMemberServer(t *testing.T, id uint64, bootstrap bool, seeds []string
 		Seeds:       seeds,
 		Local:       caspaxos.NewAcceptor(st),
 		HTTP:        transport.TCP{}.HTTPClient(),
-		Keys:        st.Keys,
+		Store:       st,
 		Interval:    20 * time.Millisecond,
 		JoinTimeout: joinTimeout,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	srv := &http.Server{Handler: m.handler()}
+	srv := &http.Server{Handler: hangable(t, m, m.handler())}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return m, srv

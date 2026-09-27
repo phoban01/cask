@@ -12,6 +12,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -69,7 +70,7 @@ func (o *handlerOpts) checkEpoch(key []byte, claimed string) error {
 
 // ConnectHandler returns the route prefix and http.Handler exposing acc's
 // Prepare/Accept over ConnectRPC. Register it on a mux: mux.Handle(path, h).
-func ConnectHandler(acc *caspaxos.Acceptor, opts ...HandlerOption) (string, http.Handler) {
+func ConnectHandler(acc caspaxos.AcceptorClient, opts ...HandlerOption) (string, http.Handler) {
 	h := &acceptorHandler{acc: acc}
 	for _, o := range opts {
 		o(&h.opts)
@@ -79,7 +80,7 @@ func ConnectHandler(acc *caspaxos.Acceptor, opts ...HandlerOption) (string, http
 
 type acceptorHandler struct {
 	caskv1connect.UnimplementedAcceptorServiceHandler
-	acc  *caspaxos.Acceptor
+	acc  caspaxos.AcceptorClient
 	opts handlerOpts
 }
 
@@ -87,9 +88,9 @@ func (h *acceptorHandler) Prepare(ctx context.Context, req *connect.Request[cask
 	if err := h.opts.checkEpoch(req.Msg.GetKey(), req.Header().Get(epochHeader)); err != nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
 	}
-	reply, err := h.acc.Prepare(ctx, req.Msg.GetKey(), ballotFromPB(req.Msg.GetBallot()))
+	reply, err := h.acc.Prepare(claimCtx(ctx, req.Header().Get(epochHeader)), req.Msg.GetKey(), ballotFromPB(req.Msg.GetBallot()))
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, acceptorErr(err)
 	}
 	return connect.NewResponse(&caskv1.PrepareResponse{
 		Promised: reply.Promised,
@@ -103,9 +104,9 @@ func (h *acceptorHandler) Accept(ctx context.Context, req *connect.Request[caskv
 	if err := h.opts.checkEpoch(req.Msg.GetKey(), req.Header().Get(epochHeader)); err != nil {
 		return nil, connect.NewError(connect.CodeFailedPrecondition, err)
 	}
-	reply, err := h.acc.Accept(ctx, req.Msg.GetKey(), ballotFromPB(req.Msg.GetBallot()), req.Msg.GetValue())
+	reply, err := h.acc.Accept(claimCtx(ctx, req.Header().Get(epochHeader)), req.Msg.GetKey(), ballotFromPB(req.Msg.GetBallot()), req.Msg.GetValue())
 	if err != nil {
-		return nil, connect.NewError(connect.CodeInternal, err)
+		return nil, acceptorErr(err)
 	}
 	return connect.NewResponse(&caskv1.AcceptResponse{
 		Accepted: reply.Accepted,
@@ -116,6 +117,30 @@ func (h *acceptorHandler) Accept(ctx context.Context, req *connect.Request[caskv
 // stampEpoch copies the claimed epoch (if the router stamped one on ctx)
 // onto the outgoing request, and rangeChangedErr maps the server's
 // FailedPrecondition back to the typed sentinel the proposer recognizes.
+// claimCtx puts the caller's claimed epoch on the server-side context, so
+// an acceptor that checks the claim itself (atomically with the operation)
+// can read it with ranges.ClaimedEpoch. A missing or malformed claim leaves
+// ctx unchanged.
+func claimCtx(ctx context.Context, claimed string) context.Context {
+	if claimed == "" {
+		return ctx
+	}
+	c, err := strconv.ParseUint(claimed, 10, 64)
+	if err != nil {
+		return ctx
+	}
+	return ranges.WithClaimedEpoch(ctx, c)
+}
+
+// acceptorErr maps an acceptor error to a Connect error. A fenced request
+// stays FailedPrecondition, so the client sees caspaxos.ErrRangeChanged.
+func acceptorErr(err error) error {
+	if errors.Is(err, caspaxos.ErrRangeChanged) {
+		return connect.NewError(connect.CodeFailedPrecondition, err)
+	}
+	return connect.NewError(connect.CodeInternal, err)
+}
+
 func stampEpoch[T any](ctx context.Context, req *connect.Request[T]) {
 	if e, ok := ranges.ClaimedEpoch(ctx); ok {
 		req.Header().Set(epochHeader, strconv.FormatUint(e, 10))
