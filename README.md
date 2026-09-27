@@ -202,7 +202,13 @@ wall-clock) so the whole cluster can later run under a deterministic simulator.
 ## Develop
 
 ```sh
-devbox run build    # go build ./...
-devbox run test     # go test ./...
+devbox run build    # go build ./... in both modules
+devbox run test     # go test -race ./... in both modules
 go test -race ./...
+go -C cmd/cask-apiserver test -race ./...
 ```
+
+`cmd/cask-apiserver` is its own Go module. It holds the Kubernetes
+libraries, so the core module does not depend on them. Its `go.mod` has a
+`replace` to the repo root, so it always builds against the core in this
+tree. A root `go test ./...` does not reach it. Use `go -C` to test it.

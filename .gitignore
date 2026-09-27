@@ -5,6 +5,7 @@
 /cask
 /cask-apiserver
 /cask-bench
+/cmd/cask-apiserver/cask-apiserver
 # Test binaries / profiles produced by `go test`
 *.test
 *.out

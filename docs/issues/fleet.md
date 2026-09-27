@@ -361,7 +361,7 @@ Spec: docs/spec/fleet.md#2-resources
 
 Task: add `cmd/cask-apiserver/go.mod` with a `replace` to the repo root and
 `k8s.io/apiserver`, `k8s.io/apimachinery`, `k8s.io/client-go` at the same
-Kubernetes minor. Add the module to `go.work`.
+Kubernetes minor. Build and test the module in `devbox run test` and CI.
 
 Done when: `cd cmd/cask-apiserver && go build ./...` passes.
 

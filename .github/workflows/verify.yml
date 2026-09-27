@@ -1,7 +1,8 @@
 name: verify
 
 # The verification gates docs/spec/fleet.md §10 requires:
-#   go     unit tests with the race detector
+#   go     unit tests with the race detector, in the root module and in
+#          the cmd/cask-apiserver module
 #   quint  typecheck, witness runs, simulation, negative controls, and
 #          bounded Apalache verification (needs x86_64 for Apalache's Z3)
 #   duvet  requirement coverage; the committed snapshot makes a drop fail
@@ -22,10 +23,17 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.sum
+            cmd/cask-apiserver/go.sum
+      # cmd/cask-apiserver is its own module. A root "./..." does not
+      # reach it, so build and test each module.
       - run: go build ./...
+      - run: go -C cmd/cask-apiserver build ./...
       #= docs/spec/fleet.md#10-verification
       ## CI MUST run the unit tests with the race detector.
       - run: go test -race ./...
+      - run: go -C cmd/cask-apiserver test -race ./...
 
   quint:
     runs-on: ubuntu-latest
