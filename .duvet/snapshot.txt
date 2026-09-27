@@ -91,9 +91,9 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST]: Every requirement in this document MUST have a Duvet citation or a Duvet exception with a reason.
     TEXT[!MUST]: Every MUST in sections 3, 4, and 5 MUST have a Duvet test citation.
     TEXT[!MUST]: Traces generated from the Quint model MUST be replayed against the extension server in a Go test.
-    TEXT[!MUST]: End-to-end tests MUST use sigs.k8s.io/e2e-framework against kind clusters.
-    TEXT[!MUST]: End-to-end tests MUST NOT use Ginkgo.
-    TEXT[!MUST]: End-to-end tests MUST NOT use envtest.
+    TEXT[!MUST,implementation,test]: End-to-end tests MUST use sigs.k8s.io/e2e-framework against kind clusters.
+    TEXT[!MUST,implementation]: End-to-end tests MUST NOT use Ginkgo.
+    TEXT[!MUST,implementation]: End-to-end tests MUST NOT use envtest.
     TEXT[!MUST,implementation]: CI MUST run the unit tests with the race detector.
     TEXT[!MUST]: CI MUST run the Quint checks, the Duvet report, the simulator gate, and the end-to-end suite.
     TEXT[!MUST,implementation]: A change that lowers Duvet coverage MUST fail CI.
