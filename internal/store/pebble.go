@@ -39,6 +39,11 @@ type Pebble struct {
 	inflight bool
 	pending  *commitGroup
 	flushes  uint64 // committed groups, for tests/telemetry (guarded by mu)
+
+	// beforeCommit, when set by a test, runs in the flusher before each
+	// group commit, outside mu, with the group's write count. Tests use it to make writers overlap
+	// deterministically instead of relying on disk speed.
+	beforeCommit func(writes int)
 }
 
 // commitGroup is one forming batch: joiners add their write and wait for the
@@ -167,6 +172,9 @@ func (p *Pebble) flusher() {
 		p.flushes++
 		p.mu.Unlock()
 
+		if p.beforeCommit != nil {
+			p.beforeCommit(int(g.batch.Count()))
+		}
 		g.err = g.batch.Commit(pebble.Sync)
 		close(g.done)
 	}
