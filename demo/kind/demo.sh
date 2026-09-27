@@ -49,7 +49,7 @@ for c in "${CLUSTERS[@]}"; do
   id=$((id + 1))
 done
 for c in "${CLUSTERS[@]}"; do
-  kubectl --context "kind-$c" -n cask-system rollout status deploy/cask-apiserver --timeout=120s
+  kubectl --context "kind-$c" -n cask-system rollout status statefulset/cask-apiserver --timeout=120s
   # The APIService goes Available once the kube-apiserver can proxy to it.
   kubectl --context "kind-$c" wait --for=condition=Available \
     apiservice/v1alpha1.fleet.cask.dev --timeout=120s
@@ -97,7 +97,7 @@ OTHER=east; [ "$HOLDER_CLUSTER" = east ] && OTHER=west
 echo "   holder is $HOLDER_CLUSTER; killing its apiserver (no more renewals)."
 echo "   NOTE: that apiserver is also one of the three consensus nodes — the"
 echo "   remaining two are a quorum, so the fleet keeps committing without it."
-kubectl --context "kind-$HOLDER_CLUSTER" -n cask-system scale deploy/cask-apiserver --replicas=0
+kubectl --context "kind-$HOLDER_CLUSTER" -n cask-system scale statefulset/cask-apiserver --replicas=0
 kubectl --context "kind-$OTHER" create -f - <<EOF
 apiVersion: fleet.cask.dev/v1alpha1
 kind: DeviceClaim
@@ -110,8 +110,8 @@ kubectl --context "kind-$OTHER" get deviceclaims takeover-job -o custom-columns=
 kubectl --context "kind-$OTHER" get devices gpu-7 -o jsonpath='   device lease: cluster={.status.lease.cluster} fence={.status.lease.fence}{"\n"}'
 echo "   waking the zombie: it rejoins consensus (durable acceptor state) and"
 echo "   its claim discovers it is Lost (a higher fence exists)"
-kubectl --context "kind-$HOLDER_CLUSTER" -n cask-system scale deploy/cask-apiserver --replicas=1
-kubectl --context "kind-$HOLDER_CLUSTER" -n cask-system rollout status deploy/cask-apiserver --timeout=120s
+kubectl --context "kind-$HOLDER_CLUSTER" -n cask-system scale statefulset/cask-apiserver --replicas=1
+kubectl --context "kind-$HOLDER_CLUSTER" -n cask-system rollout status statefulset/cask-apiserver --timeout=120s
 sleep 6
 kubectl --context "kind-$HOLDER_CLUSTER" get deviceclaims -o custom-columns=NAME:.metadata.name,CLUSTER:.status.cluster,PHASE:.status.phase,FENCE:.status.fence
 

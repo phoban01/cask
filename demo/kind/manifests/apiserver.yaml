@@ -16,13 +16,18 @@ kind: Namespace
 metadata:
   name: cask-system
 ---
+# A StatefulSet, not a Deployment: each voter keeps its acceptor state on
+# its own PersistentVolumeClaim. The claim outlives the pod, so the state
+# survives a restart, a reschedule, and a scale to zero (the zombie act
+# depends on this). kind's default local-path StorageClass provisions it.
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: cask-apiserver
   namespace: cask-system
   labels: {app: cask-apiserver}
 spec:
+  serviceName: cask-apiserver
   replicas: 1
   selector:
     matchLabels: {app: cask-apiserver}
@@ -54,19 +59,36 @@ spec:
             - containerPort: 9443
             - containerPort: 8001
           # Durable acceptor state: an embedded acceptor that restarted empty
-          # would forget its promises, which is unsafe for consensus. The
-          # hostPath survives pod restarts (the zombie act depends on this).
+          # would forget its promises, which is unsafe for consensus.
           volumeMounts:
             - name: data
               mountPath: /var/lib/cask
           readinessProbe:
             httpGet: {path: /healthz, port: 9443, scheme: HTTPS}
             initialDelaySeconds: 1
-      volumes:
-        - name: data
-          hostPath:
-            path: /var/lib/cask-demo
-            type: DirectoryOrCreate
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi
+---
+# A rolling upgrade must keep a majority of voters available. This budget
+# lets a voluntary disruption, such as a node drain, take at most one voter
+# in this cluster at a time. The demo runs one voter per cluster, so the
+# budget does not coordinate across clusters: upgrade one cluster at a
+# time and wait for its voter to be Ready before the next.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cask-apiserver
+  namespace: cask-system
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: {app: cask-apiserver}
 ---
 apiVersion: v1
 kind: Service
