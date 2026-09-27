@@ -101,6 +101,10 @@ func main() {
 	sessions := lease.NewSessions(prop, func() int64 { return time.Now().UnixNano() })
 	locks := lease.NewLocks(prop, sessions)
 	fs := &fleetStore{kv: kv, sessions: sessions, locks: locks}
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=exception
+	//= reason=no index sweep runs at startup yet; tracked in issue #36
+	//# The extension server MUST reconcile the index register against the object registers at startup.
 
 	srv := newAPIServer(*cluster, fs, log)
 	ctx := context.Background()

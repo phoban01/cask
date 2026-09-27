@@ -40,7 +40,8 @@ The project name is cask. Do not use any other name for it.
    x86_64; it does not run on aarch64.
 3. **Cite with Duvet.** Every requirement has a citation in code or a
    `type=exception` that names the issue tracking it. Tests cite with
-   `type=test`. In Go, put citations inside the function body, because
+   `type=test`. Quint citations use `type=implication`, because a model
+   shows that a rule holds, not that code does it. In Go, put citations inside the function body, because
    gofmt rewrites `//=` in doc comments and Duvet then cannot parse them.
    `devbox run duvet-ci` must pass; the committed snapshot makes a coverage
    drop a failure.

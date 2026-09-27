@@ -71,6 +71,7 @@ module fleet {
   // ---- §3 actions ---------------------------------------------------------
 
   //= docs/spec/fleet.md#3-storage-model
+  //= type=implication
   //# A mutation MUST write the object register before the index register.
   action writeObject(n) = all {
     pending == Set(),
@@ -85,6 +86,7 @@ module fleet {
   }
 
   //= docs/spec/fleet.md#3-storage-model
+  //= type=implication
   //# When the index write of a mutation did not complete, the next index
   //# write for that object MUST record the object register's current
   //# sequence.
@@ -106,6 +108,7 @@ module fleet {
   }
 
   //= docs/spec/fleet.md#3-storage-model
+  //= type=implication
   //# A delete MUST tombstone the object register before it removes the name
   //# from the index register.
   // The tombstone is the first write. writeIndex removes the name next,
@@ -133,6 +136,7 @@ module fleet {
   }
 
   //= docs/spec/fleet.md#3-storage-model
+  //= type=implication
   //# The extension server MUST reconcile the index register against the
   //# object registers at startup.
   action sweep = all {
@@ -150,6 +154,7 @@ module fleet {
   // ---- §4 actions ---------------------------------------------------------
 
   //= docs/spec/fleet.md#4-list-and-watch
+  //= type=implication
   //# A watch from a resourceVersion MUST deliver every index change after
   //# that version, in order, with no gaps.
   // The watch delivers the next index sequence, one at a time.
@@ -166,6 +171,7 @@ module fleet {
   // ---- §5 actions ---------------------------------------------------------
 
   //= docs/spec/fleet.md#5-claims-and-fencing
+  //= type=implication
   //# Every successful acquisition MUST mint a fence strictly greater than
   //# every fence previously minted for that object.
   action acquire(c, n) = all {
@@ -196,6 +202,7 @@ module fleet {
   }
 
   //= docs/spec/fleet.md#5-claims-and-fencing
+  //= type=implication
   //# When a claim's session lapses, the controller MUST set the claim to
   //# Lost.
   action observeLost(c, n) = all {
@@ -210,6 +217,7 @@ module fleet {
   }
 
   //= docs/spec/fleet.md#5-claims-and-fencing
+  //= type=implication
   //# Deleting a Bound claim MUST release the object's lock.
   action release(c, n) = all {
     phase.get((c, n)) == Bound,
@@ -225,6 +233,7 @@ module fleet {
 
   // A Bound claim (possibly a zombie) applies an effect carrying its fence.
   //= docs/spec/fleet.md#5-claims-and-fencing
+  //= type=implication
   //# A receiver MUST reject an effect whose fence is lower than the highest
   //# fence it has accepted for that object.
   action applyEffect(c, n) = all {
@@ -256,9 +265,11 @@ module fleet {
   // ---- invariants -------------------------------------------------------------
 
   //= docs/spec/fleet.md#3-storage-model
+  //= type=implication
   //# The index register MUST NOT record a sequence higher than the object
   //# register holds.
   //= docs/spec/fleet.md#3-storage-model
+  //= type=implication
   //# A delete MUST tombstone the object register before it removes the name
   //# from the index register.
   // A tombstoned object may still be in the index. The reverse, a name
@@ -274,6 +285,7 @@ module fleet {
     pending.contains(n) or dirty.contains(n) or idxEntries.get(n) == objSeq.get(n))
 
   //= docs/spec/fleet.md#5-claims-and-fencing
+  //= type=implication
   //# At most one claim MUST be Bound to an object at the object's current
   //# fence.
   val SingleHolder = NAMES.forall(n =>
@@ -284,6 +296,7 @@ module fleet {
   val NoStaleEffect = regressions == 0
 
   //= docs/spec/fleet.md#4-list-and-watch
+  //= type=implication
   //# A watch from a resourceVersion MUST deliver every index change after
   //# that version, in order, with no gaps.
   // The watch starts at 0, so delivered is exactly 1..watchCursor.
