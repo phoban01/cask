@@ -629,11 +629,15 @@ labels: membership
 Spec: docs/spec/fleet.md#6-membership
 > The voter set MUST change only by joint-consensus reconfiguration of the roster.
 
-Task: add `POST /admin/promote/{id}` and `/admin/demote/{id}` on the
-apiserver that change the member's role and call `Roster.Reconfigure`
-with the new voter set. Refuse an even voter count and a count above five.
+Task: add `POST /admin/promote` and `POST /admin/demote` on the apiserver.
+Each takes a list of member ids in the request body. Apply the whole list
+in one `Roster.Reconfigure` call with the new voter set. Refuse the request
+if the resulting voter count is even or above five. One call must be able
+to grow the voters from one to three, because a single-id promote would
+pass through two voters, which the spec forbids.
 
-Done when: a test promotes a participant and observes the core grow by joint consensus.
+Done when: a test promotes two participants in one call and observes the
+core grow from one to three voters by joint consensus.
 
 ## membership: refuse static growth from a founded data dir
 
@@ -1000,3 +1004,21 @@ keep retrying; document that on `Propose`.
 Files: `internal/caspaxos/proposer.go`, `internal/caspaxos/errors.go`
 
 Done when: `go test -race ./internal/caspaxos/` and `devbox run sim-gate` pass.
+
+## e2e: use cluster names that do not collide with the demo
+
+labels: e2e
+
+Spec: docs/spec/fleet.md#10-verification
+> End-to-end tests MUST use sigs.k8s.io/e2e-framework against kind clusters.
+
+`test/e2e/main_test.go` creates kind clusters named east, west, and north.
+These are the demo's cluster names. If the demo clusters exist, the suite
+reuses them and deletes them when it finishes.
+
+Task: prefix the e2e cluster names, for example `e2e-east`, and read an
+optional prefix from `CASK_E2E_PREFIX` so parallel runs do not collide.
+
+Files: `test/e2e/main_test.go`
+
+Done when: `go vet -tags e2e ./test/e2e/` passes and `kind get clusters` shows only `e2e-*` names during a run.

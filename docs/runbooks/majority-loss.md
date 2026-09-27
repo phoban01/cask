@@ -85,7 +85,7 @@ Stop every survivor, voters and participants. No node may propose while
 you rewrite the roster. On Kubernetes, scale each survivor to zero:
 
 ```sh
-kubectl --context <cluster> -n cask-system scale deploy/cask-apiserver --replicas=0
+kubectl --context <cluster> -n cask-system scale statefulset/cask-apiserver --replicas=0
 ```
 
 ### 4. Pick the founder
