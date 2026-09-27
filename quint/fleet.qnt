@@ -4,7 +4,8 @@
 // The model has two clusters and two objects. It is small on purpose so
 // `quint verify` finishes quickly. What it checks:
 //
-//   IndexNeverAhead   the index never records a sequence the object lacks
+//   IndexNeverAhead   the index never records a sequence the object lacks,
+//                     and never drops a name whose object is not tombstoned
 //   IndexRepaired     an interrupted index write is caught up by the next
 //                     write or by the sweep, never left behind silently
 //   SingleHolder      at most one claim is Bound at the current fence
@@ -13,20 +14,23 @@
 //                     already accepted (a zombie cannot overwrite a successor)
 //
 // Negative controls (`stepIndexFirst`, `stepIncrementIndex`,
-// `stepNoFenceCheck`) each drop one rule and MUST violate the matching
-// invariant. scripts/quint-check.sh runs both directions.
+// `stepNoFenceCheck`, `stepDeleteIndexFirst`) each drop one rule and MUST
+// violate the matching invariant. scripts/quint-check.sh runs both directions.
 module fleet {
   pure val NAMES = Set("a", "b")
   pure val CLUSTERS = Set("east", "west")
   pure val MAX_SEQ = 3
   pure val MAX_FENCE = 3
+  // Tombstone marker. In objSeq it marks a deleted object register. In
+  // idxEntries it marks a name removed from the index register.
+  pure val TOMB = -1
 
   type Phase = Pending | Bound | Lost
   type Holder = Nobody | Held(str)
 
   // ---- storage model (spec §3) ------------------------------------------
-  var objSeq: str -> int          // object register sequence; 0 = absent
-  var idxEntries: str -> int      // index register: name -> recorded sequence
+  var objSeq: str -> int          // object register sequence; 0 = absent, TOMB = deleted
+  var idxEntries: str -> int      // index register: name -> recorded sequence; TOMB = removed
   var idxSeq: int                 // index register sequence (the list RV)
   var pending: Set[str]           // object written, index write outstanding
   var dirty: Set[str]             // index write was lost to a crash
@@ -59,6 +63,7 @@ module fleet {
   //# A mutation MUST write the object register before the index register.
   action writeObject(n) = all {
     pending == Set(),
+    objSeq.get(n) != TOMB,
     objSeq.get(n) < MAX_SEQ,
     objSeq' = objSeq.set(n, objSeq.get(n) + 1),
     pending' = Set(n),
@@ -71,6 +76,8 @@ module fleet {
   //# When the index write of a mutation did not complete, the next index
   //# write for that object MUST record the object register's current
   //# sequence.
+  // For a tombstoned object the current sequence is TOMB, so this same
+  // write is the follow-up index removal of a delete.
   action writeIndex = {
     nondet n = oneOf(NAMES)
     all {
@@ -83,6 +90,21 @@ module fleet {
       holder' = holder, fence' = fence, phase' = phase,
       claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
     }
+  }
+
+  //= docs/spec/fleet.md#3-storage-model
+  //# A delete MUST tombstone the object register before it removes the name
+  //# from the index register.
+  // The tombstone is the first write. writeIndex removes the name next,
+  // and crash may fall between the two.
+  action deleteObject(n) = all {
+    pending == Set(),
+    objSeq.get(n) > 0,
+    objSeq' = objSeq.set(n, TOMB),
+    pending' = Set(n),
+    idxEntries' = idxEntries, idxSeq' = idxSeq, dirty' = dirty,
+    holder' = holder, fence' = fence, phase' = phase,
+    claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
   }
 
   // The process dies between the two writes.
@@ -182,6 +204,7 @@ module fleet {
 
   // ---- the good step --------------------------------------------------------
   action anyWriteObject = { nondet n = oneOf(NAMES) writeObject(n) }
+  action anyDeleteObject = { nondet n = oneOf(NAMES) deleteObject(n) }
   action anyAcquire = { nondet c = oneOf(CLUSTERS) nondet n = oneOf(NAMES) acquire(c, n) }
   action anyExpire = { nondet n = oneOf(NAMES) expire(n) }
   action anyObserveLost = { nondet c = oneOf(CLUSTERS) nondet n = oneOf(NAMES) observeLost(c, n) }
@@ -189,7 +212,7 @@ module fleet {
   action anyApplyEffect = { nondet c = oneOf(CLUSTERS) nondet n = oneOf(NAMES) applyEffect(c, n) }
 
   action step = any {
-    anyWriteObject, writeIndex, crash, sweep,
+    anyWriteObject, anyDeleteObject, writeIndex, crash, sweep,
     anyAcquire, anyExpire, anyObserveLost, anyRelease, anyApplyEffect,
   }
 
@@ -198,7 +221,15 @@ module fleet {
   //= docs/spec/fleet.md#3-storage-model
   //# The index register MUST NOT record a sequence higher than the object
   //# register holds.
-  val IndexNeverAhead = NAMES.forall(n => idxEntries.get(n) <= objSeq.get(n))
+  //= docs/spec/fleet.md#3-storage-model
+  //# A delete MUST tombstone the object register before it removes the name
+  //# from the index register.
+  // A tombstoned object may still be in the index. The reverse, a name
+  // removed from the index while its object register is live, is a
+  // violation.
+  val IndexNeverAhead = NAMES.forall(n =>
+    if (objSeq.get(n) == TOMB) true
+    else idxEntries.get(n) != TOMB and idxEntries.get(n) <= objSeq.get(n))
 
   // An object may lag in the index only while its write is in flight or
   // while a crash left it dirty. Once neither holds, index == object.
@@ -264,6 +295,21 @@ module fleet {
     anyWriteObject, writeIndex, anyAcquire, anyExpire, anyApplyEffectNoCheck,
   }
 
+  // Bug 4: a delete removes the name from the index before it tombstones
+  // the object register.
+  action removeIndexFirst(n) = all {
+    pending == Set(),
+    objSeq.get(n) > 0,
+    idxEntries' = idxEntries.set(n, TOMB),
+    idxSeq' = idxSeq + 1,
+    pending' = Set(n),
+    objSeq' = objSeq, dirty' = dirty,
+    holder' = holder, fence' = fence, phase' = phase,
+    claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
+  }
+  action anyRemoveIndexFirst = { nondet n = oneOf(NAMES) removeIndexFirst(n) }
+  action stepDeleteIndexFirst = any { anyWriteObject, writeIndex, anyRemoveIndexFirst, crash, sweep }
+
   // ---- witness runs (`quint test`) ---------------------------------------------
 
   // A zombie's late effect is rejected once a successor has applied.
@@ -293,4 +339,23 @@ module fleet {
       .then(writeObject("a")).then(crash)
       .then(writeObject("a")).then(writeIndex)
       .expect(idxEntries.get("a") == 2 and dirty == Set())
+
+  // A crash between the tombstone and the index removal leaves a
+  // tombstoned name in the index. That is allowed. The sweep removes it.
+  run deleteTombstonesFirstTest =
+    init
+      .then(writeObject("a")).then(writeIndex)
+      .then(deleteObject("a"))
+      .expect(objSeq.get("a") == TOMB and idxEntries.get("a") == 1 and IndexNeverAhead)
+      .then(crash)
+      .expect(dirty == Set("a") and IndexNeverAhead)
+      .then(sweep)
+      .expect(idxEntries.get("a") == TOMB and dirty == Set() and IndexNeverAhead)
+
+  // Without a crash, the next index write is the removal.
+  run deleteThenRemoveTest =
+    init
+      .then(writeObject("a")).then(writeIndex)
+      .then(deleteObject("a")).then(writeIndex)
+      .expect(idxEntries.get("a") == TOMB and idxSeq == 2 and pending == Set())
 }
