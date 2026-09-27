@@ -36,19 +36,21 @@ Read this before you start.
 
 ## Current state
 
-The procedure below is the target. Three parts of it do not exist yet:
+The procedure below is the target. Two parts of it do not exist yet:
 
 - `cask-apiserver --force-new-fleet` is tracked in
   [#74](https://github.com/phoban01/cask/issues/74).
-- The apiserver joins the fleet through a static `--cask-peers` list. The
-  dynamic roster path (`--bootstrap`, `--seed`, and `GET /roster`) is
-  tracked in [#43](https://github.com/phoban01/cask/issues/43). The
-  `cmd/cask` Nebula path already has it.
 - The promote endpoint is tracked in
   [#45](https://github.com/phoban01/cask/issues/45).
 
-Until these land, the apiserver has no supported majority-loss recovery.
-Do not shorten `--cask-peers` by hand to force a quorum.
+The apiserver joins the fleet through the dynamic roster path:
+`--bootstrap`, `--seed`, and `GET /roster` on the `--listen-consensus`
+address. `cmd/cask` uses the same code. `--cask-peers` is deprecated and
+kept for tests.
+
+Until the two missing parts land, the apiserver has no supported
+majority-loss recovery. Do not shorten `--cask-peers` by hand to force a
+quorum.
 
 ## Terms
 

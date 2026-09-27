@@ -12,6 +12,7 @@ import (
 
 	"github.com/phoban01/cask/internal/agent"
 	"github.com/phoban01/cask/internal/caspaxos"
+	"github.com/phoban01/cask/internal/cluster"
 	"github.com/phoban01/cask/internal/hlc"
 	"github.com/phoban01/cask/internal/lease"
 	"github.com/phoban01/cask/internal/mvcc"
@@ -111,8 +112,8 @@ func newTwoNodeFixture(t *testing.T) *twoNodeFixture {
 	}
 
 	// Node B forwards to A's address.
-	snapB := newRosterSnap(other)
-	snapB.store(f.val)
+	snapB := cluster.NewSnap(other)
+	snapB.Store(f.val)
 	book := fixedBook{hint: strings.TrimPrefix(f.aSrv.URL, "http://")}
 	fwdB := newForwarder(other, f.aSrv.Client(), book, snapB, log)
 	f.b = mk(other, fwdB)

@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/phoban01/cask/internal/caspaxos"
+	"github.com/phoban01/cask/internal/cluster"
 	"github.com/phoban01/cask/internal/discovery"
 	"github.com/phoban01/cask/internal/hlc"
 	"github.com/phoban01/cask/internal/lease"
@@ -105,13 +106,13 @@ func main() {
 	// from the roster snapshot installed once the overlay is up. Until then
 	// (and forever in static --peers mode, which has no descriptor epochs)
 	// the check is disabled.
-	var epochSnap atomic.Pointer[rosterSnap]
+	var epochSnap atomic.Pointer[cluster.Snap]
 	epochOf := transport.EpochOf(func(key []byte) (uint64, bool) {
 		s := epochSnap.Load()
 		if s == nil {
 			return 0, false
 		}
-		v, ok := s.load()
+		v, ok := s.Load()
 		if !ok {
 			return 0, false
 		}
@@ -200,8 +201,8 @@ func main() {
 		}
 		// Joining peers read the current roster acceptor core from here, and
 		// register through the driver here (the driver is the sole register writer).
-		mux.HandleFunc("/roster", snap.serve)
-		mux.HandleFunc("/roster/join", snap.serveJoin)
+		mux.HandleFunc("/roster", snap.Serve)
+		mux.HandleFunc("/roster/join", snap.ServeJoin)
 		// Consensus rides the overlay; the client API rides the host listener
 		// below so operators can still curl localhost.
 		go func() {

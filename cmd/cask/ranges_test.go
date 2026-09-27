@@ -12,6 +12,7 @@ import (
 
 	"github.com/phoban01/cask/internal/agent"
 	"github.com/phoban01/cask/internal/caspaxos"
+	"github.com/phoban01/cask/internal/cluster"
 	"github.com/phoban01/cask/internal/hlc"
 	"github.com/phoban01/cask/internal/mvcc"
 	"github.com/phoban01/cask/internal/ranges"
@@ -56,17 +57,17 @@ func TestDriveRangesSeedsAndReconfigures(t *testing.T) {
 		}
 		return v
 	}
-	snap := newRosterSnap(0)
+	snap := cluster.NewSnap(0)
 	var busy atomic.Bool
 
 	// Tick 1: genesis — the descriptor is seeded from placement.
 	cur := members(0, 1, 2)
-	snap.store(cur)
+	snap.Store(cur)
 	descs := driveRanges(ctx, log, dstore, orch, cur, replicationFactor, &busy)
 	if len(descs) != 1 || len(descs[0].Replicas) != 3 || descs[0].Epoch != 1 {
 		t.Fatalf("seeded descriptors = %+v, want one 3-replica epoch-1 descriptor", descs)
 	}
-	snap.storeDescs(descs)
+	snap.StoreDescs(descs)
 	fpBefore := descFingerprint(snap, cur)
 
 	// Commit data through descriptor-driven routing.
@@ -82,7 +83,7 @@ func TestDriveRangesSeedsAndReconfigures(t *testing.T) {
 	// which driveRanges runs single-flight in the background.
 	cur = members(0, 1, 3)
 	cur.Epoch = 2
-	snap.store(cur)
+	snap.Store(cur)
 	driveRanges(ctx, log, dstore, orch, cur, replicationFactor, &busy)
 
 	deadline := time.Now().Add(10 * time.Second)
@@ -108,7 +109,7 @@ func TestDriveRangesSeedsAndReconfigures(t *testing.T) {
 	// Ticks after: the snapshot's descriptors refresh, the fingerprint moves,
 	// and a router built from the new map serves ALL the data.
 	descs = driveRanges(ctx, log, dstore, orch, cur, replicationFactor, &busy)
-	snap.storeDescs(descs)
+	snap.StoreDescs(descs)
 	if fp := descFingerprint(snap, cur); fp == fpBefore {
 		t.Fatal("descriptor fingerprint did not change across the reconfiguration")
 	}
