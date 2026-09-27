@@ -22,10 +22,13 @@ func TestSeedMembersHybrid(t *testing.T) {
 		cert.Version2, cert.Curve_CURVE25519,
 		time.Now().Add(-time.Hour), time.Now().Add(time.Hour), nil, nil, nil,
 	)
-	// Local node 10.0.0.5 in zone us-west.
+	// Local node 10.0.0.5 in zone us-west. The node cert reuses the CA's
+	// validity window. A second call to time.Now() can cross a whole-second
+	// boundary, and then the node cert expires after the CA and Sign panics
+	// (#113).
 	_, _, key, certPEM := cert_test.NewTestCert(
 		cert.Version2, cert.Curve_CURVE25519, ca, caKey, "self",
-		time.Now().Add(-time.Hour), time.Now().Add(time.Hour),
+		ca.NotBefore(), ca.NotAfter(),
 		[]netip.Prefix{netip.MustParsePrefix("10.0.0.5/24")}, nil, []string{"zone:us-west"},
 	)
 	caPEM, _ := ca.MarshalPEM()
