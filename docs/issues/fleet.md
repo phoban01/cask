@@ -1082,3 +1082,111 @@ Task: add an e2e feature on the three-cluster kind setup. It deletes two voters 
 Files: `test/e2e/majority_loss_test.go`
 
 Done when: `go test ./test/e2e -run TestMajorityLossRecovery` passes on kind.
+
+## caspaxos: close the remaining unknown-outcome paths after #72
+
+labels: quint
+
+Spec: docs/spec/fleet.md#3-storage-model
+> A retried write MUST be a compare-and-set, never a blind reapplication of a change.
+
+Follow-up to #72. `Propose` now returns `ErrUnknownOutcome` after an
+accept that some acceptor may hold. Some paths still hide an unknown
+outcome or retry without a check. Each item below is one small PR.
+
+1. `ErrRangeChanged` during the accept phase. `accept` returns it at
+   once, even when another acceptor already accepted. `agent.Router`
+   then retries the same change once on the new replica set. Task:
+   return `ErrUnknownOutcome` (wrapping `ErrRangeChanged`) when the
+   write may be held, and do not retry the change in the router.
+   Files: `internal/caspaxos/proposer.go`, `internal/agent/router.go`.
+2. Context cancel or deadline during the accept phase. `Propose`
+   returns `ctx.Err()`, which is also an unknown outcome. Task: decide
+   whether to wrap it as `ErrUnknownOutcome` and document it on
+   `Propose`. Files: `internal/caspaxos/proposer.go`.
+3. `OwnedProposer.Write` (the 1-RTT path). Check what it returns after
+   a minority accept, and whether `owner.Manager.FastPropose` falls back
+   to a full round that applies the change again. Files:
+   `internal/caspaxos/owned.go`, `internal/owner/manager.go`.
+4. mvcc exactly-once depends on the OpID staying in the chain. If
+   `Compact` drops the version between two retries, the retry appends a
+   second copy. Task: keep the newest versions of in-flight ops, or
+   bound the retry window. Files: `internal/mvcc/mvcc.go`.
+5. The API server returns a plain error when mvcc exhausts its
+   unknown-outcome retries. Task: map `caspaxos.ErrUnknownOutcome` to a
+   Kubernetes timeout status, so a client re-reads. Files:
+   `cmd/cask-apiserver/store.go`.
+6. Every bug becomes a check. Task: add a `minority_accept` fault in
+   `testutil/sim/faults/` that makes an accept reach one acceptor, and
+   assert that each op lands once. Add a `type=test` Duvet citation.
+
+Done when: each item has a test, `devbox run test`, `devbox run
+sim-gate`, and `devbox run duvet-ci` pass.
+
+
+## lease: make Sessions.Revoke a compare-and-set on owner and expiry
+
+labels: quint
+
+Spec: docs/spec/fleet.md#3-storage-model
+> A retried write MUST be a compare-and-set, never a blind reapplication of a change.
+
+`Sessions.Revoke` in `internal/lease/session.go` clears the record with a
+change that ignores the current value. Its comment says clearing twice
+changes nothing. That is false when a Grant lands between two attempts:
+Revoke's first attempt reaches a minority, another round commits it, a new
+owner Grants the same id, and Revoke's retry clears the live session.
+
+Task: make Revoke read the record first and clear it only if owner and
+expiry still match what it read. Fix the comment. Add a test that grants
+between two Revoke attempts and expects the new session to survive.
+
+Files: `internal/lease/session.go`, `internal/lease/*_test.go`
+
+Done when: `go test -race -count=20 ./internal/lease/` passes.
+
+## caspaxos: correct the Propose contract for the all-rejected retry
+
+labels: quint
+
+Spec: docs/spec/fleet.md#3-storage-model
+> A write that returned a conflict MAY have been committed.
+
+`accept` in `internal/caspaxos/proposer.go` returns as soon as a quorum
+is impossible, with stragglers still undecided. So "every acceptor
+rejected" is only reachable with one acceptor. For three or more, every
+contended write whose accept fails returns ErrUnknownOutcome. That is
+safe, but the doc comment on `Propose` promises a retry that never
+happens.
+
+Task: rewrite the comment to state the real rule. Either drop the
+all-rejected branch or keep it with a note that it applies to a single
+acceptor. Add a test with three acceptors where two reject and one is
+slow, and assert ErrUnknownOutcome.
+
+Files: `internal/caspaxos/proposer.go`, `internal/caspaxos/unknown_test.go`
+
+Done when: `go test -race ./internal/caspaxos/` passes.
+
+## quint: add caspaxos.qnt to the Quint gate
+
+labels: quint
+
+Spec: docs/spec/fleet.md#10-verification
+> The Quint model MUST include a negative control for each invariant that fails when the rule is omitted.
+
+`quint/caspaxos.qnt` (from #9) is not in the Quint gate yet. Another PR was
+changing the gate script, so #9 left it alone.
+
+Task: in `scripts/quint-check.sh`, add a `quint/caspaxos.qnt` block like the
+`retry.qnt` block. Run typecheck, `quint test`, and `quint run` with
+`--invariants Consistency OneValuePerBallot VotesSafe`. Add
+`must_fail --spec quint/caspaxos.qnt stepNoPromise Consistency`. Under
+`--verify`, run `quint verify` on the same invariants with `--max-steps=6`.
+At 10 steps Apalache ran for more than 40 minutes.
+
+Files: `scripts/quint-check.sh`
+
+Done when: `devbox run quint` prints `quint: ok` and reports the
+`stepNoPromise` control as violated.
+
