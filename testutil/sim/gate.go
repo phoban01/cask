@@ -233,7 +233,9 @@ func profileName(p *Profile) string {
 // retryBudgetExhausted reports whether err is a retry budget running dry —
 // tolerable under an active fault, a liveness violation (L3) without one.
 func retryBudgetExhausted(err error) bool {
-	return errors.Is(err, caspaxos.ErrPreempted) || errors.Is(err, lease.ErrContended)
+	return errors.Is(err, caspaxos.ErrPreempted) ||
+		errors.Is(err, caspaxos.ErrUnknownOutcome) ||
+		errors.Is(err, lease.ErrContended)
 }
 
 // expectedUnderFault reports whether err is a normal protocol outcome under an
@@ -243,6 +245,7 @@ func expectedUnderFault(err error) bool {
 	switch {
 	case errors.Is(err, caspaxos.ErrNoQuorum),
 		errors.Is(err, caspaxos.ErrPreempted),
+		errors.Is(err, caspaxos.ErrUnknownOutcome),
 		errors.Is(err, caspaxos.ErrLostOwnership),
 		errors.Is(err, caspaxos.ErrConflict),
 		errors.Is(err, ErrUnreachable),

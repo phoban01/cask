@@ -2,6 +2,7 @@ package caspaxos_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -65,7 +66,17 @@ func TestDuelingProposersConvergeWithBackoff(t *testing.T) {
 		go func(w int, p *caspaxos.Proposer) {
 			defer wg.Done()
 			for i := range ops {
-				if _, err := p.Propose(ctx, []byte("hot"), appendChange(fmt.Sprintf("w%d-%d", w, i))); err != nil {
+				// Retry an unknown outcome with a change that skips an
+				// append that already landed: the caller side of the
+				// ErrUnknownOutcome contract.
+				change := appendOnce(fmt.Sprintf("w%d-%d", w, i))
+				var err error
+				for range 4 {
+					if _, err = p.Propose(ctx, []byte("hot"), change); !errors.Is(err, caspaxos.ErrUnknownOutcome) {
+						break
+					}
+				}
+				if err != nil {
 					errs[w] = err
 					return
 				}
@@ -79,26 +90,38 @@ func TestDuelingProposersConvergeWithBackoff(t *testing.T) {
 			t.Fatalf("writer %d: %v (livelock: backoff failed to converge)", w, err)
 		}
 	}
-	// Every op landed at least once. The count is a lower bound, not exact:
-	// a proposer whose accept reached only a minority can still have its
-	// value chosen by the next prepare, and its retry then applies the
-	// append again. CASPaxos gives exactly-once only for idempotent or
-	// compare-and-set changes. Tracked in issue #69.
+	// Every op landed exactly once. Propose no longer reapplies a change
+	// after a minority accept (issue #72), and the caller retries with a
+	// change that detects its own earlier write.
 	reader := caspaxos.NewProposer(99, acc)
 	got, err := reader.Propose(ctx, []byte("hot"), caspaxos.Identity)
 	if err != nil {
 		t.Fatal(err)
 	}
-	seen := map[string]bool{}
+	seen := map[string]int{}
 	for _, op := range splitCommas(got) {
-		seen[string(op)] = true
+		seen[string(op)]++
 	}
 	for w := range writers {
 		for i := range ops {
-			if id := fmt.Sprintf("w%d-%d", w, i); !seen[id] {
-				t.Fatalf("op %s lost; committed %q", id, got)
+			if id := fmt.Sprintf("w%d-%d", w, i); seen[id] != 1 {
+				t.Fatalf("op %s landed %d times, want 1; committed %q", id, seen[id], got)
 			}
 		}
+	}
+}
+
+// appendOnce is appendChange that returns the current value unchanged when
+// marker is already in the list. A retry after ErrUnknownOutcome then cannot
+// append the same marker twice.
+func appendOnce(marker string) caspaxos.ChangeFunc {
+	return func(cur []byte) ([]byte, error) {
+		for _, op := range splitCommas(cur) {
+			if string(op) == marker {
+				return cur, nil
+			}
+		}
+		return appendChange(marker)(cur)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync/atomic"
 
@@ -218,7 +219,7 @@ func (kv *KV) CAS(ctx context.Context, key, expected, value []byte) (Version, er
 // located by OpID rather than by position, since other operations may commit
 // before or after it in the chain.
 func (kv *KV) commit(ctx context.Context, key []byte, op OpID, change caspaxos.ChangeFunc) (Version, error) {
-	raw, err := kv.prop.Propose(ctx, key, change)
+	raw, err := kv.propose(ctx, key, change)
 	if err != nil {
 		return Version{}, err
 	}
@@ -233,6 +234,29 @@ func (kv *KV) commit(ctx context.Context, key []byte, op OpID, change caspaxos.C
 	}
 	head, _ := h.head()
 	return head, nil
+}
+
+// unknownOutcomeRetries bounds how many times propose retries a change after
+// caspaxos.ErrUnknownOutcome.
+const unknownOutcomeRetries = 8
+
+// propose runs change and retries it when the outcome is unknown. The retry
+// is safe only because every change mvcc proposes detects its own earlier
+// write: appendOp skips an OpID already in the chain, and Compact never
+// moves the watermark back. The retry re-reads the register in its prepare
+// phase and applies change to that value.
+func (kv *KV) propose(ctx context.Context, key []byte, change caspaxos.ChangeFunc) ([]byte, error) {
+	//= docs/spec/fleet.md#3-storage-model
+	//# A retried write MUST be a compare-and-set, never a blind reapplication of a change.
+	var err error
+	for range unknownOutcomeRetries {
+		var raw []byte
+		raw, err = kv.prop.Propose(ctx, key, change)
+		if !errors.Is(err, caspaxos.ErrUnknownOutcome) {
+			return raw, err
+		}
+	}
+	return nil, err
 }
 
 // Get performs a linearizable read of the current live value. found is false
@@ -324,7 +348,7 @@ func (kv *KV) History(ctx context.Context, key []byte) (Chain, error) {
 // keepFromSeq at or below the oldest active watcher's cursor so no in-progress
 // watch is starved. Compaction is idempotent.
 func (kv *KV) Compact(ctx context.Context, key []byte, keepFromSeq uint64) error {
-	_, err := kv.prop.Propose(ctx, key, func(current []byte) ([]byte, error) {
+	_, err := kv.propose(ctx, key, func(current []byte) ([]byte, error) {
 		h, err := decode(current)
 		if err != nil {
 			return nil, err

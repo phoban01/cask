@@ -100,9 +100,10 @@ func (s *fleetStore) update(ctx context.Context, resource, name string, raw []by
 	//= docs/spec/fleet.md#3-storage-model
 	//# An update MUST use a compare-and-set on the resourceVersion the client supplied.
 	v, err := s.kv.CAS(ctx, objectKey(resource, name), cur, raw)
-	// A proposer retries after an accept that reached only a minority. If a
-	// later round chose this write, the retry finds the new value, the
-	// compare fails, and the caller sees a conflict for a write that landed.
+	// An accept that reached only a minority gives an unknown outcome.
+	// mvcc retries it and finds its own OpID if the write landed, but the
+	// retry budget can run out. The caller then sees an error for a write
+	// that may have landed.
 	//= docs/spec/fleet.md#3-storage-model
 	//# A write that returned a conflict MAY have been committed.
 	if errors.Is(err, caspaxos.ErrConflict) {

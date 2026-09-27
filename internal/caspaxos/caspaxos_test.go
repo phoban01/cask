@@ -119,3 +119,91 @@ func TestChangeConflictAbortsCleanly(t *testing.T) {
 		t.Fatalf("read = %q, want nil after aborted change", got)
 	}
 }
+
+// acceptDown passes prepares through but fails every accept while *down is
+// set. It models an accept phase that reaches only some acceptors.
+type acceptDown struct{ inner caspaxos.AcceptorClient }
+
+func (a acceptDown) Prepare(ctx context.Context, key []byte, b caspaxos.Ballot) (caspaxos.PrepareReply, error) {
+	return a.inner.Prepare(ctx, key, b)
+}
+
+func (acceptDown) Accept(context.Context, []byte, caspaxos.Ballot, []byte) (caspaxos.AcceptReply, error) {
+	return caspaxos.AcceptReply{}, errDown
+}
+
+// minorityAcceptCluster returns three acceptors. Acceptor 0 accepts. The
+// other two fail every accept.
+func minorityAcceptCluster() []caspaxos.AcceptorClient {
+	base := newCluster(3)
+	return []caspaxos.AcceptorClient{base[0], acceptDown{base[1]}, acceptDown{base[2]}}
+}
+
+// An accept that reaches only a minority must not start a new round that
+// applies the change again. Propose returns ErrUnknownOutcome, and the
+// change runs exactly once.
+func TestMinorityAcceptReturnsUnknownOutcome(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A retried write MUST be a compare-and-set, never a blind reapplication of a change.
+	ctx := context.Background()
+	p := caspaxos.NewProposer(1, minorityAcceptCluster())
+
+	calls := 0
+	_, err := p.Propose(ctx, []byte("k"), func(cur []byte) ([]byte, error) {
+		calls++
+		return append(append([]byte{}, cur...), 'x'), nil
+	})
+	if !errors.Is(err, caspaxos.ErrUnknownOutcome) {
+		t.Fatalf("err = %v, want ErrUnknownOutcome", err)
+	}
+	if calls != 1 {
+		t.Fatalf("change ran %d times, want 1", calls)
+	}
+}
+
+// A round that writes back the current value changes nothing if chosen. So
+// a minority accept of a read keeps retrying and never returns
+// ErrUnknownOutcome.
+func TestMinorityAcceptOfReadRetries(t *testing.T) {
+	ctx := context.Background()
+	p := caspaxos.NewProposer(1, minorityAcceptCluster())
+
+	_, err := p.Propose(ctx, []byte("k"), caspaxos.Identity)
+	if !errors.Is(err, caspaxos.ErrPreempted) {
+		t.Fatalf("err = %v, want ErrPreempted after retries", err)
+	}
+}
+
+// acceptNack passes prepares through and explicitly rejects every accept.
+type acceptNack struct{ inner caspaxos.AcceptorClient }
+
+func (a acceptNack) Prepare(ctx context.Context, key []byte, b caspaxos.Ballot) (caspaxos.PrepareReply, error) {
+	return a.inner.Prepare(ctx, key, b)
+}
+
+func (acceptNack) Accept(context.Context, []byte, caspaxos.Ballot, []byte) (caspaxos.AcceptReply, error) {
+	return caspaxos.AcceptReply{Accepted: false}, nil
+}
+
+// When every acceptor rejects the accept, no value from the round can be
+// chosen. Propose retries and does not return ErrUnknownOutcome. The
+// cluster has one acceptor: with more, the accept phase stops at the first
+// lost majority, and an acceptor still in flight may hold the value.
+func TestAllRejectRetries(t *testing.T) {
+	ctx := context.Background()
+	acc := []caspaxos.AcceptorClient{acceptNack{newCluster(1)[0]}}
+	p := caspaxos.NewProposer(1, acc)
+
+	calls := 0
+	_, err := p.Propose(ctx, []byte("k"), func([]byte) ([]byte, error) {
+		calls++
+		return []byte("v"), nil
+	})
+	if !errors.Is(err, caspaxos.ErrPreempted) {
+		t.Fatalf("err = %v, want ErrPreempted after retries", err)
+	}
+	if calls < 2 {
+		t.Fatalf("change ran %d times, want a retry", calls)
+	}
+}
