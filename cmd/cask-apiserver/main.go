@@ -106,6 +106,12 @@ func main() {
 	ctx := context.Background()
 	go srv.runReconciler(ctx, 2*time.Second)
 
+	// The server has no import path and no readiness gate yet, so nothing
+	// checks imported owners before it serves.
+	//= docs/spec/fleet.md#7-migration
+	//= type=exception
+	//= reason=tracked in issue #40
+	//# The APIService MUST NOT become available while any imported object that other objects reference by ownerReference is missing.
 	log.Info("cask-apiserver serving", "group", apiGroup+"/"+apiVersion, "cluster", *cluster, "listen", *listen, "tls", *selfTLS)
 	server := &http.Server{Addr: *listen, Handler: srv.routes()}
 	var err error

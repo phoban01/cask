@@ -149,6 +149,8 @@ Writers MUST be frozen from the start of the export until the APIService is avai
 
 The APIService MUST NOT become available before the import has completed.
 
+The APIService MUST NOT become available while any imported object that other objects reference by ownerReference is missing.
+
 The initial index sequence for each resource type MUST be greater than the source etcd revision at export time.
 
 A continuous export of all fleet objects MUST run from the first day of phase one.
