@@ -7,6 +7,9 @@
 //
 //	devbox run e2e
 //
+// Setup creates the clusters, builds the demo image once, and deploys one
+// cask-apiserver per cluster from demo/kind/manifests. See fleet_test.go.
+//
 // The build tag keeps `go test ./...` from starting kind.
 //
 // Cluster names carry a prefix so the suite does not touch the demo
@@ -85,6 +88,7 @@ func TestMain(m *testing.M) {
 		setup = append(setup, envfuncs.CreateCluster(kind.NewProvider(), name))
 		finish = append(finish, envfuncs.DestroyCluster(name))
 	}
+	setup = append(setup, buildImage(), deployFleet())
 	testenv.Setup(setup...)
 	testenv.Finish(finish...)
 
