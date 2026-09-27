@@ -125,6 +125,12 @@ Only voters MUST hold register replicas.
 
 The voter set MUST change only by joint-consensus reconfiguration of the roster.
 
+A core change MUST carry every data register forward to the new core before it releases the old core.
+
+During a core change, a data write MUST reach a quorum of both the old and the new core.
+
+A voter MUST reject a data write that names an older core configuration than the one it knows.
+
 An operator MUST NOT grow the voter set by restarting members with a longer static peer list.
 
 The voter count MUST be odd.

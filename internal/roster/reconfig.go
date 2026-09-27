@@ -162,6 +162,28 @@ func (r *Roster) publishJoint(ctx context.Context, old, target []uint64, expectG
 	return v, err
 }
 
+// CarryFunc moves every register that the core hosts, other than the roster
+// key, from the old core to the new core. The roster calls it with the joint
+// value (v.Joint is set) after it moves its own key and before it releases
+// the old core. It must be idempotent: a resumed reconfiguration calls it
+// again for the same joint value.
+type CarryFunc func(ctx context.Context, v Value) error
+
+// SetCarry installs the hook that moves the other registers the core hosts.
+// A deployment that keeps data registers on the core (the extension server)
+// must set it. Without it, a core change moves only the roster key.
+func (r *Roster) SetCarry(f CarryFunc) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.carry = f
+}
+
+func (r *Roster) carryFunc() CarryFunc {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.carry
+}
+
 // finishJoint performs the carry-forward (Step 2) and release (Step 3) for an
 // in-flight joint value. Both steps are idempotent: a concurrent driver that
 // already released leaves Joint nil, in which case release is a no-op.
@@ -176,6 +198,14 @@ func (r *Roster) finishJoint(ctx context.Context, v Value) (Value, error) {
 	if _, err := r.read(ctx, [][]uint64{old, newCore}); err != nil {
 		return Value{}, err
 	}
+	// Then every other register the core hosts moves the same way.
+	if carry := r.carryFunc(); carry != nil {
+		//= docs/spec/fleet.md#6-membership
+		//# A core change MUST carry every data register forward to the new core before it releases the old core.
+		if err := carry(ctx, v); err != nil {
+			return Value{}, err
+		}
+	}
 
 	// Step 3 — release: choose new-only Core under a joint quorum.
 	out, err := commitWith(ctx, r.mk([][]uint64{old, newCore}), r.key, func(raw Value, present bool) (Value, error) {
@@ -184,6 +214,12 @@ func (r *Roster) finishJoint(ctx context.Context, v Value) (Value, error) {
 		}
 		if raw.Joint == nil {
 			return raw, nil // already released by a concurrent driver
+		}
+		if jointDiffers(raw.Joint, v.Joint) {
+			// A Remove narrowed the new core after the carry-forward ran.
+			// The carry reached a quorum of the old target, which need not
+			// be a quorum of the narrowed one. Carry again first.
+			return Value{}, errConfigShifted
 		}
 		raw.Core = normalizeIDs(raw.Joint.New)
 		raw.Joint = nil

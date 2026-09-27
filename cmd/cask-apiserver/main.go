@@ -128,14 +128,18 @@ func main() {
 			local = caspaxos.NewAcceptor(st)
 			var h http.Handler
 			if dynamic {
-				mem = newMembership(membershipConfig{
+				cfg := membershipConfig{
 					ID:        *self,
 					Advertise: *adv,
 					Bootstrap: *boot,
 					Seeds:     parseSeeds(*seed),
 					Local:     local,
 					HTTP:      transport.TCP{}.HTTPClient(),
-				}, log)
+				}
+				if l, ok := st.(store.Lister); ok {
+					cfg.Keys = l.Keys
+				}
+				mem = newMembership(cfg, log)
 				h = mem.handler()
 			} else {
 				mux := http.NewServeMux()

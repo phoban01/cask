@@ -1235,3 +1235,26 @@ Files: `cmd/cask-apiserver/membership.go`, `internal/roster/reconfig.go`
 
 Done when: a test writes keys on a one-voter core, grows it to three, stops
 the founder, and reads every key back.
+
+## roster: carry range descriptors when cmd/cask changes the core
+
+labels: membership
+
+Spec: docs/spec/fleet.md#6-membership
+> A core change MUST carry every data register forward to the new core before it releases the old core.
+
+In `cmd/cask`, every range descriptor register (`\x00rd/<id>`) uses the
+roster core as its acceptor set (`descriptorStore` in
+`cmd/cask/cluster.go`). The roster core change carries only the roster
+key, and descriptor writes use the plain core in the joint phase. A core
+change can lose a committed descriptor. The apiserver fix for #110 adds
+`Roster.SetCarry`; `cmd/cask` does not set it yet.
+
+Task: set a carry hook in `cmd/cask` that carries every descriptor key to
+the new core, and make `descriptorStore` propose to both cores while the
+roster is joint.
+
+Files: `cmd/cask/cluster.go`
+
+Done when: a test writes a descriptor on a one-voter core, grows it to
+three, stops the founder, and reads the descriptor back.

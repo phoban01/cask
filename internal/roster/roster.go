@@ -98,6 +98,10 @@ type Roster struct {
 	mu       sync.Mutex
 	believed []uint64
 	gen      uint64
+
+	// carry moves registers other than the roster key onto the new core.
+	// It is nil when the core hosts only the roster key.
+	carry CarryFunc
 }
 
 // New returns a Roster for node self whose proposers are built by mk. The

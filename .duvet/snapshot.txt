@@ -55,6 +55,9 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST]: A participant MUST be able to read, watch, and propose without holding register replicas.
     TEXT[!MUST]: Only voters MUST hold register replicas.
     TEXT[!MUST]: The voter set MUST change only by joint-consensus reconfiguration of the roster.
+    TEXT[!MUST,implementation,implication,test]: A core change MUST carry every data register forward to the new core before it releases the old core.
+    TEXT[!MUST,implementation,implication,test]: During a core change, a data write MUST reach a quorum of both the old and the new core.
+    TEXT[!MUST,implementation,implication,test]: A voter MUST reject a data write that names an older core configuration than the one it knows.
     TEXT[!MUST]: An operator MUST NOT grow the voter set by restarting members with a longer static peer list.
     TEXT[!MUST]: The voter count MUST be odd.
     TEXT[!MUST]: The voter count MUST NOT exceed five.
