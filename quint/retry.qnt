@@ -40,6 +40,7 @@ module retry {
   }
 
   //= docs/spec/fleet.md#3-storage-model
+  //= type=implication
   //# A write that returned a conflict MAY have been committed.
   // The accept reaches a minority. The client sees a conflict, and the
   // value may or may not be chosen later.
@@ -60,6 +61,7 @@ module retry {
   }
 
   //= docs/spec/fleet.md#3-storage-model
+  //= type=implication
   //# The extension server MUST re-read an object before it retries a write
   //# that returned a conflict.
   // After a re-read the client sees its own write if it landed, and stops.
@@ -71,6 +73,7 @@ module retry {
   }
 
   //= docs/spec/fleet.md#3-storage-model
+  //= type=implication
   //# A retried write MUST be a compare-and-set, never a blind reapplication
   //# of a change.
   action step = any { otherWrite, casCommits, casUnknown, casConflict, reread }

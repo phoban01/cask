@@ -13,39 +13,39 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST]: Each resource type MUST have one index register that maps every object name to that object's latest sequence.
     TEXT[!MUST]: An object's resourceVersion MUST be the sequence of its object register.
     TEXT[!MUST]: A list's resourceVersion MUST be the sequence of the index register.
-    TEXT[!MUST,implementation]: A mutation MUST write the object register before the index register.
-    TEXT[!MUST,implementation]: The index register MUST NOT record a sequence higher than the object register holds.
-    TEXT[!MUST,implementation]: When the index write of a mutation did not complete, the next index write for that object MUST record the object register's current sequence.
-    TEXT[!MUST,implementation]: The extension server MUST reconcile the index register against the object registers at startup.
+    TEXT[!MUST,implementation,implication]: A mutation MUST write the object register before the index register.
+    TEXT[!MUST,implication,exception]: The index register MUST NOT record a sequence higher than the object register holds.
+    TEXT[!MUST,implication,exception]: When the index write of a mutation did not complete, the next index write for that object MUST record the object register's current sequence.
+    TEXT[!MUST,implication,exception]: The extension server MUST reconcile the index register against the object registers at startup.
     TEXT[!MUST]: The extension server MUST reconcile the index register against the object registers at a fixed interval.
     TEXT[!MUST,implementation,test]: A create MUST use a compare-and-set that requires the object register to be absent.
     TEXT[!MUST,implementation,test]: An update MUST use a compare-and-set on the resourceVersion the client supplied.
     TEXT[!MUST,implementation,test]: An update whose compare-and-set fails MUST return a conflict.
-    TEXT[!MAY,implementation]: A write that returned a conflict MAY have been committed.
-    TEXT[!MUST,implementation]: The extension server MUST re-read an object before it retries a write that returned a conflict.
-    TEXT[!MUST,implementation,test]: A retried write MUST be a compare-and-set, never a blind reapplication of a change.
-    TEXT[!MUST,implementation]: A delete MUST tombstone the object register before it removes the name from the index register.
+    TEXT[!MAY,implementation,implication]: A write that returned a conflict MAY have been committed.
+    TEXT[!MUST,implementation,implication]: The extension server MUST re-read an object before it retries a write that returned a conflict.
+    TEXT[!MUST,implementation,implication,test]: A retried write MUST be a compare-and-set, never a blind reapplication of a change.
+    TEXT[!MUST,implementation,implication]: A delete MUST tombstone the object register before it removes the name from the index register.
     TEXT[!MUST]: An object value MUST NOT exceed 1 MiB.
 
   SECTION: [4. List and watch](#4-list-and-watch)
     TEXT[!MUST,exception]: A list MUST return every object that the index register names at the index sequence the list reports.
-    TEXT[!MUST,implementation,exception]: A watch from a resourceVersion MUST deliver every index change after that version, in order, with no gaps.
+    TEXT[!MUST,implication,exception]: A watch from a resourceVersion MUST deliver every index change after that version, in order, with no gaps.
     TEXT[!MUST,exception]: A watch whose start version is compacted MUST end with 410 Gone.
     TEXT[!MUST,exception]: Each watch event MUST carry the object at the sequence the index recorded.
     TEXT[!SHOULD,exception]: Watch events SHOULD be pushed from the index register's change feed rather than polled.
 
   SECTION: [5. Claims and fencing](#5-claims-and-fencing)
     TEXT[!MUST,implementation]: Binding a claim to an object MUST be the acquisition of that object's cask lock under the claim's session.
-    TEXT[!MUST,implementation,test]: At most one claim MUST be Bound to an object at the object's current fence.
-    TEXT[!MUST,implementation,test]: Every successful acquisition MUST mint a fence strictly greater than every fence previously minted for that object.
+    TEXT[!MUST,implementation,implication,test]: At most one claim MUST be Bound to an object at the object's current fence.
+    TEXT[!MUST,implementation,implication,test]: Every successful acquisition MUST mint a fence strictly greater than every fence previously minted for that object.
     TEXT[!MUST,implementation]: A Bound claim MUST carry its fence in its status.
     TEXT[!MUST]: A controller MUST include the claim's fence in every effect it applies for that object.
-    TEXT[!MUST,implementation]: A receiver MUST reject an effect whose fence is lower than the highest fence it has accepted for that object.
+    TEXT[!MUST,implementation,implication]: A receiver MUST reject an effect whose fence is lower than the highest fence it has accepted for that object.
     TEXT[!MUST,implementation,test]: A status write MUST NOT lower an advertised fence.
     TEXT[!MUST,implementation]: A controller MUST reconcile only claims whose status names its own cluster.
-    TEXT[!MUST,implementation,test]: When a claim's session lapses, the controller MUST set the claim to Lost.
+    TEXT[!MUST,implementation,implication,test]: When a claim's session lapses, the controller MUST set the claim to Lost.
     TEXT[!MUST]: A controller MUST NOT apply an effect for a claim it knows to be Lost.
-    TEXT[!MUST,implementation,test]: Deleting a Bound claim MUST release the object's lock.
+    TEXT[!MUST,implementation,implication,test]: Deleting a Bound claim MUST release the object's lock.
     TEXT[!MAY]: Fencing rejects effects that are older than the newest holder's fence; it MAY accept an expired holder's effect while no successor exists.
 
   SECTION: [6. Membership](#6-membership)

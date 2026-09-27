@@ -83,11 +83,15 @@ func (l *Locks) Acquire(ctx context.Context, name, sessionID string) (token uint
 			if err != nil {
 				return 0, err
 			}
+			//= docs/spec/fleet.md#5-claims-and-fencing
+			//# At most one claim MUST be Bound to an object at the object's current fence.
 			if live {
 				return 0, ErrHeld
 			}
 			// Holder's session has lapsed; fall through to take over.
 		}
+		//= docs/spec/fleet.md#5-claims-and-fencing
+		//# Every successful acquisition MUST mint a fence strictly greater than every fence previously minted for that object.
 		observed := cur.Fence
 		newFence := observed + 1
 		_, err = l.prop.Propose(ctx, key, func(current []byte) ([]byte, error) {

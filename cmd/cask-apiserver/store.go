@@ -164,6 +164,14 @@ func (s *fleetStore) indexNames(ctx context.Context, resource string) ([]string,
 }
 
 func (s *fleetStore) indexMutate(ctx context.Context, resource string, mutate func([]string) []string) error {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=exception
+	//= reason=the index holds names only, no sequences; tracked in issue #32
+	//# The index register MUST NOT record a sequence higher than the object register holds.
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=exception
+	//= reason=the index holds names only, no sequences; tracked in issue #32
+	//# When the index write of a mutation did not complete, the next index write for that object MUST record the object register's current sequence.
 	for range 8 { // CAS retry against concurrent index writers
 		cur, found, err := s.kv.Get(ctx, indexKey(resource))
 		if err != nil {
