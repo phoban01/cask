@@ -39,7 +39,28 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
-      - run: npm install -g @informalsystems/quint
+      - run: npm install -g @informalsystems/quint@0.32.0
+      # The Quint CLI looks up its Rust evaluator through the GitHub API
+      # without a token, so shared runners hit the rate limit. Cache
+      # ~/.quint, and on a miss fetch the evaluator with the job token.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.quint
+          key: quint-${{ runner.os }}-0.32.0
+      - name: Fetch the Quint evaluator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(grep -o "QUINT_EVALUATOR_VERSION = '[^']*'" \
+            "$(npm root -g)/@informalsystems/quint/dist/src/rust/binaryManager.js" | cut -d"'" -f2)
+          d="$HOME/.quint/rust-evaluator-$v"
+          if [ ! -x "$d/quint_evaluator" ]; then
+            mkdir -p "$d"
+            gh release download "evaluator/$v" -R informalsystems/quint \
+              -p quint_evaluator-x86_64-unknown-linux-gnu.tar.gz -O - | tar -xz -C "$d"
+            chmod +x "$d/quint_evaluator"
+          fi
+          "$d/quint_evaluator" --version || true
       - run: scripts/quint-check.sh --verify
 
   duvet:
