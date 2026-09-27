@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/phoban01/cask/internal/caspaxos"
 	"github.com/phoban01/cask/internal/store"
@@ -70,6 +71,22 @@ func TestPebbleGroupCommitCoalesces(t *testing.T) {
 	ctx := context.Background()
 
 	const writers = 64
+	// Hold the first commit until every other writer has joined the next
+	// group. Without this the test depends on disk speed: on a fast disk
+	// each sync ends before the next write arrives, and nothing coalesces.
+	var first sync.Once
+	p.SetBeforeCommit(func(writes int) {
+		first.Do(func() {
+			deadline := time.Now().Add(10 * time.Second)
+			for writes+p.PendingWrites() < writers {
+				if time.Now().After(deadline) {
+					t.Errorf("only %d of %d writers enqueued", writes+p.PendingWrites(), writers)
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+		})
+	})
 	var wg sync.WaitGroup
 	for i := range writers {
 		wg.Add(1)
@@ -88,8 +105,9 @@ func TestPebbleGroupCommitCoalesces(t *testing.T) {
 	}
 	wg.Wait()
 
-	if f := p.Flushes(); f == 0 || f >= writers {
-		t.Fatalf("flushes = %d for %d concurrent writers; want coalescing (0 < flushes < writers)", f, writers)
+	// The first group commits; everything else joined one second group.
+	if f := p.Flushes(); f < 1 || f > 2 {
+		t.Fatalf("flushes = %d for %d concurrent writers; want 1 or 2", f, writers)
 	}
 	if err := p.Close(); err != nil {
 		t.Fatal(err)
