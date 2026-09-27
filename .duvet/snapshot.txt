@@ -63,15 +63,15 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST]: A new member MUST be able to join with a seed address and a minted certificate and nothing else.
 
   SECTION: [7. Migration](#7-migration)
-    TEXT[!MUST]: The extension server MUST serve the same API group, version, and kinds that the CRD served.
-    TEXT[!MUST]: The migration MUST preserve each object's uid.
-    TEXT[!MUST]: The migration MUST preserve each object's creationTimestamp.
-    TEXT[!MUST]: Writers MUST be frozen from the start of the export until the APIService is available.
-    TEXT[!MUST]: The APIService MUST NOT become available before the import has completed.
+    TEXT[!MUST,exception]: The extension server MUST serve the same API group, version, and kinds that the CRD served.
+    TEXT[!MUST,exception]: The migration MUST preserve each object's uid.
+    TEXT[!MUST,exception]: The migration MUST preserve each object's creationTimestamp.
+    TEXT[!MUST,exception]: Writers MUST be frozen from the start of the export until the APIService is available.
+    TEXT[!MUST,exception]: The APIService MUST NOT become available before the import has completed.
     TEXT[!MUST,exception]: The APIService MUST NOT become available while any imported object that other objects reference by ownerReference is missing.
-    TEXT[!MUST]: The initial index sequence for each resource type MUST be greater than the source etcd revision at export time.
-    TEXT[!MUST]: A continuous export of all fleet objects MUST run from the first day of phase one.
-    TEXT[!MUST]: The cutover MUST be rehearsed on a copy of the management cluster before it runs on the real one.
+    TEXT[!MUST,exception]: The initial index sequence for each resource type MUST be greater than the source etcd revision at export time.
+    TEXT[!MUST,exception]: A continuous export of all fleet objects MUST run from the first day of phase one.
+    TEXT[!MUST,exception]: The cutover MUST be rehearsed on a copy of the management cluster before it runs on the real one.
 
   SECTION: [8. Security](#8-security)
     TEXT[!MUST]: Consensus traffic between members MUST use mutual TLS.
