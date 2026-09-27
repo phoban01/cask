@@ -7,7 +7,7 @@ When every row is filled, `tla/` is retired (#17).
 
 | TLA+ spec | Quint module | Invariants | TLA+ distinct states (TLC) | Quint result | Notes |
 |-----------|--------------|------------|----------------------------|--------------|-------|
-| `CasPaxosMvcc.tla` | `caspaxos.qnt` | `Consistency`, `OneValuePerBallot`, `VotesSafe`, `OneVotePerBallot`, `TypeOK`, `Inv` | 7790 (115141 generated, depth 10) | TLC on the compiled module: 7790 distinct (128725 generated, depth 10), no violation. `quint run`: no violation. Control `stepNoPromise` violates `Consistency` and `VotesSafe`. | Same constants as the `.cfg`. More generated states because `step` picks a value for `IncreaseMaxBal` too. `SafeAt` ranges over `BALLOTS` with `c < b` so Apalache accepts it. |
+| `CasPaxosMvcc.tla` | `caspaxos.qnt` | `Consistency`, `OneValuePerBallot`, `VotesSafe`, `OneVotePerBallot`, `TypeOK`, `Inv` | 7790 (115141 generated, depth 10) | TLC on the compiled module: 7790 distinct (128725 generated, depth 10), no violation. `quint run`: no violation. Control `stepNoPromise` violates `Consistency` and `VotesSafe`. `quint verify --max-steps=6` (Apalache 0.56.1): no violation in about 2 minutes; the control violates `Consistency`. | Same constants as the `.cfg`. More generated states because `step` picks a value for `IncreaseMaxBal` too. `SafeAt` ranges over `BALLOTS` with `c < b` so Apalache accepts it. |
 | `OwnedRegister.tla` | not ported | | | | #10. `OwnedRegisterBug.cfg` is the negative control. |
 | `Lease.tla` | not ported | | | | #11 |
 | `OwnerReads.tla` | not ported | | | | #12. `OwnerReadsBug.cfg` is the negative control. |
@@ -39,3 +39,7 @@ java -cp tla2tools.jar tlc2.TLC -workers 1 -config caspaxos.cfg caspaxos.tla
 
 Use `-workers 1`. With more workers TLC reports a different search depth.
 The distinct state count does not change.
+
+For `quint verify`, keep the bound small. The shortest trace that breaks
+`Consistency` under `stepNoPromise` has 6 steps. At 10 steps the good step
+ran for more than 40 minutes without an answer.
