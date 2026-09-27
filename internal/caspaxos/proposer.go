@@ -168,18 +168,26 @@ func (p *Proposer) quorumStillPossible(ok, undecided []bool) bool {
 // in-flight round) before returning ErrConflict, so the read it observed is
 // linearizable.
 //
-// Retry contract: Propose starts a new round with a fresh ballot when the
-// prepare phase fails, or when every acceptor rejected the accept. change
-// then runs again on the fresh current value. That is safe, because no
-// acceptor holds a value from the failed round. An accept phase that fails
-// while some acceptor may hold the value is different. That acceptor
-// accepted, or its reply was lost, or it was still in flight. A later round
-// can adopt that value and choose it. If the value differs from current,
-// Propose returns ErrUnknownOutcome and does not start a new round. The
-// caller must re-read and retry with a compare-and-set, or with a change
-// that detects its own earlier write (mvcc does this with OpIDs). A round
-// that writes back the current value (a read, or a change that returned
-// ErrConflict) is still retried, because that value changes nothing.
+// Retry contract: Propose starts a new round with a fresh ballot in these
+// cases, and change then runs again on the fresh current value:
+//
+//   - The prepare phase fails. No acceptor saw a value from the round.
+//   - The round writes back the current value (a read, or a change that
+//     returned ErrConflict). That value changes nothing if chosen.
+//   - Every acceptor explicitly rejected the accept. No acceptor holds the
+//     value. In practice only a single-acceptor configuration reaches
+//     this case, because the accept phase returns as soon as a quorum is
+//     lost. With two or more acceptors, some acceptor is then still in
+//     flight and may hold the value.
+//
+// In every other failed accept phase, some acceptor may hold the new value.
+// It accepted, or its reply was lost, or it was still in flight. A later
+// round can adopt that value and choose it. So Propose returns
+// ErrUnknownOutcome and does not start a new round. For three or more
+// acceptors, this is the result of every contended write whose accept
+// fails. The caller must re-read and retry with a compare-and-set, or with
+// a change that detects its own earlier write (mvcc does this with OpIDs;
+// ProposeResolving does it by comparing values).
 func (p *Proposer) Propose(ctx context.Context, key []byte, change ChangeFunc) ([]byte, error) {
 	var floor Ballot
 	for round := 0; round < p.maxRounds; round++ {
@@ -215,6 +223,8 @@ func (p *Proposer) Propose(ctx context.Context, key []byte, change ChangeFunc) (
 		}
 		//= docs/spec/fleet.md#3-storage-model
 		//# A retried write MUST be a compare-and-set, never a blind reapplication of a change.
+		//= docs/spec/fleet.md#3-storage-model
+		//# A write that returned a conflict MAY have been committed.
 		if !ok && mayHold && !bytes.Equal(writeVal, current) {
 			// Some acceptor may hold the new value, and a later round
 			// can choose it. Another round here applies change again.
@@ -226,6 +236,9 @@ func (p *Proposer) Propose(ctx context.Context, key []byte, change ChangeFunc) (
 			return nil, ErrUnknownOutcome
 		}
 		if !ok {
+			// No acceptor holds a new value: either every acceptor
+			// rejected (only reachable with a single acceptor) or the
+			// round wrote back current. A new round is safe.
 			floor = floor.Max(conflict)
 			if err := p.pause(ctx, round); err != nil {
 				return nil, err
