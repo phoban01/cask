@@ -116,6 +116,28 @@ func main() {
 	//= type=exception
 	//= reason=tracked in issue #40
 	//# The APIService MUST NOT become available while any imported object that other objects reference by ownerReference is missing.
+	//= docs/spec/fleet.md#7-migration
+	//= type=exception
+	//= reason=no import marker and no readiness gate; tracked in issue #40
+	//# The APIService MUST NOT become available before the import has completed.
+	// There is no cask-migrate command yet. The export, the import, the
+	// cutover runbook, and the rehearsal do not exist.
+	//= docs/spec/fleet.md#7-migration
+	//= type=exception
+	//= reason=no cutover runbook yet; tracked in issue #52
+	//# Writers MUST be frozen from the start of the export until the APIService is available.
+	//= docs/spec/fleet.md#7-migration
+	//= type=exception
+	//= reason=no import command to seed the index; tracked in issue #51
+	//# The initial index sequence for each resource type MUST be greater than the source etcd revision at export time.
+	//= docs/spec/fleet.md#7-migration
+	//= type=exception
+	//= reason=no export command and no CronJob; tracked in issues #49 and #53
+	//# A continuous export of all fleet objects MUST run from the first day of phase one.
+	//= docs/spec/fleet.md#7-migration
+	//= type=exception
+	//= reason=no rehearsal test on kind; tracked in issue #54
+	//# The cutover MUST be rehearsed on a copy of the management cluster before it runs on the real one.
 	log.Info("cask-apiserver serving", "group", apiGroup+"/"+apiVersion, "cluster", *cluster, "listen", *listen, "tls", *selfTLS)
 	server := &http.Server{Addr: *listen, Handler: srv.routes()}
 	var err error

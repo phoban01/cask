@@ -85,6 +85,12 @@ func (s *apiServer) serveGroup(w http.ResponseWriter, _ *http.Request) {
 }
 
 func groupDoc() map[string]any {
+	// The group is fleet.cask.dev/v1alpha1. No scheme is registered, and no
+	// check ties the group, version, and kinds to a source CRD.
+	//= docs/spec/fleet.md#7-migration
+	//= type=exception
+	//= reason=no scheme to match against the CRD; tracked in issue #26
+	//# The extension server MUST serve the same API group, version, and kinds that the CRD served.
 	gv := map[string]any{"groupVersion": apiGroup + "/" + apiVersion, "version": apiVersion}
 	return map[string]any{
 		"kind": "APIGroup", "apiVersion": "v1", "name": apiGroup,
@@ -336,6 +342,16 @@ func (s *apiServer) serveWatch(w http.ResponseWriter, r *http.Request, resource 
 // normalize validates a submitted object, stamps type/cluster fields, and
 // returns its storage form (resourceVersion stripped — RV lives in MVCC).
 func (s *apiServer) normalize(resource string, body []byte, isCreate bool) (string, []byte, error) {
+	// ObjectMeta has no uid and no creationTimestamp, so this decode drops
+	// both. The import command will write them directly.
+	//= docs/spec/fleet.md#7-migration
+	//= type=exception
+	//= reason=ObjectMeta drops the uid; tracked in issue #50
+	//# The migration MUST preserve each object's uid.
+	//= docs/spec/fleet.md#7-migration
+	//= type=exception
+	//= reason=ObjectMeta drops the creationTimestamp; tracked in issue #50
+	//# The migration MUST preserve each object's creationTimestamp.
 	switch resource {
 	case "devices":
 		var d Device
