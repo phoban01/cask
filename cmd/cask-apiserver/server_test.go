@@ -153,6 +153,45 @@ func TestDeviceCRUDAcrossClusters(t *testing.T) {
 	}
 }
 
+// A create needs an absent register, an update needs the client's
+// resourceVersion, and a stale resourceVersion is a 409.
+func TestUpdateWithStaleResourceVersionConflicts(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A create MUST use a compare-and-set that requires the object register to be absent.
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# An update MUST use a compare-and-set on the resourceVersion the client supplied.
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# An update whose compare-and-set fails MUST return a conflict.
+	f := newFleetFixture(t)
+
+	create := `{"metadata":{"name":"cam-stale"},"spec":{"zone":"eu-west"}}`
+	if code, raw := doReq(t, f.a.ts, http.MethodPost, groupPrefix+"/devices", create); code != http.StatusCreated {
+		t.Fatalf("create = %d %s", code, raw)
+	}
+	if code, _ := doReq(t, f.a.ts, http.MethodPost, groupPrefix+"/devices", create); code != http.StatusConflict {
+		t.Fatalf("create over an existing object = %d, want 409", code)
+	}
+
+	stale := getDevice(t, f.a, "cam-stale").ResourceVersion
+	body := func(rv, zone string) string {
+		return fmt.Sprintf(`{"metadata":{"name":"cam-stale","resourceVersion":"%s"},"spec":{"zone":"%s"}}`, rv, zone)
+	}
+	if code, raw := doReq(t, f.a.ts, http.MethodPut, groupPrefix+"/devices/cam-stale", body(stale, "eu-central")); code != http.StatusOK {
+		t.Fatalf("update at the current resourceVersion = %d %s", code, raw)
+	}
+
+	// The first update moved the object on, so stale no longer matches.
+	if code, _ := doReq(t, f.a.ts, http.MethodPut, groupPrefix+"/devices/cam-stale", body(stale, "us-east")); code != http.StatusConflict {
+		t.Fatalf("update at a stale resourceVersion = %d, want 409", code)
+	}
+	if got := getDevice(t, f.a, "cam-stale"); got.Spec.Zone != "eu-central" || got.ResourceVersion == stale {
+		t.Fatalf("after the conflict: zone=%q rv=%s, want eu-central at a new rv", got.Spec.Zone, got.ResourceVersion)
+	}
+}
+
 // THE demo property: two clusters race to claim one device; exactly one
 // binds, the other stays Pending. Releasing the winner's claim hands the
 // device over with a STRICTLY HIGHER fencing token.
