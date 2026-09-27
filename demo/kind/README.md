@@ -67,10 +67,13 @@ The script walks four acts:
   the kind nodes share the `kind` docker network — so consensus rides the
   node IPs, which the script wires into `__CASK_PEERS__` and each pod learns
   its own via the downward API.
-- **Durability.** Each embedded acceptor persists to Pebble on a hostPath
-  (`--data-dir`). This is not optional hygiene: an acceptor that restarts
-  empty forgets its promises, which is unsafe for consensus — and the zombie
-  act restarts one on purpose.
+- **Durability.** Each embedded acceptor persists to Pebble on the
+  StatefulSet's PersistentVolumeClaim (`--data-dir`). This is not optional
+  hygiene: an acceptor that restarts empty forgets its promises, which is
+  unsafe for consensus — and the zombie act restarts one on purpose.
+- **Disruption budget.** A PodDisruptionBudget with `maxUnavailable: 1`
+  lets a drain take at most one voter per cluster. It does not coordinate
+  across clusters. Upgrade one cluster at a time.
 - The APIService is registered with `insecureSkipTLSVerify: true` against
   the apiserver's per-boot self-signed cert (`--self-signed-tls`); real
   deployments want real serving certs and cask's §5.4 wire hardening.
