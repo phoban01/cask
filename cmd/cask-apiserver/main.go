@@ -29,6 +29,27 @@ func main() {
 		selfTLS = flag.Bool("self-signed-tls", false, "serve HTTPS with an in-memory self-signed cert (required for k8s API aggregation; pair with insecureSkipTLSVerify on the APIService)")
 	)
 	flag.Parse()
+	// The runbook in docs/runbooks/majority-loss.md needs --force-new-fleet,
+	// which does not exist yet. Until it lands, the apiserver has no
+	// supported majority-loss recovery.
+	//= docs/spec/fleet.md#9-operations
+	//= type=exception
+	//= reason=the runbook calls --force-new-fleet, which is missing; tracked in issue #74
+	//# A majority-loss recovery procedure MUST be documented.
+	//= docs/spec/fleet.md#9-operations
+	//= type=exception
+	//= reason=no rehearsal on kind yet; tracked in issue #97
+	//# The majority-loss recovery procedure MUST be rehearsed before phase two.
+	// The demo PodDisruptionBudget covers one cluster only. Nothing stops
+	// two clusters from upgrading at the same time.
+	//= docs/spec/fleet.md#9-operations
+	//= type=exception
+	//= reason=no fleet-wide upgrade order; tracked in issue #96
+	//# A rolling upgrade MUST keep a majority of voters available at all times.
+	//= docs/spec/fleet.md#9-operations
+	//= type=exception
+	//= reason=no metrics endpoint and no quorum signal; tracked in issue #62
+	//# Cask MUST expose a health signal for quorum state.
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if *cluster == "" {
 		log.Error("--cluster is required (e.g. --cluster eu-west-a)")
@@ -61,6 +82,11 @@ func main() {
 			}
 			var st caspaxos.Storage = store.NewMem()
 			if *dataDir != "" {
+				// The acceptor keeps its promises and accepted values in
+				// Pebble under --data-dir. The demo mounts a
+				// PersistentVolumeClaim there.
+				//= docs/spec/fleet.md#9-operations
+				//# Every voter MUST persist its acceptor state to a durable volume.
 				p, err := store.NewPebble(*dataDir, store.WithGroupCommit())
 				if err != nil {
 					log.Error("open data dir", "dir", *dataDir, "err", err)
@@ -70,11 +96,26 @@ func main() {
 				st = p
 				log.Info("durable store open", "dir", *dataDir)
 			} else {
+				// A voter can still start without --data-dir.
+				//= docs/spec/fleet.md#9-operations
+				//= type=exception
+				//= reason=an embedded acceptor may run in memory; tracked in issue #95
+				//# Every voter MUST persist its acceptor state to a durable volume.
 				log.Warn("embedded acceptor is in-memory: a restart wipes its promises, which is unsafe for consensus — set --data-dir for anything beyond a demo")
 			}
 			local = caspaxos.NewAcceptor(st)
 			mux := http.NewServeMux()
 			mux.Handle(transport.ConnectHandler(local))
+			// The consensus listener and the peer dialer use plain HTTP.
+			// Anyone who can reach --listen-consensus can propose.
+			//= docs/spec/fleet.md#8-security
+			//= type=exception
+			//= reason=consensus traffic is plaintext; tracked in issues #47 and #48
+			//# Consensus traffic between members MUST use mutual TLS.
+			//= docs/spec/fleet.md#8-security
+			//= type=exception
+			//= reason=no client certificate on the consensus listener and no delegated auth on the API; tracked in issues #48 and #38
+			//# The cask client API and control endpoints MUST NOT be reachable outside the pod without authentication.
 			go func() {
 				log.Info("embedded cask acceptor serving", "listen", *consLn)
 				if err := http.ListenAndServe(*consLn, mux); err != nil {
@@ -141,6 +182,11 @@ func main() {
 	log.Info("cask-apiserver serving", "group", apiGroup+"/"+apiVersion, "cluster", *cluster, "listen", *listen, "tls", *selfTLS)
 	server := &http.Server{Addr: *listen, Handler: srv.routes()}
 	var err error
+	// The cert is self-signed, so the APIService needs insecureSkipTLSVerify.
+	//= docs/spec/fleet.md#8-security
+	//= type=exception
+	//= reason=self-signed cert only; tracked in issue #41
+	//# The extension server MUST serve HTTPS with a certificate the kube-apiserver can verify.
 	if *selfTLS {
 		// The k8s aggregation layer requires extension apiservers to serve
 		// TLS; the demo registers the APIService with insecureSkipTLSVerify.

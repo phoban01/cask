@@ -184,6 +184,11 @@ func (c *claimController) setDeviceLease(ctx context.Context, name string, ref *
 	//= docs/spec/fleet.md#5-claims-and-fencing
 	//# A receiver MUST reject an effect whose fence is lower than the highest fence it has accepted for that object.
 	if ref != nil && dev.Status.Lease != nil && dev.Status.Lease.Fence > ref.Fence {
+		// No counter counts this rejection, and none counts lease expiries.
+		//= docs/spec/fleet.md#9-operations
+		//= type=exception
+		//= reason=no metrics yet; tracked in issue #63
+		//# Cask MUST expose counters for lease expiries and for rejected fence regressions.
 		return nil
 	}
 	if ref == nil {
