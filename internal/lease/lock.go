@@ -75,6 +75,12 @@ func (l *Locks) Acquire(ctx context.Context, name, sessionID string) (token uint
 		if err != nil {
 			return 0, err
 		}
+		// A re-entrant acquire continues the holder's tenure. The fence
+		// already names this session and no other, so returning it keeps
+		// fencing safe. This path also ends the retry after an unknown
+		// outcome whose write landed: it returns the fence that landed.
+		//= docs/spec/fleet.md#5-claims-and-fencing
+		//# An acquire by the session that already holds the lock MUST return the current fence and MUST NOT mint a new one.
 		if cur.Held && cur.Session == sessionID {
 			return cur.Fence, nil // already ours
 		}

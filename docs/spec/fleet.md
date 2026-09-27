@@ -93,6 +93,8 @@ At most one claim MUST be Bound to an object at the object's current fence.
 
 Every successful acquisition MUST mint a fence strictly greater than every fence previously minted for that object.
 
+An acquire by the session that already holds the lock MUST return the current fence and MUST NOT mint a new one.
+
 A Bound claim MUST carry its fence in its status.
 
 A controller MUST include the claim's fence in every effect it applies for that object.
