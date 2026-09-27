@@ -37,6 +37,19 @@ func newAPIServer(cluster string, store *fleetStore, log *slog.Logger) *apiServe
 }
 
 func (s *apiServer) routes() *http.ServeMux {
+	// The demo registers this mux as the backend of an APIService.
+	//= docs/spec/fleet.md#2-resources
+	//# Cask MUST serve its resources through the Kubernetes aggregation layer as an APIService.
+	// The mux is plain net/http. It has no generic server and no
+	// delegated authentication or authorization.
+	//= docs/spec/fleet.md#2-resources
+	//= type=exception
+	//= reason=the server is a plain net/http mux; tracked in issue #38
+	//# The extension server MUST be built on the generic server in k8s.io/apiserver.
+	//= docs/spec/fleet.md#2-resources
+	//= type=exception
+	//= reason=the plain mux does no delegated auth; tracked in issue #38
+	//# The extension server MUST delegate authentication and authorization to the local kube-apiserver.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/apis", s.serveGroupList)
 	mux.HandleFunc("/apis/"+apiGroup, s.serveGroup)
@@ -45,6 +58,15 @@ func (s *apiServer) routes() *http.ServeMux {
 	mux.HandleFunc(groupPrefix+"/devices/", s.item("devices"))
 	mux.HandleFunc(groupPrefix+"/deviceclaims", s.collection("deviceclaims"))
 	mux.HandleFunc(groupPrefix+"/deviceclaims/", s.item("deviceclaims"))
+	// /healthz always answers ok. There is no readyz check yet.
+	//= docs/spec/fleet.md#2-resources
+	//= type=exception
+	//= reason=no readiness check on storage; tracked in issue #39
+	//# The extension server MUST report not ready until its storage is reachable.
+	//= docs/spec/fleet.md#2-resources
+	//= type=exception
+	//= reason=no import marker and no readiness check; tracked in issue #40
+	//# The extension server MUST report not ready until any pending migration import is complete.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	return mux
 }
@@ -71,6 +93,9 @@ func groupDoc() map[string]any {
 }
 
 func (s *apiServer) serveResourceList(w http.ResponseWriter, _ *http.Request) {
+	// Each resource has namespaced false, and no path has a namespace.
+	//= docs/spec/fleet.md#2-resources
+	//# Every fleet resource MUST be cluster-scoped.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"kind": "APIResourceList", "apiVersion": "v1",
 		"groupVersion": apiGroup + "/" + apiVersion,
@@ -86,6 +111,12 @@ func (s *apiServer) serveResourceList(w http.ResponseWriter, _ *http.Request) {
 // --- collection and item handlers -------------------------------------------
 
 func (s *apiServer) collection(resource string) http.HandlerFunc {
+	// kubectl works against this mux. List and watch ignore fieldSelector
+	// and allowWatchBookmarks.
+	//= docs/spec/fleet.md#2-resources
+	//= type=exception
+	//= reason=no field selectors and no watch bookmarks; tracked in issue #91
+	//# A client MUST be able to use kubectl, client-go informers, field selectors, and watch bookmarks against fleet resources without fleet-specific code.
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Query().Get("watch") == "true":
