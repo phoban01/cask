@@ -94,9 +94,28 @@ func (s *Sessions) KeepAlive(ctx context.Context, id, owner string, ttl int64) (
 	})
 }
 
-// Revoke ends a session immediately.
+// Revoke ends a session immediately. It reads the session first and clears
+// it only if the owner and expiry still match that read. If the session
+// changed in between, Revoke returns ErrConflict and clears nothing. A
+// conflict does not prove that no earlier attempt landed, so the caller
+// must re-read the session to learn its state.
 func (s *Sessions) Revoke(ctx context.Context, id string) error {
-	_, err := s.commit(ctx, id, func(Session, bool) (Session, error) {
+	//= docs/spec/fleet.md#3-storage-model
+	//# A retried write MUST be a compare-and-set, never a blind reapplication of a change.
+	read, present, err := s.get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !present || read == (Session{}) {
+		return nil // nothing to revoke
+	}
+	_, err = s.commit(ctx, id, func(cur Session, present bool) (Session, error) {
+		if !present || cur != read {
+			// A retry after an unknown outcome gets here when a Grant
+			// took the id after the first attempt cleared it. Clearing
+			// now would end a session this call never read.
+			return Session{}, caspaxos.ErrConflict
+		}
 		return Session{}, nil
 	})
 	return err
@@ -136,10 +155,9 @@ func (s *Sessions) get(ctx context.Context, id string) (Session, bool, error) {
 }
 
 func (s *Sessions) commit(ctx context.Context, id string, mutate func(cur Session, present bool) (Session, error)) (Session, error) {
-	// Grant and KeepAlive check the owner and expiry they read before they
-	// write. Revoke clears the record, and clearing it twice changes
-	// nothing. So ProposeResolving may run mutate again after an unknown
-	// outcome.
+	// Grant, KeepAlive, and Revoke each check the owner and expiry they
+	// read before they write. So every mutate is a compare-and-set, and
+	// ProposeResolving may run it again after an unknown outcome.
 	raw, err := caspaxos.ProposeResolving(ctx, s.prop, SessionKey(id), func(current []byte) ([]byte, error) {
 		var cur Session
 		present := len(current) > 0
