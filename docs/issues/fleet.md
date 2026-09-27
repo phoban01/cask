@@ -1037,3 +1037,48 @@ Task: in the generic server storage, return `metadata.name` from `GetAttrs` so a
 Files: `cmd/cask-apiserver/server.go` (or the storage file that #27 adds), `cmd/cask-apiserver/server_test.go`
 
 Done when: `go test -race ./cmd/cask-apiserver/ -run 'TestFieldSelector|TestWatchBookmark'` passes.
+
+## ops: refuse an embedded acceptor without --data-dir
+
+labels: ops
+
+Spec: docs/spec/fleet.md#9-operations
+> Every voter MUST persist its acceptor state to a durable volume.
+
+`cmd/cask-apiserver/main.go` starts an embedded acceptor on `store.NewMem()` when `--data-dir` is empty. It only logs a warning. The single-node mode with no `--cask-peers` also keeps its acceptor in memory.
+
+Task: refuse to start an embedded acceptor without `--data-dir`. Add an `--ephemeral` flag that allows the in-memory store for tests and the local demo. Keep the warning when `--ephemeral` is set.
+
+Files: `cmd/cask-apiserver/main.go`, `cmd/cask-apiserver/main_test.go`
+
+Done when: `go test -race ./cmd/cask-apiserver/ -run TestAcceptorNeedsDataDir` passes.
+
+## ops: rolling upgrade runbook across clusters
+
+labels: ops
+
+Spec: docs/spec/fleet.md#9-operations
+> A rolling upgrade MUST keep a majority of voters available at all times.
+
+The PodDisruptionBudget in `demo/kind/manifests/apiserver.yaml` covers one cluster. The demo runs one voter per cluster, so the budget does not stop two clusters from upgrading at the same time.
+
+Task: write `docs/runbooks/rolling-upgrade.md`. Upgrade one cluster at a time. Before the next cluster, wait for the voter to be Ready and for the quorum health signal from #62 to report a quorum. Add a `demo/kind/upgrade.sh` that runs these steps on the kind demo.
+
+Files: `docs/runbooks/rolling-upgrade.md`, `demo/kind/upgrade.sh`
+
+Done when: `demo/kind/upgrade.sh` upgrades all three clusters and `kubectl get devices` answers from every cluster during the run.
+
+## e2e: rehearse majority-loss recovery on kind
+
+labels: ops, e2e
+
+Spec: docs/spec/fleet.md#9-operations
+> The majority-loss recovery procedure MUST be rehearsed before phase two.
+
+`docs/runbooks/majority-loss.md` describes the procedure. Nothing runs it yet. It needs `--force-new-fleet` (#74), the dynamic roster path (#43), and the promote endpoint (#45).
+
+Task: add an e2e feature on the three-cluster kind setup. It deletes two voters and their data, runs the runbook steps on the survivor, rejoins the other clusters, and promotes back to three voters. Cite the sentence with `type=test`.
+
+Files: `test/e2e/majority_loss_test.go`
+
+Done when: `go test ./test/e2e -run TestMajorityLossRecovery` passes on kind.

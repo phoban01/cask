@@ -74,17 +74,17 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST,exception]: The cutover MUST be rehearsed on a copy of the management cluster before it runs on the real one.
 
   SECTION: [8. Security](#8-security)
-    TEXT[!MUST]: Consensus traffic between members MUST use mutual TLS.
-    TEXT[!MUST]: The extension server MUST serve HTTPS with a certificate the kube-apiserver can verify.
-    TEXT[!MUST]: The cask client API and control endpoints MUST NOT be reachable outside the pod without authentication.
+    TEXT[!MUST,exception]: Consensus traffic between members MUST use mutual TLS.
+    TEXT[!MUST,exception]: The extension server MUST serve HTTPS with a certificate the kube-apiserver can verify.
+    TEXT[!MUST,exception]: The cask client API and control endpoints MUST NOT be reachable outside the pod without authentication.
 
   SECTION: [9. Operations](#9-operations)
-    TEXT[!MUST]: Every voter MUST persist its acceptor state to a durable volume.
-    TEXT[!MUST]: A rolling upgrade MUST keep a majority of voters available at all times.
-    TEXT[!MUST]: A majority-loss recovery procedure MUST be documented.
-    TEXT[!MUST]: The majority-loss recovery procedure MUST be rehearsed before phase two.
-    TEXT[!MUST]: Cask MUST expose a health signal for quorum state.
-    TEXT[!MUST]: Cask MUST expose counters for lease expiries and for rejected fence regressions.
+    TEXT[!MUST,implementation,exception]: Every voter MUST persist its acceptor state to a durable volume.
+    TEXT[!MUST,exception]: A rolling upgrade MUST keep a majority of voters available at all times.
+    TEXT[!MUST,exception]: A majority-loss recovery procedure MUST be documented.
+    TEXT[!MUST,exception]: The majority-loss recovery procedure MUST be rehearsed before phase two.
+    TEXT[!MUST,exception]: Cask MUST expose a health signal for quorum state.
+    TEXT[!MUST,exception]: Cask MUST expose counters for lease expiries and for rejected fence regressions.
 
   SECTION: [10. Verification](#10-verification)
     TEXT[!MUST]: Every safety rule in sections 3 and 5 MUST be an invariant in the Quint model.
