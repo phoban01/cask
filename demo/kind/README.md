@@ -80,5 +80,5 @@ The script walks four acts:
 - Claim TTLs in the demo are 15s so the zombie act completes quickly; the
   lease is renewed by the claim's managing apiserver every 2s reconcile tick.
 - Everything the demo shows also runs as in-process tests
-  (`go test ./cmd/cask-apiserver/`): two apiservers sharing one consensus
+  (`go -C cmd/cask-apiserver test ./...`): two apiservers sharing one consensus
   group, with a fake clock for deterministic expiry.

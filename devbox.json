@@ -23,9 +23,18 @@
       "go version"
     ],
     "scripts": {
-      "build":         ["go build ./..."],
-      "test":          ["go test -race ./..."],
-      "tidy":          ["go mod tidy"],
+      "build":         [
+        "go build ./...",
+        "go -C cmd/cask-apiserver build ./..."
+      ],
+      "test":          [
+        "go test -race ./...",
+        "go -C cmd/cask-apiserver test -race ./..."
+      ],
+      "tidy":          [
+        "go mod tidy",
+        "go -C cmd/cask-apiserver mod tidy"
+      ],
       "sim-gate":      ["scripts/sim-gate.sh"],
       "quint":         ["scripts/quint-check.sh"],
       "quint-verify":  ["scripts/quint-check.sh --verify"],
@@ -39,6 +48,7 @@
       "issues":        ["scripts/file-issues.sh docs/issues/fleet.md"],
       "verify":        [
         "go test -race ./...",
+        "go -C cmd/cask-apiserver test -race ./...",
         "scripts/quint-check.sh",
         "duvet report --ci"
       ]
