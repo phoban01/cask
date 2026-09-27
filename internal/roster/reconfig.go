@@ -196,6 +196,15 @@ func (r *Roster) finishJoint(ctx context.Context, v Value) (Value, error) {
 	return out, err
 }
 
+// retryable reports whether a roster write may run again from a fresh read.
+// caspaxos.ErrUnknownOutcome is retryable because every retry re-reads the
+// roster first and then commits under a ConfigGen guard. Every roster change
+// is also idempotent: Add, Remove, and the range-id rewrite give the same
+// value when applied twice, and the joint steps adopt a step that landed.
 func retryable(err error) bool {
-	return errors.Is(err, errConfigShifted) || errors.Is(err, caspaxos.ErrPreempted)
+	//= docs/spec/fleet.md#3-storage-model
+	//# A retried write MUST be a compare-and-set, never a blind reapplication of a change.
+	return errors.Is(err, errConfigShifted) ||
+		errors.Is(err, caspaxos.ErrPreempted) ||
+		errors.Is(err, caspaxos.ErrUnknownOutcome)
 }

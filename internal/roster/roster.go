@@ -311,7 +311,7 @@ func (r *Roster) write(ctx context.Context, mutate func(cur Value) (Value, error
 			r.learn(v)
 			return v, nil
 		}
-		if errors.Is(err, errConfigShifted) || errors.Is(err, caspaxos.ErrPreempted) {
+		if retryable(err) {
 			lastErr = err
 			continue
 		}

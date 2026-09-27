@@ -1,6 +1,7 @@
 package ranges
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -108,8 +109,14 @@ func (s *Store) Get(ctx context.Context, id uint64) (State, bool, error) {
 // Splitting CAS); the register is then left unchanged and Publish returns
 // that error.
 func (s *Store) Publish(ctx context.Context, id uint64, mutate func(cur State, present bool) (State, error)) (State, error) {
-	var out State
-	_, err := s.prop.Propose(ctx, DescriptorKey(id), func(current []byte) ([]byte, error) {
+	// Every mutate is guarded on the state it reads (the orchestrator
+	// checks Epoch), so ProposeResolving may run it again after an
+	// unknown outcome.
+	var (
+		out    State
+		outRaw []byte
+	)
+	raw, err := caspaxos.ProposeResolving(ctx, s.prop, DescriptorKey(id), func(current []byte) ([]byte, error) {
 		cur, present, err := decodeState(current)
 		if err != nil {
 			return nil, err
@@ -119,10 +126,15 @@ func (s *Store) Publish(ctx context.Context, id uint64, mutate func(cur State, p
 			return nil, err
 		}
 		out = next
-		return encodeState(next)
+		outRaw, err = encodeState(next)
+		return outRaw, err
 	})
 	if err != nil {
 		return State{}, err
 	}
-	return out, nil
+	if !bytes.Equal(raw, outRaw) {
+		// An earlier attempt's write landed; report that state.
+		out, _, err = decodeState(raw)
+	}
+	return out, err
 }

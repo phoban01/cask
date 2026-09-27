@@ -1,6 +1,7 @@
 package caspaxos
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"sync"
@@ -166,6 +167,19 @@ func (p *Proposer) quorumStillPossible(ok, undecided []bool) bool {
 // group). A failed CAS still writes the current value back (completing any
 // in-flight round) before returning ErrConflict, so the read it observed is
 // linearizable.
+//
+// Retry contract: Propose starts a new round with a fresh ballot when the
+// prepare phase fails, or when every acceptor rejected the accept. change
+// then runs again on the fresh current value. That is safe, because no
+// acceptor holds a value from the failed round. An accept phase that fails
+// while some acceptor may hold the value is different. That acceptor
+// accepted, or its reply was lost, or it was still in flight. A later round
+// can adopt that value and choose it. If the value differs from current,
+// Propose returns ErrUnknownOutcome and does not start a new round. The
+// caller must re-read and retry with a compare-and-set, or with a change
+// that detects its own earlier write (mvcc does this with OpIDs). A round
+// that writes back the current value (a read, or a change that returned
+// ErrConflict) is still retried, because that value changes nothing.
 func (p *Proposer) Propose(ctx context.Context, key []byte, change ChangeFunc) ([]byte, error) {
 	var floor Ballot
 	for round := 0; round < p.maxRounds; round++ {
@@ -195,9 +209,21 @@ func (p *Proposer) Propose(ctx context.Context, key []byte, change ChangeFunc) (
 			writeVal = current
 		}
 
-		conflict, ok, err = p.accept(ctx, key, b, writeVal)
+		conflict, ok, mayHold, err := p.accept(ctx, key, b, writeVal)
 		if err != nil {
 			return nil, err
+		}
+		//= docs/spec/fleet.md#3-storage-model
+		//# A retried write MUST be a compare-and-set, never a blind reapplication of a change.
+		if !ok && mayHold && !bytes.Equal(writeVal, current) {
+			// Some acceptor may hold the new value, and a later round
+			// can choose it. Another round here applies change again.
+			// Back off first, so a caller that retries at once does not
+			// collide with the same competitor.
+			if err := p.pause(ctx, round); err != nil {
+				return nil, err
+			}
+			return nil, ErrUnknownOutcome
 		}
 		if !ok {
 			floor = floor.Max(conflict)
@@ -298,7 +324,13 @@ func (p *Proposer) prepare(ctx context.Context, key []byte, b Ballot) (current [
 // cancelled accept may still land on a straggler later — Paxos tolerates
 // this, and the duplicate_delivery sim fault exercises the idempotency it
 // relies on.
-func (p *Proposer) accept(ctx context.Context, key []byte, b Ballot, val []byte) (conflict Ballot, ok bool, err error) {
+//
+// mayHold reports whether any acceptor may now hold val: one that accepted,
+// one whose reply failed (the accept may have landed and the reply got
+// lost), or a straggler still in flight. Only an explicit rejection proves
+// that an acceptor does not hold val. Propose uses mayHold to detect an
+// unknown outcome.
+func (p *Proposer) accept(ctx context.Context, key []byte, b Ballot, val []byte) (conflict Ballot, ok, mayHold bool, err error) {
 	n := len(p.acceptors)
 	pctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -312,25 +344,27 @@ func (p *Proposer) accept(ctx context.Context, key []byte, b Ballot, val []byte)
 	for i := range undecided {
 		undecided[i] = true
 	}
+	rejected := 0
 	for range n {
 		r := <-replies
 		undecided[r.i] = false
 		switch {
 		case errors.Is(r.err, ErrRangeChanged):
-			return Ballot{}, false, ErrRangeChanged
+			return Ballot{}, false, true, ErrRangeChanged
 		case r.err != nil:
-			// unreachable acceptor: a non-vote
+			// unreachable acceptor: a non-vote, but the accept may have landed
 		case !r.v.Accepted:
 			conflict = conflict.Max(r.v.Conflict)
+			rejected++
 		default:
 			accepted[r.i] = true
 		}
 		if p.quorumInAllGroups(accepted) {
-			return Ballot{}, true, nil
+			return Ballot{}, true, true, nil
 		}
 		if !p.quorumStillPossible(accepted, undecided) {
-			return conflict, false, ctx.Err()
+			return conflict, false, rejected < n, ctx.Err()
 		}
 	}
-	return conflict, false, ctx.Err()
+	return conflict, false, rejected < n, ctx.Err()
 }

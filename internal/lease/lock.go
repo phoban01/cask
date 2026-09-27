@@ -97,7 +97,12 @@ func (l *Locks) Acquire(ctx context.Context, name, sessionID string) (token uint
 			}
 			return marshal(Lock{Session: sessionID, Held: true, Fence: newFence})
 		})
-		if errors.Is(err, caspaxos.ErrConflict) {
+		// An unknown outcome is safe to retry here: the re-read at the top
+		// of the loop fixes the outcome, finds the lock already ours if the
+		// write landed, and otherwise retries the compare-and-set on Fence.
+		//= docs/spec/fleet.md#3-storage-model
+		//# A retried write MUST be a compare-and-set, never a blind reapplication of a change.
+		if errors.Is(err, caspaxos.ErrConflict) || errors.Is(err, caspaxos.ErrUnknownOutcome) {
 			if perr := l.pause(ctx, attempt); perr != nil {
 				return 0, perr
 			}
@@ -122,6 +127,7 @@ func (l *Locks) Acquire(ctx context.Context, name, sessionID string) (token uint
 // they simply see a fresher token from the same holder.
 func (l *Locks) Bump(ctx context.Context, name, sessionID string, minFence uint64) (token uint64, err error) {
 	key := LockKey(name)
+	var unknownFence uint64 // fence of a bump whose outcome is unknown
 	for attempt := 0; attempt < l.retries; attempt++ {
 		cur, err := l.read(ctx, key)
 		if err != nil {
@@ -129,6 +135,9 @@ func (l *Locks) Bump(ctx context.Context, name, sessionID string, minFence uint6
 		}
 		if !cur.Held || cur.Session != sessionID {
 			return 0, ErrNotHolder
+		}
+		if unknownFence != 0 && cur.Fence >= unknownFence {
+			return cur.Fence, nil // the earlier bump landed; do not bump twice
 		}
 		observed := cur.Fence
 		newFence := max(observed+1, minFence)
@@ -139,6 +148,10 @@ func (l *Locks) Bump(ctx context.Context, name, sessionID string, minFence uint6
 			}
 			return marshal(Lock{Session: sessionID, Held: true, Fence: newFence})
 		})
+		if errors.Is(err, caspaxos.ErrUnknownOutcome) {
+			unknownFence = newFence
+			err = caspaxos.ErrConflict // re-read, then compare-and-set again
+		}
 		if errors.Is(err, caspaxos.ErrConflict) {
 			if perr := l.pause(ctx, attempt); perr != nil {
 				return 0, perr
@@ -156,7 +169,9 @@ func (l *Locks) Bump(ctx context.Context, name, sessionID string, minFence uint6
 // Release frees the lock if held by sessionID. It is idempotent and keeps the
 // fence, so the next acquire mints a strictly higher token.
 func (l *Locks) Release(ctx context.Context, name, sessionID string) error {
-	_, err := l.prop.Propose(ctx, LockKey(name), func(current []byte) ([]byte, error) {
+	// The change checks the holder first, so it is safe to run again after
+	// an unknown outcome.
+	_, err := caspaxos.ProposeResolving(ctx, l.prop, LockKey(name), func(current []byte) ([]byte, error) {
 		c := decodeLock(current)
 		if c.Session != sessionID {
 			return current, nil // not ours: no-op
@@ -195,7 +210,7 @@ func (l *Locks) freeIfDead(ctx context.Context, name string) (freed bool, err er
 		return false, err
 	}
 	observed := cur.Fence
-	_, err = l.prop.Propose(ctx, LockKey(name), func(current []byte) ([]byte, error) {
+	_, err = caspaxos.ProposeResolving(ctx, l.prop, LockKey(name), func(current []byte) ([]byte, error) {
 		c := decodeLock(current)
 		if c.Fence != observed || !c.Held {
 			return current, nil

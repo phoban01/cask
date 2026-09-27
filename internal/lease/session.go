@@ -136,7 +136,11 @@ func (s *Sessions) get(ctx context.Context, id string) (Session, bool, error) {
 }
 
 func (s *Sessions) commit(ctx context.Context, id string, mutate func(cur Session, present bool) (Session, error)) (Session, error) {
-	raw, err := s.prop.Propose(ctx, SessionKey(id), func(current []byte) ([]byte, error) {
+	// Grant and KeepAlive check the owner and expiry they read before they
+	// write. Revoke clears the record, and clearing it twice changes
+	// nothing. So ProposeResolving may run mutate again after an unknown
+	// outcome.
+	raw, err := caspaxos.ProposeResolving(ctx, s.prop, SessionKey(id), func(current []byte) ([]byte, error) {
 		var cur Session
 		present := len(current) > 0
 		if present {
