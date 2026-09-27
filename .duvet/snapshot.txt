@@ -59,7 +59,7 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST]: The voter count MUST NOT exceed five.
     TEXT[!SHOULD]: The voter set SHOULD contain at most one voter per management cluster once three or more clusters exist.
     TEXT[!MUST]: The founding member MUST remain available until the voter set has grown to three.
-    TEXT[!MUST]: The extension server MUST join the fleet through the dynamic roster path.
+    TEXT[!MUST,implementation,test]: The extension server MUST join the fleet through the dynamic roster path.
     TEXT[!MUST]: A new member MUST be able to join with a seed address and a minted certificate and nothing else.
 
   SECTION: [7. Migration](#7-migration)

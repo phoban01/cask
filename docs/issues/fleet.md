@@ -1190,3 +1190,48 @@ Files: `scripts/quint-check.sh`
 Done when: `devbox run quint` prints `quint: ok` and reports the
 `stepNoPromise` control as violated.
 
+
+## demo: start the kind demo with --bootstrap and --seed
+
+labels: membership
+
+Spec: docs/spec/fleet.md#6-membership
+> The extension server MUST join the fleet through the dynamic roster path.
+
+`demo/kind/manifests/apiserver.yaml` still starts three voters with the
+deprecated `--cask-peers`. The apiserver now has `--bootstrap` and
+`--seed` (#43). A joined member is a participant until the promote
+endpoint (#45) makes it a voter. This depends on #45, or the demo drops
+from three voters to one.
+
+Task: start east with `--bootstrap` and west and north with `--seed`
+pointing at east. After both join, call the promote endpoint once with
+both ids. Update `demo/kind/README.md`.
+
+Files: `demo/kind/manifests/apiserver.yaml`, `demo/kind/demo.sh`,
+`demo/kind/README.md`
+
+Done when: the demo comes up and `GET /roster` on each apiserver shows a
+core of three.
+
+## membership: move data registers when the core changes
+
+labels: membership
+
+Spec: docs/spec/fleet.md#6-membership
+> The voter set MUST change only by joint-consensus reconfiguration of the roster.
+
+In the apiserver, every data register uses the roster core as its
+acceptor set (`cmd/cask-apiserver/membership.go`). `Roster.Reconfigure`
+carries forward only the roster key. A promote (#45) that changes the core
+without moving the data registers can lose a committed value.
+
+Task: before the core release step, carry forward every data key from the
+old core to the new core with a joint Identity round, the way
+`internal/reconfig` does for ranges. Data proposals during the joint phase
+must use the joint quorum.
+
+Files: `cmd/cask-apiserver/membership.go`, `internal/roster/reconfig.go`
+
+Done when: a test writes keys on a one-voter core, grows it to three, stops
+the founder, and reads every key back.

@@ -21,10 +21,12 @@ func main() {
 	var (
 		listen  = flag.String("listen", ":9443", "address to serve the API group on")
 		cluster = flag.String("cluster", "", "this cluster's name (stamped on claims it manages); required")
-		peers   = flag.String("cask-peers", "", "comma-separated consensus addresses of the cask fleet; empty = embedded single-node cask (demo/dev)")
-		consLn  = flag.String("listen-consensus", "", "address to serve an EMBEDDED cask acceptor on; with --cask-peers, this apiserver IS one of the fleet's consensus nodes")
-		adv     = flag.String("advertise-consensus", "", "this node's address as it appears in --cask-peers (requests to it stay in-process); required with --listen-consensus")
-		self    = flag.Uint64("id", 0, "proposer id (unique per apiserver); required with --cask-peers")
+		boot    = flag.Bool("bootstrap", false, "found a new fleet as its single founding member (exactly one apiserver in a fleet; every other one joins with --seed)")
+		seed    = flag.String("seed", "", "comma-separated consensus addresses of live fleet members to join through, e.g. 10.0.0.7:9444")
+		peers   = flag.String("cask-peers", "", "DEPRECATED, tests only: comma-separated static consensus addresses; use --bootstrap or --seed")
+		consLn  = flag.String("listen-consensus", "", "address to serve the EMBEDDED cask acceptor and the roster endpoints on; required with --bootstrap and --seed")
+		adv     = flag.String("advertise-consensus", "", "this node's consensus address as peers reach it; required with --listen-consensus")
+		self    = flag.Uint64("id", 0, "node id (unique per apiserver); required with --bootstrap, --seed, and --cask-peers")
 		dataDir = flag.String("data-dir", "", "directory for durable consensus state (Pebble); empty = in-memory (an embedded acceptor that restarts empty forgets its promises — demo only)")
 		selfTLS = flag.Bool("self-signed-tls", false, "serve HTTPS with an in-memory self-signed cert (required for k8s API aggregation; pair with insecureSkipTLSVerify on the APIService)")
 	)
@@ -58,23 +60,43 @@ func main() {
 
 	// The storage engine. cask is designed to be embedded: with
 	// --listen-consensus each apiserver carries its own acceptor and the
-	// apiservers ARE the consensus fleet — no external cask processes. The
-	// alternatives are proposer-only mode over an existing fleet
+	// apiservers ARE the consensus fleet — no external cask processes. One
+	// apiserver founds the roster with --bootstrap; the others join it with
+	// --seed and start as participants. The deprecated alternatives are proposer-only mode over an existing fleet
 	// (--cask-peers without --listen-consensus) and a process-local
 	// single-node register for dev. Whichever way, every apiserver proposes
 	// over the SAME replicas — that shared consensus is what makes one
 	// device lease globally exclusive.
+	ctx := context.Background()
+	dynamic := *boot || *seed != ""
+	switch {
+	case *boot && *seed != "":
+		log.Error("--bootstrap and --seed are exclusive: one apiserver founds the fleet, the others join it")
+		os.Exit(1)
+	case dynamic && *peers != "":
+		log.Error("--cask-peers cannot be combined with --bootstrap or --seed")
+		os.Exit(1)
+	case dynamic && (*consLn == "" || *adv == ""):
+		log.Error("--bootstrap and --seed need --listen-consensus and --advertise-consensus")
+		os.Exit(1)
+	}
 	var prop mvcc.Proposer
 	switch {
-	case *peers == "":
+	case *peers == "" && !dynamic:
 		log.Warn("embedded single-node cask: state is process-local and non-durable (demo mode)")
 		prop = caspaxos.NewProposer(1, []caspaxos.AcceptorClient{caspaxos.NewAcceptor(store.NewMem())})
 	default:
 		if *self == 0 {
-			log.Error("--id required with --cask-peers (unique per apiserver)")
+			log.Error("--id required with --bootstrap, --seed, or --cask-peers (unique per apiserver)")
 			os.Exit(1)
 		}
-		var local *caspaxos.Acceptor
+		if !dynamic {
+			log.Warn("--cask-peers is deprecated and kept for tests only: a static peer list cannot grow the fleet; use --bootstrap or --seed")
+		}
+		var (
+			local *caspaxos.Acceptor
+			mem   *membership
+		)
 		if *consLn != "" {
 			if *adv == "" {
 				log.Error("--advertise-consensus required with --listen-consensus (this node's entry in --cask-peers)")
@@ -104,8 +126,22 @@ func main() {
 				log.Warn("embedded acceptor is in-memory: a restart wipes its promises, which is unsafe for consensus — set --data-dir for anything beyond a demo")
 			}
 			local = caspaxos.NewAcceptor(st)
-			mux := http.NewServeMux()
-			mux.Handle(transport.ConnectHandler(local))
+			var h http.Handler
+			if dynamic {
+				mem = newMembership(membershipConfig{
+					ID:        *self,
+					Advertise: *adv,
+					Bootstrap: *boot,
+					Seeds:     parseSeeds(*seed),
+					Local:     local,
+					HTTP:      transport.TCP{}.HTTPClient(),
+				}, log)
+				h = mem.handler()
+			} else {
+				mux := http.NewServeMux()
+				mux.Handle(transport.ConnectHandler(local))
+				h = mux
+			}
 			// The consensus listener and the peer dialer use plain HTTP.
 			// Anyone who can reach --listen-consensus can propose.
 			//= docs/spec/fleet.md#8-security
@@ -118,11 +154,21 @@ func main() {
 			//# The cask client API and control endpoints MUST NOT be reachable outside the pod without authentication.
 			go func() {
 				log.Info("embedded cask acceptor serving", "listen", *consLn)
-				if err := http.ListenAndServe(*consLn, mux); err != nil {
+				if err := http.ListenAndServe(*consLn, h); err != nil {
 					log.Error("consensus server stopped", "err", err)
 					os.Exit(1)
 				}
 			}()
+		}
+		if dynamic {
+			// The founder creates the roster; a joiner asks the driver to add
+			// it as a participant. Both run the same code as cmd/cask.
+			if err := mem.start(ctx); err != nil {
+				log.Error("join fleet", "err", err)
+				os.Exit(1)
+			}
+			prop = mem
+			break
 		}
 		hc := transport.TCP{}.HTTPClient()
 		var clients []caspaxos.AcceptorClient
@@ -148,7 +194,6 @@ func main() {
 	//# The extension server MUST reconcile the index register against the object registers at startup.
 
 	srv := newAPIServer(*cluster, fs, log)
-	ctx := context.Background()
 	go srv.runReconciler(ctx, 2*time.Second)
 
 	// The server has no import path and no readiness gate yet, so nothing

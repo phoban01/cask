@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/phoban01/cask/internal/cluster"
 	"github.com/phoban01/cask/internal/placement"
 	"github.com/phoban01/cask/internal/ranges"
 )
@@ -35,14 +36,14 @@ type addrBook interface {
 }
 
 type forwarder struct {
-	self  uint64
-	hc    *http.Client
-	book  addrBook
-	snap  *rosterSnap
-	log   *slog.Logger
+	self uint64
+	hc   *http.Client
+	book addrBook
+	snap *cluster.Snap
+	log  *slog.Logger
 }
 
-func newForwarder(self uint64, hc *http.Client, book addrBook, snap *rosterSnap, log *slog.Logger) *forwarder {
+func newForwarder(self uint64, hc *http.Client, book addrBook, snap *cluster.Snap, log *slog.Logger) *forwarder {
 	return &forwarder{self: self, hc: hc, book: book, snap: snap, log: log}
 }
 
@@ -50,7 +51,7 @@ func newForwarder(self uint64, hc *http.Client, book addrBook, snap *rosterSnap,
 // Empty when this node is the hint itself (handle locally) or the address is
 // unknown (fall through to the gated local path).
 func (f *forwarder) ownerAddr(key []byte) string {
-	val, ok := f.snap.load()
+	val, ok := f.snap.Load()
 	if !ok {
 		return ""
 	}
