@@ -1022,3 +1022,18 @@ optional prefix from `CASK_E2E_PREFIX` so parallel runs do not collide.
 Files: `test/e2e/main_test.go`
 
 Done when: `go vet -tags e2e ./test/e2e/` passes and `kind get clusters` shows only `e2e-*` names during a run.
+
+## apiserver: field selectors and watch bookmarks
+
+labels: apiserver
+
+Spec: docs/spec/fleet.md#2-resources
+> A client MUST be able to use kubectl, client-go informers, field selectors, and watch bookmarks against fleet resources without fleet-specific code.
+
+The legacy mux ignores `fieldSelector` and `allowWatchBookmarks`. kubectl works today. Field selectors and bookmarks do not.
+
+Task: in the generic server storage, return `metadata.name` from `GetAttrs` so a field selector on the name filters list and watch. Emit a Bookmark event with the current index sequence when the client sets `allowWatchBookmarks`.
+
+Files: `cmd/cask-apiserver/server.go` (or the storage file that #27 adds), `cmd/cask-apiserver/server_test.go`
+
+Done when: `go test -race ./cmd/cask-apiserver/ -run 'TestFieldSelector|TestWatchBookmark'` passes.

@@ -1,12 +1,12 @@
 SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
   SECTION: [2. Resources](#2-resources)
-    TEXT[!MUST]: Cask MUST serve its resources through the Kubernetes aggregation layer as an APIService.
-    TEXT[!MUST]: Every fleet resource MUST be cluster-scoped.
-    TEXT[!MUST]: The extension server MUST be built on the generic server in k8s.io/apiserver.
-    TEXT[!MUST]: The extension server MUST delegate authentication and authorization to the local kube-apiserver.
-    TEXT[!MUST]: A client MUST be able to use kubectl, client-go informers, field selectors, and watch bookmarks against fleet resources without fleet-specific code.
-    TEXT[!MUST]: The extension server MUST report not ready until its storage is reachable.
-    TEXT[!MUST]: The extension server MUST report not ready until any pending migration import is complete.
+    TEXT[!MUST,implementation]: Cask MUST serve its resources through the Kubernetes aggregation layer as an APIService.
+    TEXT[!MUST,implementation]: Every fleet resource MUST be cluster-scoped.
+    TEXT[!MUST,exception]: The extension server MUST be built on the generic server in k8s.io/apiserver.
+    TEXT[!MUST,exception]: The extension server MUST delegate authentication and authorization to the local kube-apiserver.
+    TEXT[!MUST,exception]: A client MUST be able to use kubectl, client-go informers, field selectors, and watch bookmarks against fleet resources without fleet-specific code.
+    TEXT[!MUST,exception]: The extension server MUST report not ready until its storage is reachable.
+    TEXT[!MUST,exception]: The extension server MUST report not ready until any pending migration import is complete.
 
   SECTION: [3. Storage model](#3-storage-model)
     TEXT[!MUST,implementation]: Each object MUST be stored in one cask register keyed by resource type and name.
