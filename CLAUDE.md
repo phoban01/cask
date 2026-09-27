@@ -36,8 +36,11 @@ The project name is cask. Do not use any other name for it.
 2. **Model in Quint.** `quint/` holds the models. TLA+ is being retired in
    favour of Quint at every level. Every safety rule is an invariant, and
    every invariant has a negative control that must fail. Run
-   `devbox run quint`. Bounded verification with Apalache runs in CI on
-   x86_64; it does not run on aarch64.
+   `devbox run quint`. Each module declares its invariants and controls
+   in `// quint-check:` header lines. Bounded verification with Apalache
+   runs with `--verify` in CI and also works on aarch64 with the Apalache
+   that Quint 0.32 installs. `devbox run quint` is the gate script, not
+   the binary; call `quint` directly for one-off commands.
 3. **Cite with Duvet.** Every requirement has a citation in code or a
    `type=exception` that names the issue tracking it. Tests cite with
    `type=test`. Quint citations use `type=implication`, because a model
@@ -48,7 +51,8 @@ The project name is cask. Do not use any other name for it.
 4. **Small issues.** Work is filed as GitHub issues an agent can finish in
    under five minutes. Each issue names its spec sentence, the exact task,
    the files, and the command that proves it is done. `docs/issues/fleet.md`
-   is the source; `devbox run issues` files new ones. One issue is one PR.
+   is the source; `devbox run issues` files new ones. An issue filed
+   straight with `gh` also goes into that file. One issue is one PR.
    If an issue turns out larger, do the first slice, open a follow-up, stop.
 5. **Every bug becomes a check.** A bug found anywhere adds a negative
    control in Quint, a fault in `testutil/sim/faults/`, or a regression seed,
