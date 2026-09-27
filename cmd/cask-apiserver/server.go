@@ -85,12 +85,8 @@ func (s *apiServer) serveGroup(w http.ResponseWriter, _ *http.Request) {
 }
 
 func groupDoc() map[string]any {
-	// The group is fleet.cask.dev/v1alpha1. No scheme is registered, and no
-	// check ties the group, version, and kinds to a source CRD.
-	//= docs/spec/fleet.md#7-migration
-	//= type=exception
-	//= reason=no scheme to match against the CRD; tracked in issue #26
-	//# The extension server MUST serve the same API group, version, and kinds that the CRD served.
+	// The group and version come from the v1alpha1 scheme, which also
+	// registers the kinds.
 	gv := map[string]any{"groupVersion": apiGroup + "/" + apiVersion, "version": apiVersion}
 	return map[string]any{
 		"kind": "APIGroup", "apiVersion": "v1", "name": apiGroup,

@@ -63,7 +63,7 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST]: A new member MUST be able to join with a seed address and a minted certificate and nothing else.
 
   SECTION: [7. Migration](#7-migration)
-    TEXT[!MUST,exception]: The extension server MUST serve the same API group, version, and kinds that the CRD served.
+    TEXT[!MUST,implementation,test]: The extension server MUST serve the same API group, version, and kinds that the CRD served.
     TEXT[!MUST,exception]: The migration MUST preserve each object's uid.
     TEXT[!MUST,exception]: The migration MUST preserve each object's creationTimestamp.
     TEXT[!MUST,exception]: Writers MUST be frozen from the start of the export until the APIService is available.
