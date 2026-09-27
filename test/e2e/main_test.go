@@ -8,9 +8,14 @@
 //	devbox run e2e
 //
 // The build tag keeps `go test ./...` from starting kind.
+//
+// Cluster names carry a prefix so the suite does not touch the demo
+// clusters. The default prefix is "e2e-". Set CASK_E2E_PREFIX to use a
+// different prefix, for example to run two suites at the same time.
 package e2e
 
 import (
+	"fmt"
 	"os"
 	"testing"
 
@@ -20,11 +25,41 @@ import (
 	"sigs.k8s.io/e2e-framework/third_party/kind"
 )
 
-// clusters are the kind clusters of the fleet. The names match demo/kind.
-var clusters = []string{"east", "west", "north"}
+// defaultPrefix is the cluster name prefix when CASK_E2E_PREFIX is not set.
+const defaultPrefix = "e2e-"
+
+// prefixEnv names the environment variable that overrides defaultPrefix.
+const prefixEnv = "CASK_E2E_PREFIX"
+
+// logicalClusters are the logical names of the fleet clusters. They match
+// the cluster names in demo/kind.
+var logicalClusters = []string{"east", "west", "north"}
+
+// clusterNames maps a logical name to its kind cluster name. TestMain
+// fills it before any feature runs.
+var clusterNames = map[string]string{}
 
 // testenv is the shared environment. Features in this package run in it.
 var testenv env.Environment
+
+// clusterPrefix returns the kind cluster name prefix for this run.
+func clusterPrefix() string {
+	if p := os.Getenv(prefixEnv); p != "" {
+		return p
+	}
+	return defaultPrefix
+}
+
+// clusterName returns the kind cluster name for a logical cluster name.
+// For example, "east" gives "e2e-east". It panics on an unknown name, so a
+// typo in a feature fails at once.
+func clusterName(logical string) string {
+	name, ok := clusterNames[logical]
+	if !ok {
+		panic(fmt.Sprintf("e2e: unknown cluster %q", logical))
+	}
+	return name
+}
 
 func TestMain(m *testing.M) {
 	//= docs/spec/fleet.md#10-verification
@@ -41,9 +76,12 @@ func TestMain(m *testing.M) {
 	//# End-to-end tests MUST NOT use envtest.
 	testenv = env.NewWithConfig(envconf.New())
 
-	setup := make([]env.Func, 0, len(clusters))
-	finish := make([]env.Func, 0, len(clusters))
-	for _, name := range clusters {
+	prefix := clusterPrefix()
+	setup := make([]env.Func, 0, len(logicalClusters))
+	finish := make([]env.Func, 0, len(logicalClusters))
+	for _, logical := range logicalClusters {
+		name := prefix + logical
+		clusterNames[logical] = name
 		setup = append(setup, envfuncs.CreateCluster(kind.NewProvider(), name))
 		finish = append(finish, envfuncs.DestroyCluster(name))
 	}
