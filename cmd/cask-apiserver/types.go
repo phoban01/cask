@@ -13,11 +13,16 @@
 // making a zombie holder's late actions rejectable.
 package main
 
-import "encoding/json"
+import (
+	"encoding/json"
 
+	"github.com/phoban01/cask/cmd/cask-apiserver/apis/fleet/v1alpha1"
+)
+
+// The group and version come from the v1alpha1 scheme.
 const (
-	apiGroup    = "fleet.cask.dev"
-	apiVersion  = "v1alpha1"
+	apiGroup    = v1alpha1.GroupName
+	apiVersion  = v1alpha1.Version
 	groupPrefix = "/apis/" + apiGroup + "/" + apiVersion
 )
 
@@ -122,7 +127,9 @@ type WatchEvent struct {
 	Object json.RawMessage `json:"object"`
 }
 
-func deviceTypeMeta() TypeMeta { return TypeMeta{APIVersion: apiGroup + "/" + apiVersion, Kind: "Device"} }
+func deviceTypeMeta() TypeMeta {
+	return TypeMeta{APIVersion: apiGroup + "/" + apiVersion, Kind: "Device"}
+}
 func claimTypeMeta() TypeMeta {
 	return TypeMeta{APIVersion: apiGroup + "/" + apiVersion, Kind: "DeviceClaim"}
 }
