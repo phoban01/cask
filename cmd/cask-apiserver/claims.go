@@ -155,6 +155,10 @@ func (c *claimController) setClaimStatus(ctx context.Context, claim DeviceClaim,
 		return err
 	}
 	if _, err := c.store.update(ctx, "deviceclaims", claim.Name, raw, rv); errors.Is(err, errConflict) {
+		//= docs/spec/fleet.md#3-storage-model
+		//# The extension server MUST re-read an object before it retries a write that returned a conflict.
+		//= docs/spec/fleet.md#3-storage-model
+		//# A retried write MUST be a compare-and-set, never a blind reapplication of a change.
 		return nil // the claim moved (user update / delete); next tick re-reads
 	} else if err != nil {
 		return err
