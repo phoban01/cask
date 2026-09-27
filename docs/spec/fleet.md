@@ -63,6 +63,12 @@ An update MUST use a compare-and-set on the resourceVersion the client supplied.
 
 An update whose compare-and-set fails MUST return a conflict.
 
+A write that returned a conflict MAY have been committed.
+
+The extension server MUST re-read an object before it retries a write that returned a conflict.
+
+A retried write MUST be a compare-and-set, never a blind reapplication of a change.
+
 A delete MUST tombstone the object register before it removes the name from the index register.
 
 An object value MUST NOT exceed 1 MiB.

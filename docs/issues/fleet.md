@@ -954,3 +954,24 @@ accept, and cite the sentence from `update` in `cmd/cask-apiserver/store.go`.
 Files: `docs/spec/fleet.md`, `quint/fleet.qnt`
 
 Done when: `devbox run spec` and `devbox run quint` pass and the new control fails as expected.
+
+## caspaxos: return ErrUnknownOutcome instead of reapplying after a failed accept
+
+labels: quint
+
+Spec: docs/spec/fleet.md#3-storage-model
+> A retried write MUST be a compare-and-set, never a blind reapplication of a change.
+
+`Propose` in `internal/caspaxos/proposer.go` retries after an accept phase
+that reached only a minority. The retry applies the change function again.
+For a non-idempotent change that duplicates the write. `quint/retry.qnt`
+shows this as the `stepBlindRetry` control.
+
+Task: add `ErrUnknownOutcome` to `internal/caspaxos/errors.go`. When an
+accept fails after at least one acceptor accepted, return it instead of
+starting a new round. Callers that only use compare-and-set changes may
+keep retrying; document that on `Propose`.
+
+Files: `internal/caspaxos/proposer.go`, `internal/caspaxos/errors.go`
+
+Done when: `go test -race ./internal/caspaxos/` and `devbox run sim-gate` pass.
