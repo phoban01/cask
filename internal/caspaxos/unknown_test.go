@@ -91,3 +91,47 @@ func TestProposeResolvingRetriesUnlandedWrite(t *testing.T) {
 	}
 }
 
+// slowAccept passes prepares through. Its accepts wait until the phase
+// cancels them, as for a replica that is alive but lagging.
+type slowAccept struct {
+	inner    caspaxos.AcceptorClient
+	released chan struct{}
+}
+
+func (s slowAccept) Prepare(ctx context.Context, key []byte, b caspaxos.Ballot) (caspaxos.PrepareReply, error) {
+	return s.inner.Prepare(ctx, key, b)
+}
+
+func (s slowAccept) Accept(ctx context.Context, _ []byte, _ caspaxos.Ballot, _ []byte) (caspaxos.AcceptReply, error) {
+	<-ctx.Done()
+	close(s.released)
+	return caspaxos.AcceptReply{}, ctx.Err()
+}
+
+// With three acceptors, two rejections end the accept phase while the
+// third is still in flight. That acceptor may still take the value, so
+// Propose must return ErrUnknownOutcome and must not run the change again.
+func TestTwoRejectOneSlowReturnsUnknownOutcome(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A write that returned a conflict MAY have been committed.
+	base := newCluster(3)
+	slow := slowAccept{inner: base[2], released: make(chan struct{})}
+	p := caspaxos.NewProposer(1, []caspaxos.AcceptorClient{
+		acceptNack{base[0]}, acceptNack{base[1]}, slow,
+	})
+
+	calls := 0
+	_, err := p.Propose(context.Background(), []byte("k"), func([]byte) ([]byte, error) {
+		calls++
+		return []byte("v"), nil
+	})
+	if !errors.Is(err, caspaxos.ErrUnknownOutcome) {
+		t.Fatalf("err = %v, want ErrUnknownOutcome", err)
+	}
+	if calls != 1 {
+		t.Fatalf("change ran %d times, want 1", calls)
+	}
+	<-slow.released // the phase cancelled the straggler
+}
+
