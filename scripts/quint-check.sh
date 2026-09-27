@@ -17,7 +17,7 @@ cd "$(dirname "$0")/.."
 SPEC=quint/fleet.qnt
 STEPS=${STEPS:-30}
 SAMPLES=${SAMPLES:-2000}
-INVARIANTS="IndexNeverAhead IndexRepaired SingleHolder FenceBounded NoStaleEffect"
+INVARIANTS="IndexNeverAhead IndexRepaired SingleHolder FenceBounded NoStaleEffect WatchGapFree"
 
 if command -v quint >/dev/null 2>&1; then
   Q=quint
@@ -50,6 +50,7 @@ must_fail stepIndexFirst IndexNeverAhead
 must_fail stepIncrementIndex IndexRepaired
 must_fail stepNoFenceCheck NoStaleEffect
 must_fail stepDeleteIndexFirst IndexNeverAhead
+must_fail stepWatchJump WatchGapFree
 
 RETRY=quint/retry.qnt
 echo "== retry contract: typecheck, witness runs, good step"

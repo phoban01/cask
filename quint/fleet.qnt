@@ -1,5 +1,5 @@
-// fleet.qnt — Quint model of docs/spec/fleet.md sections 3 (storage model)
-// and 5 (claims and fencing).
+// fleet.qnt — Quint model of docs/spec/fleet.md sections 3 (storage model),
+// 4 (list and watch), and 5 (claims and fencing).
 //
 // The model has two clusters and two objects. It is small on purpose so
 // `quint verify` finishes quickly. What it checks:
@@ -12,10 +12,13 @@
 //   FenceBounded      no claim carries a fence the lock has not minted
 //   NoStaleEffect     a receiver never accepts a fence lower than one it
 //                     already accepted (a zombie cannot overwrite a successor)
+//   WatchGapFree      a watch delivers index sequences 1..cursor, in order,
+//                     with no gaps
 //
 // Negative controls (`stepIndexFirst`, `stepIncrementIndex`,
-// `stepNoFenceCheck`, `stepDeleteIndexFirst`) each drop one rule and MUST
-// violate the matching invariant. scripts/quint-check.sh runs both directions.
+// `stepNoFenceCheck`, `stepDeleteIndexFirst`, `stepWatchJump`) each drop one
+// rule and MUST violate the matching invariant. scripts/quint-check.sh runs
+// both directions.
 module fleet {
   pure val NAMES = Set("a", "b")
   pure val CLUSTERS = Set("east", "west")
@@ -34,6 +37,12 @@ module fleet {
   var idxSeq: int                 // index register sequence (the list RV)
   var pending: Set[str]           // object written, index write outstanding
   var dirty: Set[str]             // index write was lost to a crash
+
+  // ---- list and watch (spec §4) -----------------------------------------
+  // One watch that starts at resourceVersion 0. The cursor never passes
+  // idxSeq, so the MAX_SEQ and MAX_FENCE bounds also bound the cursor.
+  var watchCursor: int            // last index sequence the watch delivered
+  var delivered: List[int]        // index sequences delivered, in order
 
   // ---- claims and fencing (spec §5) -------------------------------------
   var holder: str -> Holder       // lock holder per object
@@ -55,6 +64,8 @@ module fleet {
     claimFence' = tuples(CLUSTERS, NAMES).mapBy(p => 0),
     accepted' = NAMES.mapBy(n => 0),
     regressions' = 0,
+    watchCursor' = 0,
+    delivered' = List(),
   }
 
   // ---- §3 actions ---------------------------------------------------------
@@ -70,6 +81,7 @@ module fleet {
     idxEntries' = idxEntries, idxSeq' = idxSeq, dirty' = dirty,
     holder' = holder, fence' = fence, phase' = phase,
     claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
+    watchCursor' = watchCursor, delivered' = delivered,
   }
 
   //= docs/spec/fleet.md#3-storage-model
@@ -89,6 +101,7 @@ module fleet {
       objSeq' = objSeq,
       holder' = holder, fence' = fence, phase' = phase,
       claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
+      watchCursor' = watchCursor, delivered' = delivered,
     }
   }
 
@@ -105,6 +118,7 @@ module fleet {
     idxEntries' = idxEntries, idxSeq' = idxSeq, dirty' = dirty,
     holder' = holder, fence' = fence, phase' = phase,
     claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
+    watchCursor' = watchCursor, delivered' = delivered,
   }
 
   // The process dies between the two writes.
@@ -115,6 +129,7 @@ module fleet {
     objSeq' = objSeq, idxEntries' = idxEntries, idxSeq' = idxSeq,
     holder' = holder, fence' = fence, phase' = phase,
     claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
+    watchCursor' = watchCursor, delivered' = delivered,
   }
 
   //= docs/spec/fleet.md#3-storage-model
@@ -127,6 +142,23 @@ module fleet {
     idxSeq' = idxSeq + 1,
     dirty' = Set(),
     pending' = pending, objSeq' = objSeq,
+    holder' = holder, fence' = fence, phase' = phase,
+    claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
+    watchCursor' = watchCursor, delivered' = delivered,
+  }
+
+  // ---- §4 actions ---------------------------------------------------------
+
+  //= docs/spec/fleet.md#4-list-and-watch
+  //# A watch from a resourceVersion MUST deliver every index change after
+  //# that version, in order, with no gaps.
+  // The watch delivers the next index sequence, one at a time.
+  action deliver = all {
+    watchCursor < idxSeq,
+    watchCursor' = watchCursor + 1,
+    delivered' = delivered.append(watchCursor + 1),
+    objSeq' = objSeq, idxEntries' = idxEntries, idxSeq' = idxSeq,
+    pending' = pending, dirty' = dirty,
     holder' = holder, fence' = fence, phase' = phase,
     claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
   }
@@ -148,6 +180,7 @@ module fleet {
     objSeq' = objSeq, idxEntries' = idxEntries, idxSeq' = idxSeq,
     pending' = pending, dirty' = dirty,
     accepted' = accepted, regressions' = regressions,
+    watchCursor' = watchCursor, delivered' = delivered,
   }
 
   // The holder's session lapses. The holder does not know yet: its claim
@@ -159,6 +192,7 @@ module fleet {
     pending' = pending, dirty' = dirty,
     fence' = fence, phase' = phase, claimFence' = claimFence,
     accepted' = accepted, regressions' = regressions,
+    watchCursor' = watchCursor, delivered' = delivered,
   }
 
   //= docs/spec/fleet.md#5-claims-and-fencing
@@ -172,6 +206,7 @@ module fleet {
     pending' = pending, dirty' = dirty,
     holder' = holder, fence' = fence, claimFence' = claimFence,
     accepted' = accepted, regressions' = regressions,
+    watchCursor' = watchCursor, delivered' = delivered,
   }
 
   //= docs/spec/fleet.md#5-claims-and-fencing
@@ -185,6 +220,7 @@ module fleet {
     pending' = pending, dirty' = dirty,
     fence' = fence, claimFence' = claimFence,
     accepted' = accepted, regressions' = regressions,
+    watchCursor' = watchCursor, delivered' = delivered,
   }
 
   // A Bound claim (possibly a zombie) applies an effect carrying its fence.
@@ -197,6 +233,7 @@ module fleet {
                   accepted.set(n, claimFence.get((c, n)))
                 else accepted,
     regressions' = regressions,
+    watchCursor' = watchCursor, delivered' = delivered,
     objSeq' = objSeq, idxEntries' = idxEntries, idxSeq' = idxSeq,
     pending' = pending, dirty' = dirty,
     holder' = holder, fence' = fence, phase' = phase, claimFence' = claimFence,
@@ -212,7 +249,7 @@ module fleet {
   action anyApplyEffect = { nondet c = oneOf(CLUSTERS) nondet n = oneOf(NAMES) applyEffect(c, n) }
 
   action step = any {
-    anyWriteObject, anyDeleteObject, writeIndex, crash, sweep,
+    anyWriteObject, anyDeleteObject, writeIndex, crash, sweep, deliver,
     anyAcquire, anyExpire, anyObserveLost, anyRelease, anyApplyEffect,
   }
 
@@ -246,7 +283,18 @@ module fleet {
 
   val NoStaleEffect = regressions == 0
 
-  val Safety = IndexNeverAhead and IndexRepaired and SingleHolder and FenceBounded and NoStaleEffect
+  //= docs/spec/fleet.md#4-list-and-watch
+  //# A watch from a resourceVersion MUST deliver every index change after
+  //# that version, in order, with no gaps.
+  // The watch starts at 0, so delivered is exactly 1..watchCursor.
+  val WatchGapFree = and {
+    watchCursor <= idxSeq,
+    delivered.length() == watchCursor,
+    delivered.indices().forall(i => delivered[i] == i + 1),
+  }
+
+  val Safety = IndexNeverAhead and IndexRepaired and SingleHolder and FenceBounded
+    and NoStaleEffect and WatchGapFree
 
   // ---- negative controls: each drops one rule and must fail ------------------
 
@@ -260,6 +308,7 @@ module fleet {
     objSeq' = objSeq, dirty' = dirty,
     holder' = holder, fence' = fence, phase' = phase,
     claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
+    watchCursor' = watchCursor, delivered' = delivered,
   }
   action anyWriteIndexFirst = { nondet n = oneOf(NAMES) writeIndexFirst(n) }
   action stepIndexFirst = any { anyWriteIndexFirst, writeIndex, crash, sweep }
@@ -277,6 +326,7 @@ module fleet {
       objSeq' = objSeq,
       holder' = holder, fence' = fence, phase' = phase,
       claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
+      watchCursor' = watchCursor, delivered' = delivered,
     }
   }
   action stepIncrementIndex = any { anyWriteObject, writeIndexIncrement, crash }
@@ -286,6 +336,7 @@ module fleet {
     phase.get((c, n)) == Bound,
     accepted' = accepted.set(n, claimFence.get((c, n))),
     regressions' = if (claimFence.get((c, n)) < accepted.get(n)) regressions + 1 else regressions,
+    watchCursor' = watchCursor, delivered' = delivered,
     objSeq' = objSeq, idxEntries' = idxEntries, idxSeq' = idxSeq,
     pending' = pending, dirty' = dirty,
     holder' = holder, fence' = fence, phase' = phase, claimFence' = claimFence,
@@ -306,9 +357,23 @@ module fleet {
     objSeq' = objSeq, dirty' = dirty,
     holder' = holder, fence' = fence, phase' = phase,
     claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
+    watchCursor' = watchCursor, delivered' = delivered,
   }
   action anyRemoveIndexFirst = { nondet n = oneOf(NAMES) removeIndexFirst(n) }
   action stepDeleteIndexFirst = any { anyWriteObject, writeIndex, anyRemoveIndexFirst, crash, sweep }
+
+  // Bug 5: the watch jumps to the latest index sequence and skips the
+  // changes in between.
+  action deliverJump = all {
+    watchCursor < idxSeq,
+    watchCursor' = idxSeq,
+    delivered' = delivered.append(idxSeq),
+    objSeq' = objSeq, idxEntries' = idxEntries, idxSeq' = idxSeq,
+    pending' = pending, dirty' = dirty,
+    holder' = holder, fence' = fence, phase' = phase,
+    claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
+  }
+  action stepWatchJump = any { anyWriteObject, writeIndex, deliverJump }
 
   // ---- witness runs (`quint test`) ---------------------------------------------
 
@@ -358,4 +423,15 @@ module fleet {
       .then(writeObject("a")).then(writeIndex)
       .then(deleteObject("a")).then(writeIndex)
       .expect(idxEntries.get("a") == TOMB and idxSeq == 2 and pending == Set())
+
+  // A watch that falls behind catches up one index change at a time,
+  // including the sweep's repair and the delete's index removal.
+  run watchDeliversEveryChangeTest =
+    init
+      .then(writeObject("a")).then(writeIndex)
+      .then(writeObject("b")).then(crash).then(sweep)
+      .then(deleteObject("a")).then(writeIndex)
+      .expect(idxSeq == 3 and watchCursor == 0 and WatchGapFree)
+      .then(deliver).then(deliver).then(deliver)
+      .expect(watchCursor == 3 and delivered == [1, 2, 3] and WatchGapFree)
 }
