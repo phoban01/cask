@@ -49,6 +49,7 @@ must_fail() {
 must_fail stepIndexFirst IndexNeverAhead
 must_fail stepIncrementIndex IndexRepaired
 must_fail stepNoFenceCheck NoStaleEffect
+must_fail stepDeleteIndexFirst IndexNeverAhead
 
 RETRY=quint/retry.qnt
 echo "== retry contract: typecheck, witness runs, good step"
