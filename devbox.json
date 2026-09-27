@@ -35,7 +35,7 @@
         "duvet report --html .duvet/report.html"
       ],
       "duvet-ci":      ["duvet report --ci"],
-      "e2e":           ["go test ./test/e2e -timeout 30m"],
+      "e2e":           ["go test -tags e2e ./test/e2e -timeout 30m"],
       "issues":        ["scripts/file-issues.sh docs/issues/fleet.md"],
       "verify":        [
         "go test -race ./...",
