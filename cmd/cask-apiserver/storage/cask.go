@@ -240,11 +240,6 @@ func (s *Store) Get(ctx context.Context, key string, opts apistorage.GetOptions,
 	return s.decode(key, v.Value, v.Seq, out)
 }
 
-// GetList returns ErrNotImplemented.
-func (*Store) GetList(_ context.Context, _ string, _ apistorage.ListOptions, _ runtime.Object) error {
-	return ErrNotImplemented
-}
-
 // newLike returns a new, empty object of the same type as obj.
 func newLike(obj runtime.Object) runtime.Object {
 	return reflect.New(reflect.TypeOf(obj).Elem()).Interface().(runtime.Object)

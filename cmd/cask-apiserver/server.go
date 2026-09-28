@@ -237,10 +237,11 @@ func (s *apiServer) serveDelete(w http.ResponseWriter, r *http.Request, resource
 
 func (s *apiServer) serveList(w http.ResponseWriter, r *http.Request, resource string) {
 	// The list reads the index and then each object at the sequence the
-	// index recorded. The list does not report the index sequence yet.
+	// index recorded. This plain mux does not report the index sequence.
+	// storage.Store.GetList does; issue #38 serves lists through it.
 	//= docs/spec/fleet.md#4-list-and-watch
 	//= type=exception
-	//= reason=the list reports no index sequence; tracked in issue #33
+	//= reason=the plain mux list reports no index sequence; tracked in issue #38
 	//# A list MUST return every object that the index register names at the index sequence the list reports.
 	_, raws, rvs, err := s.store.list(r.Context(), resource)
 	if err != nil {
