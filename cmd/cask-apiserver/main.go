@@ -30,18 +30,19 @@ func main() {
 		return
 	}
 	var (
-		listen  = flag.String("listen", ":9443", "address to serve the API group on")
-		cluster = flag.String("cluster", "", "this cluster's name (stamped on claims it manages); required")
-		boot    = flag.Bool("bootstrap", false, "found a new fleet as its single founding member (exactly one apiserver in a fleet; every other one joins with --seed)")
-		seed    = flag.String("seed", "", "comma-separated consensus addresses of live fleet members to join through, e.g. 10.0.0.7:9444")
-		peers   = flag.String("cask-peers", "", "DEPRECATED, tests only: comma-separated static consensus addresses; use --bootstrap or --seed")
-		consLn  = flag.String("listen-consensus", "", "address to serve the EMBEDDED cask acceptor and the roster endpoints on; required with --bootstrap and --seed")
-		adv     = flag.String("advertise-consensus", "", "this node's consensus address as peers reach it; required with --listen-consensus")
-		self    = flag.Uint64("id", 0, "node id (unique per apiserver); required with --bootstrap, --seed, and --cask-peers")
-		dataDir = flag.String("data-dir", "", "directory for durable consensus state (Pebble); empty = in-memory (an embedded acceptor that restarts empty forgets its promises — demo only)")
-		sweepIv = flag.Duration("index-sweep-interval", time.Minute, "how often to repair index entries that a crash left behind (each wait adds up to 10% jitter)")
-		impFile = flag.String("import-file", "", "cask-export/v1 file to import before serving (see cask-migrate export); safe to repeat")
-		selfTLS = flag.Bool("self-signed-tls", false, "serve HTTPS with an in-memory self-signed cert (required for k8s API aggregation; pair with insecureSkipTLSVerify on the APIService)")
+		listen   = flag.String("listen", ":9443", "address to serve the API group on")
+		cluster  = flag.String("cluster", "", "this cluster's name (stamped on claims it manages); required")
+		boot     = flag.Bool("bootstrap", false, "found a new fleet as its single founding member (exactly one apiserver in a fleet; every other one joins with --seed)")
+		seed     = flag.String("seed", "", "comma-separated consensus addresses of live fleet members to join through, e.g. 10.0.0.7:9444")
+		peers    = flag.String("cask-peers", "", "DEPRECATED, tests only: comma-separated static consensus addresses; use --bootstrap or --seed")
+		consLn   = flag.String("listen-consensus", "", "address to serve the EMBEDDED cask acceptor and the roster endpoints on; required with --bootstrap and --seed")
+		adv      = flag.String("advertise-consensus", "", "this node's consensus address as peers reach it; required with --listen-consensus")
+		self     = flag.Uint64("id", 0, "node id (unique per apiserver); required with --bootstrap, --seed, and --cask-peers")
+		dataDir  = flag.String("data-dir", "", "directory for durable consensus state (Pebble); empty = in-memory (an embedded acceptor that restarts empty forgets its promises — demo only)")
+		sweepIv  = flag.Duration("index-sweep-interval", time.Minute, "how often to repair index entries that a crash left behind (each wait adds up to 10% jitter)")
+		impFile  = flag.String("import-file", "", "cask-export/v1 file to import before serving (see cask-migrate export); safe to repeat")
+		impGrace = flag.Duration("import-grace", defaultImportGrace, "extra session time for each Bound claim that the import restores; it covers the import and the start of the claim's controller")
+		selfTLS  = flag.Bool("self-signed-tls", false, "serve HTTPS with an in-memory self-signed cert (required for k8s API aggregation; pair with insecureSkipTLSVerify on the APIService)")
 	)
 	var consensusFiles mtls.Files
 	consensusFiles.Register(flag.CommandLine)
@@ -236,7 +237,7 @@ func main() {
 	kv := mvcc.New(prop, clock, *self)
 	sessions := lease.NewSessions(prop, func() int64 { return time.Now().UnixNano() })
 	locks := lease.NewLocks(prop, sessions)
-	fs := &fleetStore{kv: kv, sessions: sessions, locks: locks}
+	fs := &fleetStore{kv: kv, sessions: sessions, locks: locks, importGrace: *impGrace}
 
 	// Repair the index before the server serves, so no list misses an
 	// object whose index write a crash lost.
@@ -257,7 +258,7 @@ func main() {
 	// other write, before the server listens. No client write on this
 	// cluster can race it, and it needs no new endpoint.
 	if *impFile != "" {
-		if err := importFile(ctx, kv, *impFile, log); err != nil {
+		if err := importFile(ctx, kv, fs, *impFile, log); err != nil {
 			log.Error("import", "file", *impFile, "err", err)
 			os.Exit(1)
 		}
@@ -345,7 +346,7 @@ func splitCSV(s string) []string {
 
 // importFile reads a cask-migrate export file and imports it into kv. It
 // writes nothing when the file is invalid or conflicts with cask.
-func importFile(ctx context.Context, kv *mvcc.KV, path string, log *slog.Logger) error {
+func importFile(ctx context.Context, kv *mvcc.KV, locks migrate.Locks, path string, log *slog.Logger) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -355,11 +356,15 @@ func importFile(ctx context.Context, kv *mvcc.KV, path string, log *slog.Logger)
 	if err != nil {
 		return err
 	}
-	res, err := migrate.Import(ctx, kv, h, objects)
+	res, err := migrate.Import(ctx, kv, locks, h, objects)
 	if err != nil {
 		return err
 	}
 	log.Info("import done", "group", h.Group, "revision", h.Revision,
-		"written", res.Written, "unchanged", res.Unchanged)
+		"written", res.Written, "unchanged", res.Unchanged,
+		"renewed", res.Renewed, "lapsed", res.Lapsed)
+	if res.Lapsed > 0 {
+		log.Warn("import: restored claim sessions lapsed before the import ended; those claims go to Lost", "lapsed", res.Lapsed)
+	}
 	return nil
 }

@@ -38,6 +38,12 @@ type Result struct {
 	// Unchanged is the number of objects that cask already held, equal
 	// to the file.
 	Unchanged int
+	// Renewed is the number of restored claim sessions that Import
+	// renewed after the marker.
+	Renewed int
+	// Lapsed is the number of restored claim sessions that lapsed before
+	// Import could renew them. Their claims go to Lost.
+	Lapsed int
 }
 
 // item is one object of the file with its storage form.
@@ -66,8 +72,20 @@ type item struct {
 // Import is idempotent. An object that cask already holds, equal to the
 // file, is not written again. Its index entry is written only when a
 // crash left it out. A second run with the same file changes nothing.
-func Import(ctx context.Context, kv *mvcc.KV, h Header, objects []*unstructured.Unstructured) (Result, error) {
-	items, err := prepare(h, objects)
+//
+// Import carries the claim locks across the cutover through locks. For
+// each device, it seeds the lock at the highest fence that the file
+// records for it, so the next acquisition mints above every fence that a
+// receiver can hold. A Bound claim that alone holds that fence stays
+// Bound: its session is granted and it holds the lock. Import writes
+// every other Bound claim as Lost. The seeds go before the first object
+// write, so no controller sees a Bound claim without its lock. After the
+// marker, Import renews each restored session.
+func Import(ctx context.Context, kv *mvcc.KV, locks Locks, h Header, objects []*unstructured.Unstructured) (Result, error) {
+	if locks == nil {
+		return Result{}, errors.New("migrate: Import needs Locks to carry the claim fences")
+	}
+	items, seeds, err := prepare(h, objects)
 	if err != nil {
 		return Result{}, err
 	}
@@ -95,6 +113,18 @@ func Import(ctx context.Context, kv *mvcc.KV, h Header, objects []*unstructured.
 		return Result{}, errors.Join(errs...)
 	}
 
+	// A complete import handed the locks to the claim controllers. A
+	// second run leaves them alone.
+	if !found {
+		//= docs/spec/fleet.md#7-migration
+		//# The import MUST grant a restored claim's session and seed its lock before it writes the claim.
+		for _, s := range seeds {
+			if err := locks.Seed(ctx, s); err != nil {
+				return Result{}, fmt.Errorf("migrate: seed the lock of device %q at fence %d: %w", s.Device, s.Fence, err)
+			}
+		}
+	}
+
 	var res Result
 	for _, it := range items {
 		wrote, err := put(ctx, kv, it)
@@ -113,24 +143,52 @@ func Import(ctx context.Context, kv *mvcc.KV, h Header, objects []*unstructured.
 		if _, err := kv.CreateAt(ctx, MarkerKey, 0, marker); err != nil {
 			return res, fmt.Errorf("migrate: write the import marker: %w", err)
 		}
+		// The session TTL of a restored claim started at its seed. The
+		// object writes took some of it. Renew now, so the controller of
+		// the claim's cluster gets the whole TTL after the import ends.
+		// A session that lapsed during the import stays lapsed: its claim
+		// goes to Lost, and its fence stays in the lock.
+		for _, s := range seeds {
+			if s.Claim == "" {
+				continue
+			}
+			//= docs/spec/fleet.md#7-migration
+			//# The import MUST renew each restored claim's session after it writes the import marker.
+			if err := locks.Renew(ctx, s); err != nil {
+				res.Lapsed++
+			} else {
+				res.Renewed++
+			}
+		}
 	}
 	return res, nil
 }
 
 // prepare checks every object of the file and builds its stored form. It
 // maps each object to its resource by the header counts, which Read
-// checked.
-func prepare(h Header, objects []*unstructured.Unstructured) ([]item, error) {
+// checked. It also plans the lock seeds. A Bound claim that keeps no lock
+// is Lost in its stored form.
+func prepare(h Header, objects []*unstructured.Unstructured) ([]item, []LockSeed, error) {
 	if h.Format != Format {
-		return nil, fmt.Errorf("migrate: format %q is not %q", h.Format, Format)
+		return nil, nil, fmt.Errorf("migrate: format %q is not %q", h.Format, Format)
 	}
 	total := 0
 	for _, rh := range h.Resources {
 		total += rh.Count
 	}
 	if total != len(objects) {
-		return nil, fmt.Errorf("migrate: the header counts %d objects, got %d", total, len(objects))
+		return nil, nil, fmt.Errorf("migrate: the header counts %d objects, got %d", total, len(objects))
 	}
+	// planFences changes claim status, so it works on copies.
+	copies := make([]*unstructured.Unstructured, len(objects))
+	for i, o := range objects {
+		copies[i] = o.DeepCopy()
+	}
+	seeds, err := planFences(copies)
+	if err != nil {
+		return nil, nil, err
+	}
+	objects = copies
 	var (
 		items []item
 		errs  []error
@@ -155,9 +213,9 @@ func prepare(h Header, objects []*unstructured.Unstructured) ([]item, error) {
 		}
 	}
 	if len(errs) > 0 {
-		return nil, errors.Join(errs...)
+		return nil, nil, errors.Join(errs...)
 	}
-	return items, nil
+	return items, seeds, nil
 }
 
 func prepareOne(resource string, o *unstructured.Unstructured) (item, error) {
