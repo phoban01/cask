@@ -12,6 +12,9 @@
 // The file keeps every field, including metadata.uid,
 // metadata.creationTimestamp, and status. The same objects at the same
 // revision give the same bytes.
+//
+// Import writes the objects of an export file into cask. The API server
+// runs it before it serves, with --import-file.
 package migrate
 
 import (
