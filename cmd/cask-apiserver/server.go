@@ -172,7 +172,7 @@ func (s *apiServer) serveCreate(w http.ResponseWriter, r *http.Request, resource
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	rv, err := s.store.create(r.Context(), resource, name, raw)
+	raw, rv, err := s.store.create(r.Context(), resource, name, raw)
 	if err != nil {
 		httpStoreErr(w, err)
 		return
@@ -203,7 +203,7 @@ func (s *apiServer) serveUpdate(w http.ResponseWriter, r *http.Request, resource
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	rv, err := s.store.update(r.Context(), resource, name, raw, expect)
+	raw, rv, err := s.store.update(r.Context(), resource, name, raw, expect)
 	if err != nil {
 		httpStoreErr(w, err)
 		return

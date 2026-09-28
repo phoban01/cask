@@ -10,6 +10,10 @@ target = "docs/spec/fleet.md#4-list-and-watch"
 # 
 # Each watch event MUST carry the object at the sequence the index recorded.
 # 
+# Every resourceVersion that a get, a list, or a watch event reports MUST be an index sequence.
+# 
+# A watch that resumes from the resourceVersion of any event MUST NOT skip or replay a change.
+# 
 # Watch events SHOULD be pushed from the index register's change feed rather than polled.
 
 [[spec]]
@@ -34,6 +38,18 @@ A watch whose start version is compacted MUST end with 410 Gone.
 level = "MUST"
 quote = '''
 Each watch event MUST carry the object at the sequence the index recorded.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Every resourceVersion that a get, a list, or a watch event reports MUST be an index sequence.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A watch that resumes from the resourceVersion of any event MUST NOT skip or replay a change.
 '''
 
 [[spec]]

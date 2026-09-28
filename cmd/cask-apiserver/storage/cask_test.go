@@ -65,25 +65,52 @@ func rvOf(t *testing.T, obj *v1alpha1.Device) uint64 {
 	return rv
 }
 
-func TestGetReturnsObjectAtRegisterSequence(t *testing.T) {
+func TestGetReturnsIndexedVersionAtIndexSequence(t *testing.T) {
 	//= docs/spec/fleet.md#3-storage-model
 	//= type=test
-	//# An object's resourceVersion MUST be the sequence of its object register.
+	//# An object's resourceVersion MUST be the index sequence at which the index register recorded that object version.
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A get MUST serve an object only once the index register records it.
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A get MUST read the object at the object register sequence that the index entry records.
+	//= docs/spec/fleet.md#4-list-and-watch
+	//= type=test
+	//# Every resourceVersion that a get, a list, or a watch event reports MUST be an index sequence.
 	ctx := context.Background()
 	s := newTestStore(t)
 
+	putRaw(t, s, device("gpu-1", "a100"))
 	putRaw(t, s, device("gpu-0", "a100"))
 	seq := putRaw(t, s, device("gpu-0", "h100"))
+
+	// No index write yet: the object is not served.
+	if err := s.Get(ctx, keyPrefix+"gpu-0", apistorage.GetOptions{}, &v1alpha1.Device{}); !apistorage.IsNotFound(err) {
+		t.Fatalf("unindexed get: err = %v, want not found", err)
+	}
+
+	// gpu-1 goes in at index sequence 1, gpu-0 at 2.
+	if _, _, err := WriteIndex(ctx, s.kv, s.resource, "gpu-1"); err != nil {
+		t.Fatal(err)
+	}
+	e, live, err := WriteIndex(ctx, s.kv, s.resource, "gpu-0")
+	if err != nil || !live || e != (Entry{Obj: seq, Idx: 2}) {
+		t.Fatalf("WriteIndex = %+v live=%v err=%v, want {Obj:%d Idx:2}", e, live, err, seq)
+	}
+
+	// A later object write that the index does not record is not served.
+	putRaw(t, s, device("gpu-0", "b200"))
 
 	got := &v1alpha1.Device{}
 	if err := s.Get(ctx, keyPrefix+"gpu-0", apistorage.GetOptions{}, got); err != nil {
 		t.Fatal(err)
 	}
-	if rvOf(t, got) != seq {
-		t.Fatalf("resourceVersion = %s, want register sequence %d", got.ResourceVersion, seq)
+	if rvOf(t, got) != 2 {
+		t.Fatalf("resourceVersion = %s, want index sequence 2, not object sequence %d", got.ResourceVersion, seq)
 	}
 	if got.Name != "gpu-0" || got.Spec.Model != "h100" {
-		t.Fatalf("got %s/%s, want gpu-0/h100", got.Name, got.Spec.Model)
+		t.Fatalf("got %s/%s, want the indexed version gpu-0/h100", got.Name, got.Spec.Model)
 	}
 }
 
@@ -115,16 +142,16 @@ func TestGetNotFound(t *testing.T) {
 	}
 }
 
-// indexEntry returns the sequence the index records for name, and whether
-// the index names it.
-func indexEntry(t *testing.T, s *Store, name string) (uint64, bool) {
+// indexEntry returns the entry the index holds for name, and whether the
+// index names it.
+func indexEntry(t *testing.T, s *Store, name string) (Entry, bool) {
 	t.Helper()
 	idx, err := ReadIndex(context.Background(), s.kv, s.resource)
 	if err != nil {
 		t.Fatal(err)
 	}
-	seq, ok := idx.Entries[name]
-	return seq, ok
+	e, ok := idx.Entries[name]
+	return e, ok
 }
 
 func TestCreateIsCreateOnly(t *testing.T) {
@@ -159,6 +186,9 @@ func TestCreateWritesObjectThenIndex(t *testing.T) {
 	//= docs/spec/fleet.md#3-storage-model
 	//= type=test
 	//# A mutation MUST write the object register before the index register.
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# Each index entry MUST record both the object register sequence and the index sequence at which the index register recorded it.
 	ctx := context.Background()
 	s := newTestStore(t)
 
@@ -166,11 +196,13 @@ func TestCreateWritesObjectThenIndex(t *testing.T) {
 	if err := s.Create(ctx, keyPrefix+"gpu-0", device("gpu-0", "a100"), out, 0); err != nil {
 		t.Fatal(err)
 	}
-	if seq, ok := indexEntry(t, s, "gpu-0"); !ok || seq != rvOf(t, out) {
-		t.Fatalf("index entry = %d (named %v), want %s", seq, ok, out.ResourceVersion)
+	if e, ok := indexEntry(t, s, "gpu-0"); !ok || e != (Entry{Obj: 1, Idx: rvOf(t, out)}) {
+		t.Fatalf("index entry = %+v (named %v), want {Obj:1 Idx:%s}", e, ok, out.ResourceVersion)
 	}
 
-	// A create over a tombstone succeeds at a higher sequence.
+	// A create over a tombstone succeeds at a higher object sequence. The
+	// tombstone never reached the index, so the create is the second
+	// index write.
 	if _, err := s.kv.Delete(ctx, ObjectKey("devices", "gpu-0")); err != nil {
 		t.Fatal(err)
 	}
@@ -178,11 +210,11 @@ func TestCreateWritesObjectThenIndex(t *testing.T) {
 	if err := s.Create(ctx, keyPrefix+"gpu-0", device("gpu-0", "h100"), again, 0); err != nil {
 		t.Fatalf("create over tombstone: %v", err)
 	}
-	if rvOf(t, again) != 3 {
-		t.Fatalf("resourceVersion = %s, want 3 (create, tombstone, create)", again.ResourceVersion)
+	if rvOf(t, again) != 2 {
+		t.Fatalf("resourceVersion = %s, want index sequence 2", again.ResourceVersion)
 	}
-	if seq, _ := indexEntry(t, s, "gpu-0"); seq != 3 {
-		t.Fatalf("index entry = %d, want 3", seq)
+	if e, _ := indexEntry(t, s, "gpu-0"); e != (Entry{Obj: 3, Idx: 2}) {
+		t.Fatalf("index entry = %+v, want {Obj:3 Idx:2} (create, tombstone, create)", e)
 	}
 }
 

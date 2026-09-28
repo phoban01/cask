@@ -65,10 +65,10 @@ func Sweep(ctx context.Context, kv *mvcc.KV, resource string, list KeyLister) (i
 			continue
 		}
 		entry, indexed := idx.Entries[name]
-		if (live && indexed && entry == seq) || (!live && !indexed) {
+		if (live && indexed && entry.Obj == seq) || (!live && !indexed) {
 			continue
 		}
-		if err := WriteIndex(ctx, kv, resource, name); err != nil {
+		if _, _, err := WriteIndex(ctx, kv, resource, name); err != nil {
 			errs = append(errs, fmt.Errorf("%s %q: %w", resource, name, err))
 			continue
 		}

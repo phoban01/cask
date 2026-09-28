@@ -24,8 +24,8 @@ func TestDeleteTombstonesThenRemovesIndexEntry(t *testing.T) {
 	if err := s.Delete(ctx, keyPrefix+"gpu-0", out, nil, apistorage.ValidateAllObjectFunc, nil, apistorage.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if out.Name != "gpu-0" || out.Spec.Model != "a100" || rvOf(t, out) != 2 {
-		t.Fatalf("out = %s/%s rv %s, want the deleted gpu-0/a100 at the tombstone sequence 2",
+	if out.Name != "gpu-0" || out.Spec.Model != "a100" || rvOf(t, out) != 3 {
+		t.Fatalf("out = %s/%s rv %s, want the deleted gpu-0/a100 at the removal index sequence 3",
 			out.Name, out.Spec.Model, out.ResourceVersion)
 	}
 
@@ -121,7 +121,7 @@ func TestDeleteRereadsAfterConflict(t *testing.T) {
 		t.Fatalf("validateDeletion saw resourceVersions %v, want [1 2]", seen)
 	}
 	if out.Spec.Model != "h100" || rvOf(t, out) != 3 {
-		t.Fatalf("out = %s rv %s, want the fresh h100 at tombstone sequence 3", out.Spec.Model, out.ResourceVersion)
+		t.Fatalf("out = %s rv %s, want the fresh h100 at removal index sequence 3", out.Spec.Model, out.ResourceVersion)
 	}
 	if _, ok := indexEntry(t, west, "gpu-0"); ok {
 		t.Fatal("index still names the deleted object")

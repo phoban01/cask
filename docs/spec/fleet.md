@@ -43,7 +43,15 @@ Each object MUST be stored in one cask register keyed by resource type and name.
 
 Each resource type MUST have one index register that maps every object name to that object's latest sequence.
 
-An object's resourceVersion MUST be the sequence of its object register.
+An object's resourceVersion MUST be the index sequence at which the index register recorded that object version.
+
+Each index entry MUST record both the object register sequence and the index sequence at which the index register recorded it.
+
+A get MUST serve an object only once the index register records it.
+
+A get MUST read the object at the object register sequence that the index entry records.
+
+A resourceVersion precondition MUST be checked against the index sequence of the object's index entry.
 
 A list's resourceVersion MUST be the sequence of the index register.
 
@@ -82,6 +90,10 @@ A watch from a resourceVersion MUST deliver every index change after that versio
 A watch whose start version is compacted MUST end with 410 Gone.
 
 Each watch event MUST carry the object at the sequence the index recorded.
+
+Every resourceVersion that a get, a list, or a watch event reports MUST be an index sequence.
+
+A watch that resumes from the resourceVersion of any event MUST NOT skip or replay a change.
 
 Watch events SHOULD be pushed from the index register's change feed rather than polled.
 

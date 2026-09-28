@@ -14,21 +14,28 @@
 //                     already accepted (a zombie cannot overwrite a successor)
 //   WatchGapFree      a watch delivers index sequences 1..cursor, in order,
 //                     with no gaps
+//   ObservedRVIsWatchPosition
+//                     every resourceVersion a client observes (get, list,
+//                     watch event) is an index sequence at or below idxSeq,
+//                     and the index at that sequence holds the object
+//                     version the client saw, so a watch resumed from it
+//                     neither skips nor replays a change of that object
 //
 // Negative controls (`stepIndexFirst`, `stepIncrementIndex`,
 // `stepNoFenceCheck`, `stepDeleteIndexFirst`, `stepWatchJump`,
-// `stepReacquireAnyone`) each drop one rule and MUST violate the matching
-// invariant. scripts/quint-check.sh runs
-// both directions.
+// `stepReacquireAnyone`, `stepObjectSeqRV`) each drop one rule and MUST
+// violate the matching invariant. scripts/quint-check.sh runs both
+// directions.
 //
 // Gate checks, read by scripts/quint-check.sh:
-// quint-check: invariants=IndexNeverAhead,IndexRepaired,SingleHolder,FenceBounded,NoStaleEffect,WatchGapFree
+// quint-check: invariants=IndexNeverAhead,IndexRepaired,SingleHolder,FenceBounded,NoStaleEffect,WatchGapFree,ObservedRVIsWatchPosition
 // quint-check: control=stepIndexFirst:IndexNeverAhead
 // quint-check: control=stepIncrementIndex:IndexRepaired
 // quint-check: control=stepNoFenceCheck:NoStaleEffect
 // quint-check: control=stepDeleteIndexFirst:IndexNeverAhead
 // quint-check: control=stepWatchJump:WatchGapFree
 // quint-check: control=stepReacquireAnyone:SingleHolder
+// quint-check: control=stepObjectSeqRV:ObservedRVIsWatchPosition
 // quint-check: verify-steps=12
 module fleet {
   pure val NAMES = Set("a", "b")
@@ -48,6 +55,17 @@ module fleet {
   var idxSeq: int                 // index register sequence (the list RV)
   var pending: Set[str]           // object written, index write outstanding
   var dirty: Set[str]             // index write was lost to a crash
+  // idxHist[k] is the index register at index sequence k. Each entry
+  // holds both numbers: (object register sequence, index sequence at
+  // which the index recorded it). idxHist[idxSeq] is the current index.
+  var idxHist: List[str -> (int, int)]
+  // The (name, object sequence seen, resourceVersion reported) triples
+  // that a client observed in the last step, through a get, a list, or a
+  // watch event. Only the last step's observations are kept: idxHist only
+  // grows, so an observation that is a watch position when it is made
+  // stays one. Checking each observation in the state where it is made
+  // therefore checks all of them, and keeps `quint verify` fast.
+  var observed: Set[(str, int, int)]
 
   // ---- list and watch (spec §4) -----------------------------------------
   // One watch that starts at resourceVersion 0. The cursor never passes
@@ -77,6 +95,18 @@ module fleet {
     regressions' = 0,
     watchCursor' = 0,
     delivered' = List(),
+    idxHist' = [NAMES.mapBy(n => (0, 0))],
+    observed' = Set(),
+  }
+
+  // record appends the index version that holds entries. An entry whose
+  // object sequence changed gets the new index sequence. An entry that
+  // did not change keeps the index sequence that recorded it.
+  pure def record(hist: List[str -> (int, int)], entries: str -> int): List[str -> (int, int)] = {
+    val prev = hist[hist.length() - 1]
+    val k = hist.length()
+    hist.append(NAMES.mapBy(m =>
+      if (prev.get(m)._1 == entries.get(m)) prev.get(m) else (entries.get(m), k)))
   }
 
   // ---- §3 actions ---------------------------------------------------------
@@ -94,6 +124,7 @@ module fleet {
     holder' = holder, fence' = fence, phase' = phase,
     claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
     watchCursor' = watchCursor, delivered' = delivered,
+    idxHist' = idxHist, observed' = Set(),
   }
 
   //= docs/spec/fleet.md#3-storage-model
@@ -103,18 +134,25 @@ module fleet {
   //# sequence.
   // For a tombstoned object the current sequence is TOMB, so this same
   // write is the follow-up index removal of a delete.
+  //= docs/spec/fleet.md#3-storage-model
+  //= type=implication
+  //# Each index entry MUST record both the object register sequence and
+  //# the index sequence at which the index register recorded it.
   action writeIndex = {
     nondet n = oneOf(NAMES)
+    val entries = idxEntries.set(n, objSeq.get(n))
     all {
       pending.contains(n),
-      idxEntries' = idxEntries.set(n, objSeq.get(n)),
+      idxEntries' = entries,
       idxSeq' = idxSeq + 1,
+      idxHist' = record(idxHist, entries),
       pending' = Set(),
       dirty' = dirty.exclude(Set(n)),
       objSeq' = objSeq,
       holder' = holder, fence' = fence, phase' = phase,
       claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
       watchCursor' = watchCursor, delivered' = delivered,
+      observed' = Set(),
     }
   }
 
@@ -133,6 +171,7 @@ module fleet {
     holder' = holder, fence' = fence, phase' = phase,
     claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
     watchCursor' = watchCursor, delivered' = delivered,
+    idxHist' = idxHist, observed' = Set(),
   }
 
   // The process dies between the two writes.
@@ -144,22 +183,28 @@ module fleet {
     holder' = holder, fence' = fence, phase' = phase,
     claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
     watchCursor' = watchCursor, delivered' = delivered,
+    idxHist' = idxHist, observed' = Set(),
   }
 
   //= docs/spec/fleet.md#3-storage-model
   //= type=implication
   //# The extension server MUST reconcile the index register against the
   //# object registers at startup.
-  action sweep = all {
-    dirty != Set(),
-    pending == Set(),
-    idxEntries' = NAMES.mapBy(n => if (dirty.contains(n)) objSeq.get(n) else idxEntries.get(n)),
-    idxSeq' = idxSeq + 1,
-    dirty' = Set(),
-    pending' = pending, objSeq' = objSeq,
-    holder' = holder, fence' = fence, phase' = phase,
-    claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
-    watchCursor' = watchCursor, delivered' = delivered,
+  action sweep = {
+    val entries = NAMES.mapBy(n => if (dirty.contains(n)) objSeq.get(n) else idxEntries.get(n))
+    all {
+      dirty != Set(),
+      pending == Set(),
+      idxEntries' = entries,
+      idxSeq' = idxSeq + 1,
+      idxHist' = record(idxHist, entries),
+      dirty' = Set(),
+      pending' = pending, objSeq' = objSeq,
+      holder' = holder, fence' = fence, phase' = phase,
+      claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
+      watchCursor' = watchCursor, delivered' = delivered,
+      observed' = Set(),
+    }
   }
 
   // ---- §4 actions ---------------------------------------------------------
@@ -169,14 +214,69 @@ module fleet {
   //# A watch from a resourceVersion MUST deliver every index change after
   //# that version, in order, with no gaps.
   // The watch delivers the next index sequence, one at a time.
-  action deliver = all {
-    watchCursor < idxSeq,
-    watchCursor' = watchCursor + 1,
-    delivered' = delivered.append(watchCursor + 1),
-    objSeq' = objSeq, idxEntries' = idxEntries, idxSeq' = idxSeq,
-    pending' = pending, dirty' = dirty,
-    holder' = holder, fence' = fence, phase' = phase,
-    claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
+  // Each name that the step changed gives one event. The event reports the
+  // index sequence of the entry, so a removal reports the removal step.
+  //= docs/spec/fleet.md#4-list-and-watch
+  //= type=implication
+  //# Each watch event MUST carry the object at the sequence the index
+  //# recorded.
+  action deliver = {
+    val k = watchCursor + 1
+    all {
+      watchCursor < idxSeq,
+      watchCursor' = k,
+      delivered' = delivered.append(k),
+      observed' = (
+        NAMES.filter(n => idxHist[k].get(n)._1 != idxHist[k - 1].get(n)._1)
+          .map(n => (n, idxHist[k].get(n)._1, idxHist[k].get(n)._2))),
+      objSeq' = objSeq, idxEntries' = idxEntries, idxSeq' = idxSeq,
+      pending' = pending, dirty' = dirty,
+      holder' = holder, fence' = fence, phase' = phase,
+      claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
+      idxHist' = idxHist,
+    }
+  }
+
+  // A get reads the index entry, then the object at the object sequence
+  // the entry records. It reports the entry's index sequence.
+  //= docs/spec/fleet.md#3-storage-model
+  //= type=implication
+  //# A get MUST serve an object only once the index register records it.
+  //= docs/spec/fleet.md#3-storage-model
+  //= type=implication
+  //# A get MUST read the object at the object register sequence that the
+  //# index entry records.
+  //= docs/spec/fleet.md#3-storage-model
+  //= type=implication
+  //# An object's resourceVersion MUST be the index sequence at which the
+  //# index register recorded that object version.
+  action observeGet(n) = {
+    val e = idxHist[idxSeq].get(n)
+    all {
+      e._1 > 0,
+      observed' = Set((n, e._1, e._2)),
+      objSeq' = objSeq, idxEntries' = idxEntries, idxSeq' = idxSeq,
+      pending' = pending, dirty' = dirty,
+      holder' = holder, fence' = fence, phase' = phase,
+      claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
+      watchCursor' = watchCursor, delivered' = delivered,
+      idxHist' = idxHist,
+    }
+  }
+
+  // A list reads one index version and reports each item at its entry.
+  action observeList = {
+    val cur = idxHist[idxSeq]
+    all {
+      observed' = (
+        NAMES.filter(n => cur.get(n)._1 > 0).map(n => (n, cur.get(n)._1, cur.get(n)._2))),
+      objSeq' = objSeq, idxEntries' = idxEntries, idxSeq' = idxSeq,
+      pending' = pending, dirty' = dirty,
+      holder' = holder, fence' = fence, phase' = phase,
+      claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
+      watchCursor' = watchCursor, delivered' = delivered,
+      idxHist' = idxHist,
+    }
   }
 
   // ---- §5 actions ---------------------------------------------------------
@@ -198,6 +298,7 @@ module fleet {
     pending' = pending, dirty' = dirty,
     accepted' = accepted, regressions' = regressions,
     watchCursor' = watchCursor, delivered' = delivered,
+    idxHist' = idxHist, observed' = Set(),
   }
 
   // The holder acquires again, as after a release that did not land. It
@@ -215,6 +316,7 @@ module fleet {
     pending' = pending, dirty' = dirty,
     accepted' = accepted, regressions' = regressions,
     watchCursor' = watchCursor, delivered' = delivered,
+    idxHist' = idxHist, observed' = Set(),
   }
 
   // The holder's session lapses. The holder does not know yet: its claim
@@ -227,6 +329,7 @@ module fleet {
     fence' = fence, phase' = phase, claimFence' = claimFence,
     accepted' = accepted, regressions' = regressions,
     watchCursor' = watchCursor, delivered' = delivered,
+    idxHist' = idxHist, observed' = Set(),
   }
 
   //= docs/spec/fleet.md#5-claims-and-fencing
@@ -242,6 +345,7 @@ module fleet {
     holder' = holder, fence' = fence, claimFence' = claimFence,
     accepted' = accepted, regressions' = regressions,
     watchCursor' = watchCursor, delivered' = delivered,
+    idxHist' = idxHist, observed' = Set(),
   }
 
   //= docs/spec/fleet.md#5-claims-and-fencing
@@ -257,6 +361,7 @@ module fleet {
     fence' = fence, claimFence' = claimFence,
     accepted' = accepted, regressions' = regressions,
     watchCursor' = watchCursor, delivered' = delivered,
+    idxHist' = idxHist, observed' = Set(),
   }
 
   // A Bound claim (possibly a zombie) applies an effect carrying its fence.
@@ -271,6 +376,7 @@ module fleet {
                 else accepted,
     regressions' = regressions,
     watchCursor' = watchCursor, delivered' = delivered,
+    idxHist' = idxHist, observed' = Set(),
     objSeq' = objSeq, idxEntries' = idxEntries, idxSeq' = idxSeq,
     pending' = pending, dirty' = dirty,
     holder' = holder, fence' = fence, phase' = phase, claimFence' = claimFence,
@@ -285,9 +391,11 @@ module fleet {
   action anyObserveLost = { nondet c = oneOf(CLUSTERS) nondet n = oneOf(NAMES) observeLost(c, n) }
   action anyRelease = { nondet c = oneOf(CLUSTERS) nondet n = oneOf(NAMES) release(c, n) }
   action anyApplyEffect = { nondet c = oneOf(CLUSTERS) nondet n = oneOf(NAMES) applyEffect(c, n) }
+  action anyObserveGet = { nondet n = oneOf(NAMES) observeGet(n) }
 
   action step = any {
     anyWriteObject, anyDeleteObject, writeIndex, crash, sweep, deliver,
+    anyObserveGet, observeList,
     anyAcquire, anyReacquire, anyExpire, anyObserveLost, anyRelease, anyApplyEffect,
   }
 
@@ -335,8 +443,25 @@ module fleet {
     delivered.indices().forall(i => delivered[i] == i + 1),
   }
 
+  //= docs/spec/fleet.md#4-list-and-watch
+  //= type=implication
+  //# Every resourceVersion that a get, a list, or a watch event reports
+  //# MUST be an index sequence.
+  //= docs/spec/fleet.md#4-list-and-watch
+  //= type=implication
+  //# A watch that resumes from the resourceVersion of any event MUST NOT
+  //# skip or replay a change.
+  // An observation (n, v, r) says a client saw version v of n and was
+  // told resourceVersion r. A watch resumed from r delivers the index
+  // changes after r. It skips no change of n and replays none exactly
+  // when r is an index sequence the index has reached and the index at r
+  // holds v for n.
+  val ObservedRVIsWatchPosition = observed.forall(o =>
+    if (o._3 < 0 or o._3 > idxSeq) false
+    else idxHist[o._3].get(o._1)._1 == o._2)
+
   val Safety = IndexNeverAhead and IndexRepaired and SingleHolder and FenceBounded
-    and NoStaleEffect and WatchGapFree
+    and NoStaleEffect and WatchGapFree and ObservedRVIsWatchPosition
 
   // ---- negative controls: each drops one rule and must fail ------------------
 
@@ -345,12 +470,14 @@ module fleet {
     pending == Set(),
     objSeq.get(n) < MAX_SEQ,
     idxEntries' = idxEntries.set(n, objSeq.get(n) + 1),
+    idxHist' = record(idxHist, idxEntries.set(n, objSeq.get(n) + 1)),
     idxSeq' = idxSeq + 1,
     pending' = Set(n),
     objSeq' = objSeq, dirty' = dirty,
     holder' = holder, fence' = fence, phase' = phase,
     claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
     watchCursor' = watchCursor, delivered' = delivered,
+    observed' = Set(),
   }
   action anyWriteIndexFirst = { nondet n = oneOf(NAMES) writeIndexFirst(n) }
   action stepIndexFirst = any { anyWriteIndexFirst, writeIndex, crash, sweep }
@@ -362,6 +489,7 @@ module fleet {
     all {
       pending.contains(n),
       idxEntries' = idxEntries.set(n, idxEntries.get(n) + 1),
+      idxHist' = record(idxHist, idxEntries.set(n, idxEntries.get(n) + 1)),
       idxSeq' = idxSeq + 1,
       pending' = Set(),
       dirty' = dirty.exclude(Set(n)),
@@ -369,6 +497,7 @@ module fleet {
       holder' = holder, fence' = fence, phase' = phase,
       claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
       watchCursor' = watchCursor, delivered' = delivered,
+      observed' = Set(),
     }
   }
   action stepIncrementIndex = any { anyWriteObject, writeIndexIncrement, crash }
@@ -379,6 +508,7 @@ module fleet {
     accepted' = accepted.set(n, claimFence.get((c, n))),
     regressions' = if (claimFence.get((c, n)) < accepted.get(n)) regressions + 1 else regressions,
     watchCursor' = watchCursor, delivered' = delivered,
+    idxHist' = idxHist, observed' = Set(),
     objSeq' = objSeq, idxEntries' = idxEntries, idxSeq' = idxSeq,
     pending' = pending, dirty' = dirty,
     holder' = holder, fence' = fence, phase' = phase, claimFence' = claimFence,
@@ -394,12 +524,14 @@ module fleet {
     pending == Set(),
     objSeq.get(n) > 0,
     idxEntries' = idxEntries.set(n, TOMB),
+    idxHist' = record(idxHist, idxEntries.set(n, TOMB)),
     idxSeq' = idxSeq + 1,
     pending' = Set(n),
     objSeq' = objSeq, dirty' = dirty,
     holder' = holder, fence' = fence, phase' = phase,
     claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
     watchCursor' = watchCursor, delivered' = delivered,
+    observed' = Set(),
   }
   action anyRemoveIndexFirst = { nondet n = oneOf(NAMES) removeIndexFirst(n) }
   action stepDeleteIndexFirst = any { anyWriteObject, writeIndex, anyRemoveIndexFirst, crash, sweep }
@@ -414,6 +546,7 @@ module fleet {
     pending' = pending, dirty' = dirty,
     holder' = holder, fence' = fence, phase' = phase,
     claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
+    idxHist' = idxHist, observed' = Set(),
   }
   action stepWatchJump = any { anyWriteObject, writeIndex, deliverJump }
 
@@ -429,9 +562,27 @@ module fleet {
     pending' = pending, dirty' = dirty,
     accepted' = accepted, regressions' = regressions,
     watchCursor' = watchCursor, delivered' = delivered,
+    idxHist' = idxHist, observed' = Set(),
   }
   action anyReacquireAnyone = { nondet c = oneOf(CLUSTERS) nondet n = oneOf(NAMES) reacquireAnyone(c, n) }
   action stepReacquireAnyone = any { anyWriteObject, writeIndex, anyAcquire, anyReacquireAnyone }
+
+  // Bug 7: a get reads the object register head and reports its sequence
+  // as the resourceVersion, as the store did before issue #150. The
+  // object sequence is not an index sequence, so a watch resumed from it
+  // skips or replays changes.
+  action observeGetObjectSeq(n) = all {
+    objSeq.get(n) > 0,
+    observed' = Set((n, objSeq.get(n), objSeq.get(n))),
+    objSeq' = objSeq, idxEntries' = idxEntries, idxSeq' = idxSeq,
+    pending' = pending, dirty' = dirty,
+    holder' = holder, fence' = fence, phase' = phase,
+    claimFence' = claimFence, accepted' = accepted, regressions' = regressions,
+    watchCursor' = watchCursor, delivered' = delivered,
+    idxHist' = idxHist,
+  }
+  action anyObserveGetObjectSeq = { nondet n = oneOf(NAMES) observeGetObjectSeq(n) }
+  action stepObjectSeqRV = any { anyWriteObject, writeIndex, anyObserveGetObjectSeq }
 
   // ---- witness runs (`quint test`) ---------------------------------------------
 
@@ -504,4 +655,41 @@ module fleet {
       .expect(idxSeq == 3 and watchCursor == 0 and WatchGapFree)
       .then(deliver).then(deliver).then(deliver)
       .expect(watchCursor == 3 and delivered == [1, 2, 3] and WatchGapFree)
+
+  // A get reports the index sequence of the entry, not the object
+  // sequence. Here b's object sequence is 1 but the index recorded it at
+  // 2. A watch event for the change reports the same resourceVersion.
+  run getReportsIndexSequenceTest =
+    init
+      .then(writeObject("a")).then(writeIndex)
+      .then(writeObject("b")).then(writeIndex)
+      .then(observeGet("b"))
+      .expect(observed == Set(("b", 1, 2)) and ObservedRVIsWatchPosition)
+      .then(deliver)
+      .expect(observed == Set(("a", 1, 1)) and ObservedRVIsWatchPosition)
+      .then(deliver)
+      .expect(observed == Set(("b", 1, 2)) and ObservedRVIsWatchPosition)
+
+  // An object written but not yet indexed is invisible to a get, and a
+  // delete event reports the index sequence of the removal.
+  run unindexedIsInvisibleTest =
+    init
+      .then(writeObject("a")).then(crash)
+      .then(observeList)
+      .expect(observed == Set())
+      .then(sweep).then(deleteObject("a")).then(writeIndex)
+      .then(deliver)
+      .expect(observed == Set(("a", 1, 1)) and ObservedRVIsWatchPosition)
+      .then(deliver)
+      .expect(observed == Set(("a", TOMB, 2)) and ObservedRVIsWatchPosition)
+
+  // The object sequence as resourceVersion fails as soon as it differs
+  // from the index sequence of the entry.
+  run objectSeqRVFailsTest =
+    init
+      .then(writeObject("a")).then(writeIndex)
+      .then(writeObject("b")).then(writeIndex)
+      .then(writeObject("b")).then(writeIndex)
+      .then(observeGetObjectSeq("b"))
+      .expect(not(ObservedRVIsWatchPosition))
 }

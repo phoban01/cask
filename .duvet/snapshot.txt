@@ -11,7 +11,11 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
   SECTION: [3. Storage model](#3-storage-model)
     TEXT[!MUST,implementation,test]: Each object MUST be stored in one cask register keyed by resource type and name.
     TEXT[!MUST,implementation,test]: Each resource type MUST have one index register that maps every object name to that object's latest sequence.
-    TEXT[!MUST,implementation,test]: An object's resourceVersion MUST be the sequence of its object register.
+    TEXT[!MUST,implementation,implication,test]: An object's resourceVersion MUST be the index sequence at which the index register recorded that object version.
+    TEXT[!MUST,implementation,implication,test]: Each index entry MUST record both the object register sequence and the index sequence at which the index register recorded it.
+    TEXT[!MUST,implementation,implication,test]: A get MUST serve an object only once the index register records it.
+    TEXT[!MUST,implementation,implication,test]: A get MUST read the object at the object register sequence that the index entry records.
+    TEXT[!MUST,implementation,test]: A resourceVersion precondition MUST be checked against the index sequence of the object's index entry.
     TEXT[!MUST,implementation,test]: A list's resourceVersion MUST be the sequence of the index register.
     TEXT[!MUST,implementation,implication,test]: A mutation MUST write the object register before the index register.
     TEXT[!MUST,implementation,implication,test]: The index register MUST NOT record a sequence higher than the object register holds.
@@ -31,7 +35,9 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST,implementation,test,exception]: A list MUST return every object that the index register names at the index sequence the list reports.
     TEXT[!MUST,implementation,implication,test,exception]: A watch from a resourceVersion MUST deliver every index change after that version, in order, with no gaps.
     TEXT[!MUST,implementation,test,exception]: A watch whose start version is compacted MUST end with 410 Gone.
-    TEXT[!MUST,implementation,test,exception]: Each watch event MUST carry the object at the sequence the index recorded.
+    TEXT[!MUST,implementation,implication,test,exception]: Each watch event MUST carry the object at the sequence the index recorded.
+    TEXT[!MUST,implementation,implication,test]: Every resourceVersion that a get, a list, or a watch event reports MUST be an index sequence.
+    TEXT[!MUST,implementation,implication,test]: A watch that resumes from the resourceVersion of any event MUST NOT skip or replay a change.
     TEXT[!SHOULD,exception]: Watch events SHOULD be pushed from the index register's change feed rather than polled.
 
   SECTION: [5. Claims and fencing](#5-claims-and-fencing)

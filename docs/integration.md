@@ -125,7 +125,7 @@ the watch cache needs for that object.
 | Extension-server requirement | cask mapping | Fit |
 |---|---|---|
 | `Get`/`Create`/`Update`/`Delete` per object | `mvcc.KV` point ops | clean |
-| `resourceVersion` per object, monotonic | per-key `Seq` | **clean — per-object, not global** |
+| `resourceVersion` per object, monotonic | index sequence of the object's index entry (issue #150) | **clean — per resource type, not global** |
 | `Watch` from a `resourceVersion`, gap-free per object | `KeyWatcher` (Seq cursor) | clean |
 | `410 Gone` when the resume point is compacted → client relists | `ErrCompacted` → relist | clean — same contract |
 | optimistic concurrency (update if RV matches) | per-key CAS | clean — *stronger*: also fenced |
