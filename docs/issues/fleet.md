@@ -1815,3 +1815,28 @@ for the code.
 Files: `docs/spec/fleet.md`, `quint/fleet.qnt`, `cmd/cask-apiserver/storage/cask.go`
 
 Done when: the model control gives a real violation in 20 of 20 seeds, and the code change keeps `go -C cmd/cask-apiserver test -race ./storage/...` green.
+
+## mvcc: SnapshotAt must refuse a read time above the range's HLC
+
+labels: agent-5m, fleet
+
+Spec: docs/spec/fleet.md#3-storage-model
+> Each object MUST be stored in one cask register keyed by resource type and name.
+
+Filed as #181. The CrossRange port (#16, PR #179) models the read guard
+`t <= hlc[range]` that `tla/README.md` calls load-bearing: a snapshot
+read at time t is only safe once the range's clock has passed t, or a
+later write could land below t and the read would miss it.
+`internal/mvcc` `SnapshotAt` does not enforce this guard. No binary calls
+`SnapshotRead` today, so nothing is exposed yet, but the model proves a
+rule the code does not keep.
+
+Task: make `SnapshotAt` (and `SnapshotRead`) refuse or wait when the
+requested time is above the range's HLC, per `quint/cross_range.qnt`
+(`stepNoReadGuard` is the negative control). Add a test that a write
+stamped below an earlier snapshot time cannot appear after that snapshot
+was read.
+
+Files: `internal/mvcc/mvcc.go`, `internal/mvcc/*_test.go`
+
+Done when: the new test passes and fails without the guard.
