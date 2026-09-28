@@ -118,6 +118,11 @@ func NewJointProposer(nodeID uint64, groups [][]AcceptorClient, opts ...Option) 
 func (p *Proposer) nextBallot(atLeast Ballot) Ballot {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// The counter belongs to this proposer, not to the node. Another
+	// proposer with the same node id can mint the same ballot; the
+	// acceptors' strict promise keeps that safe (see Ballot, #204).
+	//= docs/spec/fleet.md#3-storage-model
+	//# Two proposers MAY choose the same ballot.
 	next := max(p.counter, atLeast.Counter) + 1
 	if e := next >> epochShift; e > 0 && e < maxEpoch && next != e<<epochShift {
 		next = (e + 1) << epochShift

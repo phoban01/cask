@@ -95,6 +95,10 @@ A delete MUST tombstone the object register before it removes the name from the 
 
 An object value MUST NOT exceed 1 MiB.
 
+Two proposers MAY choose the same ballot.
+
+An acceptor MUST promise a ballot only if the ballot is higher than every ballot that the acceptor has promised.
+
 ## 4. List and watch
 
 A list MUST return every object that the index register names at the index sequence the list reports.

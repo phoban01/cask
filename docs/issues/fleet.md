@@ -1956,3 +1956,37 @@ process.
 Files: `cmd/cask-apiserver/admin.go`, `membership.go`, `corechange.go`, `*_test.go`
 
 Done when: that command passes 100 of 100.
+
+## caspaxos: two proposers with one node id can mint the same ballot
+
+labels: fleet, quint
+
+Spec: docs/spec/fleet.md#6-membership
+> The voter set MUST change only by joint-consensus reconfiguration of the roster.
+
+Found while fixing #202 (PR #203). `roster.New` builds a fresh
+`caspaxos.Proposer` on every call, so its ballot counter starts again for
+the same node id. A ballot is (counter, node id). If two proposers in one
+process work on the same key at the same time, for example the driver's
+run loop and an admin request both touching the roster key, they can
+propose different values at the same ballot. Paxos safety assumes a
+ballot carries at most one value. If two acceptor quorums accept two
+values at one ballot, two values can be chosen.
+
+This may be prevented elsewhere (the W0 ballot-space discipline, the
+conflict floor, or a lock around roster writes). Confirm or refute it.
+
+Task: list every place that builds more than one proposer with the same
+node id for the same key in one process (roster, core change carry,
+membership Propose, lease, mvcc). Write a deterministic test with two
+proposers, one node id, one key, and three acceptors that tries to get
+two different values accepted at one ballot. Add a Quint negative control
+(in `quint/caspaxos.qnt`) that lets two proposers share a ballot and
+shows `Consistency` fails, and a simulator fault if the sim can express
+it. If the bug is real, fix it: one proposer per node per key, or a
+per-proposer ballot suffix, or a process-wide ballot counter. State which
+and why.
+
+Files: `internal/caspaxos/proposer.go`, `internal/roster/roster.go`, `quint/caspaxos.qnt`, `testutil/sim/faults/`
+
+Done when: the test shows the bug is impossible (with the reason) or fails before the fix and passes after, and `devbox run sim-gate` passes.

@@ -37,6 +37,8 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST,implementation,test]: Every write MUST carry an operation identity that no other writer and no earlier process of the same writer has used.
     TEXT[!MUST,implementation,implication,test]: A delete MUST tombstone the object register before it removes the name from the index register.
     TEXT[!MUST]: An object value MUST NOT exceed 1 MiB.
+    TEXT[!MAY,implementation,implication,test]: Two proposers MAY choose the same ballot.
+    TEXT[!MUST,implementation,implication,test]: An acceptor MUST promise a ballot only if the ballot is higher than every ballot that the acceptor has promised.
 
   SECTION: [4. List and watch](#4-list-and-watch)
     TEXT[!MUST,implementation,test,exception]: A list MUST return every object that the index register names at the index sequence the list reports.
