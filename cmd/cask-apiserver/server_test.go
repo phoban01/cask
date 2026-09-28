@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -414,5 +415,88 @@ func TestDiscoveryEndpoints(t *testing.T) {
 		if path == groupPrefix && !strings.Contains(string(raw), `"deviceclaims"`) {
 			t.Fatalf("resource list missing deviceclaims: %s", raw)
 		}
+	}
+}
+
+// A value that changes and changes back between update's read and its
+// write must not let the update through. The sequence moved on, so the
+// resourceVersion the client read is stale.
+func TestUpdateDetectsABA(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# An update MUST use a compare-and-set on the resourceVersion the client supplied.
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# An update whose compare-and-set fails MUST return a conflict.
+	f := newFleetFixture(t)
+	fs := f.a.api.store
+	ctx := context.Background()
+
+	a := []byte(`{"metadata":{"name":"cam-aba"},"spec":{"zone":"eu-west"}}`)
+	b := []byte(`{"metadata":{"name":"cam-aba"},"spec":{"zone":"us-east"}}`)
+	rv, err := fs.create(ctx, "devices", "cam-aba", a)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// In the gap after the read, another writer moves the value from A to
+	// B and back to A.
+	fs.afterRead = func() {
+		fs.afterRead = nil
+		rvB, err := fs.update(ctx, "devices", "cam-aba", b, rv)
+		if err != nil {
+			t.Fatalf("A to B: %v", err)
+		}
+		if _, err := fs.update(ctx, "devices", "cam-aba", a, rvB); err != nil {
+			t.Fatalf("B to A: %v", err)
+		}
+	}
+	c := []byte(`{"metadata":{"name":"cam-aba"},"spec":{"zone":"ap-south"}}`)
+	if _, err := fs.update(ctx, "devices", "cam-aba", c, rv); !errors.Is(err, errConflict) {
+		t.Fatalf("update at the first resourceVersion after A-B-A = %v, want conflict", err)
+	}
+	if got := getDevice(t, f.a, "cam-aba"); got.Spec.Zone != "eu-west" {
+		t.Fatalf("zone = %q, want eu-west", got.Spec.Zone)
+	}
+}
+
+// An update that lands between delete's read and its tombstone must make
+// the delete fail with a conflict. The DELETE handler takes no
+// precondition, so the caller re-reads and decides again.
+func TestDeleteConflictsWithConcurrentUpdate(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A delete MUST tombstone the object register before it removes the name from the index register.
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# The extension server MUST re-read an object before it retries a write that returned a conflict.
+	f := newFleetFixture(t)
+	fs := f.a.api.store
+	ctx := context.Background()
+
+	rv, err := fs.create(ctx, "devices", "cam-del", []byte(`{"metadata":{"name":"cam-del"},"spec":{"zone":"eu-west"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.afterRead = func() {
+		fs.afterRead = nil
+		next := []byte(`{"metadata":{"name":"cam-del"},"spec":{"zone":"us-east"}}`)
+		if _, err := fs.update(ctx, "devices", "cam-del", next, rv); err != nil {
+			t.Fatalf("concurrent update: %v", err)
+		}
+	}
+	if err := fs.delete(ctx, "devices", "cam-del"); !errors.Is(err, errConflict) {
+		t.Fatalf("delete across a concurrent update = %v, want conflict", err)
+	}
+	if got := getDevice(t, f.a, "cam-del"); got.Spec.Zone != "us-east" {
+		t.Fatalf("zone = %q, want the concurrent update us-east", got.Spec.Zone)
+	}
+
+	// The caller re-reads, sees the new value, and deletes again.
+	if err := fs.delete(ctx, "devices", "cam-del"); err != nil {
+		t.Fatalf("delete after a fresh read: %v", err)
+	}
+	if code, _ := doReq(t, f.a.ts, http.MethodGet, groupPrefix+"/devices/cam-del", ""); code != http.StatusNotFound {
+		t.Fatalf("get after delete = %d, want 404", code)
 	}
 }
