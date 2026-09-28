@@ -22,7 +22,7 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST,implementation,test]: An update MUST use a compare-and-set on the resourceVersion the client supplied.
     TEXT[!MUST,implementation,test]: An update whose compare-and-set fails MUST return a conflict.
     TEXT[!MAY,implementation,implication,test]: A write that returned a conflict MAY have been committed.
-    TEXT[!MUST,implementation,implication]: The extension server MUST re-read an object before it retries a write that returned a conflict.
+    TEXT[!MUST,implementation,implication,test]: The extension server MUST re-read an object before it retries a write that returned a conflict.
     TEXT[!MUST,implementation,implication,test]: A retried write MUST be a compare-and-set, never a blind reapplication of a change.
     TEXT[!MUST,implementation,implication]: A delete MUST tombstone the object register before it removes the name from the index register.
     TEXT[!MUST]: An object value MUST NOT exceed 1 MiB.

@@ -15,20 +15,30 @@ import (
 	"github.com/phoban01/cask/internal/store"
 )
 
-// newKV returns an in-process cask: three in-memory acceptors and one
-// proposer.
-func newKV(t *testing.T) *mvcc.KV {
+// newCask returns an in-process cask: three in-memory acceptors. Each call
+// of the returned function adds one proposer with its own node id, as one
+// more cluster would.
+func newCask(t *testing.T) func(node uint64) *mvcc.KV {
 	t.Helper()
 	acceptors := make([]caspaxos.AcceptorClient, 3)
 	for i := range acceptors {
 		acceptors[i] = caspaxos.NewAcceptor(store.NewMem())
 	}
-	// The backoff matches production: without it, goroutines that share
-	// one proposer preempt each other until the round budget runs out.
-	prop := caspaxos.NewProposer(1, acceptors,
-		caspaxos.WithBackoff(backoff.FullJitter(time.Millisecond, 20*time.Millisecond)))
 	var now atomic.Int64
-	return mvcc.New(prop, hlc.New(func() int64 { return now.Add(1) }), 1)
+	clock := hlc.New(func() int64 { return now.Add(1) })
+	return func(node uint64) *mvcc.KV {
+		// The backoff matches production: without it, concurrent rounds
+		// preempt each other until the round budget runs out.
+		prop := caspaxos.NewProposer(node, acceptors,
+			caspaxos.WithBackoff(backoff.FullJitter(time.Millisecond, 20*time.Millisecond)))
+		return mvcc.New(prop, clock, node)
+	}
+}
+
+// newKV returns one proposer over a new in-process cask.
+func newKV(t *testing.T) *mvcc.KV {
+	t.Helper()
+	return newCask(t)(1)
 }
 
 func mustIndex(t *testing.T, kv *mvcc.KV, resource string) Index {

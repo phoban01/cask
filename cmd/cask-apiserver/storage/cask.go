@@ -7,9 +7,11 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/phoban01/cask/internal/caspaxos"
@@ -173,10 +175,90 @@ func (*Store) GetList(_ context.Context, _ string, _ apistorage.ListOptions, _ r
 	return ErrNotImplemented
 }
 
-// GuaranteedUpdate returns ErrNotImplemented.
-func (*Store) GuaranteedUpdate(_ context.Context, _ string, _ runtime.Object, _ bool,
-	_ *apistorage.Preconditions, _ apistorage.UpdateFunc, _ runtime.Object) error {
-	return ErrNotImplemented
+// newLike returns a new, empty object of the same type as obj.
+func newLike(obj runtime.Object) runtime.Object {
+	return reflect.New(reflect.TypeOf(obj).Elem()).Interface().(runtime.Object)
+}
+
+// GuaranteedUpdate reads the object at key, runs tryUpdate on it, and
+// writes the result with a compare-and-set on the sequence it read. When
+// another write lands first, it reads the object again and runs tryUpdate
+// on the fresh copy. It stops when a write lands, tryUpdate or
+// preconditions fail, or ctx ends. The written object goes into
+// destination.
+//
+// The generic registry puts the client's resourceVersion check in
+// tryUpdate, so a stale client resourceVersion fails there on the fresh
+// read. cachedExistingObject is not used: every attempt reads the
+// register.
+func (s *Store) GuaranteedUpdate(ctx context.Context, key string, destination runtime.Object, ignoreNotFound bool,
+	preconditions *apistorage.Preconditions, tryUpdate apistorage.UpdateFunc, _ runtime.Object) error {
+	reg, name, err := s.objectKey(key)
+	if err != nil {
+		return err
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		v, ok, err := s.head(ctx, reg)
+		if err != nil {
+			return err
+		}
+		existing := newLike(destination)
+		var seq uint64 // 0 asks CASSeq for an absent register
+		if ok {
+			if err := s.decode(key, v.Value, v.Seq, existing); err != nil {
+				return err
+			}
+			seq = v.Seq
+		} else if !ignoreNotFound {
+			return apistorage.NewKeyNotFoundError(key, 0)
+		}
+		// A failed precondition is a storage InvalidObj error. The
+		// registry returns it to the client as 409 Conflict.
+		//= docs/spec/fleet.md#3-storage-model
+		//# An update whose compare-and-set fails MUST return a conflict.
+		if err := preconditions.Check(key, existing); err != nil {
+			return err
+		}
+		updated, ttl, err := tryUpdate(existing, apistorage.ResponseMeta{ResourceVersion: seq})
+		if err != nil {
+			return err
+		}
+		if ttl != nil && *ttl != 0 {
+			return fmt.Errorf("cask storage: update %q: TTL is not supported", key)
+		}
+		raw, err := s.encode(updated)
+		if err != nil {
+			return err
+		}
+		if ok && bytes.Equal(raw, v.Value) {
+			// Nothing changed. Skip the write, as the etcd store does.
+			return s.decode(key, v.Value, v.Seq, destination)
+		}
+		//= docs/spec/fleet.md#3-storage-model
+		//# An update MUST use a compare-and-set on the resourceVersion the client supplied.
+		//= docs/spec/fleet.md#3-storage-model
+		//# A retried write MUST be a compare-and-set, never a blind reapplication of a change.
+		nv, err := s.kv.CASSeq(ctx, reg, seq, raw)
+		if errors.Is(err, caspaxos.ErrConflict) {
+			// Another write landed after the read. Read again and run
+			// tryUpdate on the fresh copy.
+			//= docs/spec/fleet.md#3-storage-model
+			//# The extension server MUST re-read an object before it retries a write that returned a conflict.
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		//= docs/spec/fleet.md#3-storage-model
+		//# A mutation MUST write the object register before the index register.
+		if err := WriteIndex(ctx, s.kv, s.resource, name); err != nil {
+			return fmt.Errorf("cask storage: update %q: object written, index write failed: %w", key, err)
+		}
+		return s.decode(key, raw, nv.Seq, destination)
+	}
 }
 
 // Stats returns ErrNotImplemented.
