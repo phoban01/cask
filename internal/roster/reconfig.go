@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/phoban01/cask/internal/buggify"
@@ -87,6 +88,15 @@ func mapKeys(m map[uint64]bool) []uint64 {
 //     it safely supersedes any writer still operating under joint rules).
 func (r *Roster) Reconfigure(ctx context.Context, target []uint64) (Value, error) {
 	target = normalizeIDs(target)
+	return r.reconfigureTo(ctx, func([]uint64) []uint64 { return target })
+}
+
+// reconfigureTo is Reconfigure with a target that it computes from the
+// current core on each attempt, so a retry never publishes a target built
+// from a stale read. If a joint change is already in flight, it finishes
+// that change and returns. The caller checks the result and calls again if
+// it needs to.
+func (r *Roster) reconfigureTo(ctx context.Context, targetOf func(core []uint64) []uint64) (Value, error) {
 	const attempts = 16
 	var lastErr error
 	for i := 0; i < attempts; i++ {
@@ -107,6 +117,7 @@ func (r *Roster) Reconfigure(ctx context.Context, target []uint64) (Value, error
 			}
 			return v, nil
 		}
+		target := normalizeIDs(targetOf(slices.Clone(cur.Core)))
 		if idsEqual(cur.Core, target) {
 			return cur, nil // already at target
 		}
