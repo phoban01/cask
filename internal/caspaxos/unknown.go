@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 )
 
 // Proposing is anything that runs a CASPaxos round for a key: a *Proposer,
@@ -27,6 +28,11 @@ const unknownRetries = 8
 // means the same outcome. The test is on bytes: if another writer stored
 // the same bytes, the call reports success, which is correct only when the
 // two writes mean the same thing.
+//
+// After one unknown outcome, every later error except ErrConflict comes
+// back as ErrUnknownOutcome, never as ErrPreempted. The earlier write may
+// still land, and ErrPreempted reads as "nothing written". mvcc's propose
+// follows the same rule.
 func ProposeResolving(ctx context.Context, prop Proposing, key []byte, change ChangeFunc) ([]byte, error) {
 	//= docs/spec/fleet.md#3-storage-model
 	//# A retried write MUST be a compare-and-set, never a blind reapplication of a change.
@@ -48,14 +54,18 @@ func ProposeResolving(ctx context.Context, prop Proposing, key []byte, change Ch
 		}
 		return next, err
 	}
-	var err error
 	for range unknownRetries {
-		var raw []byte
-		raw, err = prop.Propose(ctx, key, resolving)
-		if !errors.Is(err, ErrUnknownOutcome) {
+		raw, err := prop.Propose(ctx, key, resolving)
+		switch {
+		case errors.Is(err, ErrUnknownOutcome):
+			pending = true
+		case err == nil, !pending, errors.Is(err, ErrConflict):
 			return raw, err
+		default:
+			// An earlier attempt may still land. Keep err out of the
+			// chain, so errors.Is does not match ErrPreempted.
+			return nil, fmt.Errorf("%w: a later attempt failed: %v", ErrUnknownOutcome, err)
 		}
-		pending = true
 	}
-	return nil, err
+	return nil, ErrUnknownOutcome
 }

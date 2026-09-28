@@ -8,7 +8,9 @@
 // `applied` counts how many times that write took effect. The invariant is
 // that it takes effect at most once. Retrying with a compare-and-set keeps
 // the invariant. Blindly reapplying the change, which is what a
-// non-idempotent CASPaxos change function does on retry, breaks it.
+// non-idempotent CASPaxos change function does on retry, breaks it. So
+// does a retry loop that reports "preempted" after an unknown outcome,
+// because the client then writes again as if nothing landed.
 //
 // The outcome of an unknown write is fixed when the client re-reads,
 // because the re-read is itself a consensus round: it either adopts the
@@ -17,6 +19,7 @@
 // Gate checks, read by scripts/quint-check.sh:
 // quint-check: invariants=AppliedAtMostOnce
 // quint-check: control=stepBlindRetry:AppliedAtMostOnce
+// quint-check: control=stepPreemptedAfterUnknown:AppliedAtMostOnce
 // quint-check: verify-steps=12
 module retry {
   type Status = Idle | Unknown | Done
@@ -81,7 +84,18 @@ module retry {
   //= type=implication
   //# A retried write MUST be a compare-and-set, never a blind reapplication
   //# of a change.
-  action step = any { otherWrite, casCommits, casUnknown, casConflict, reread }
+  action step = any { otherWrite, casCommits, casUnknown, casConflict, retryPreempted, reread }
+
+  //= docs/spec/fleet.md#3-storage-model
+  //= type=implication
+  //# A write that returned a conflict MAY have been committed.
+  // After an unknown outcome, the proposer's own retry loses its round.
+  // The earlier value may still be chosen, so the client still sees an
+  // unknown outcome and must re-read (issue #180).
+  action retryPreempted = all {
+    status == Unknown,
+    seq' = seq, applied' = applied, clientRV' = clientRV, status' = Unknown,
+  }
 
   val AppliedAtMostOnce = applied <= 1
 
@@ -96,6 +110,20 @@ module retry {
   }
   action stepBlindRetry = any { otherWrite, casCommits, casUnknown, casConflict, blindRetry }
 
+  // ---- negative control: report "preempted" after an unknown outcome -------
+
+  // After an unknown outcome, the proposer's retry loses its round and
+  // reports "preempted". The client takes that to mean nothing was
+  // written. It reads the current resourceVersion and runs its write
+  // again as a new write, without looking for the first one.
+  action preemptedAfterUnknown = all {
+    status == Unknown,
+    clientRV' = seq, status' = Idle,
+    seq' = seq, applied' = applied,
+  }
+  action stepPreemptedAfterUnknown =
+    any { otherWrite, casCommits, casUnknown, casConflict, preemptedAfterUnknown }
+
   // ---- witness runs ------------------------------------------------------------
 
   // The write lands although the client saw a conflict. The re-read finds it.
@@ -105,4 +133,23 @@ module retry {
       .expect(applied == 1 and status == Unknown)
       .then(reread)
       .expect(status == Done and applied == 1)
+
+  // The retry after the unknown outcome is preempted. The client still
+  // sees the unknown outcome, re-reads, and finds its write.
+  run unknownThenPreemptedTest =
+    init
+      .then(casUnknownWith(true))
+      .then(retryPreempted)
+      .expect(status == Unknown)
+      .then(reread)
+      .expect(status == Done and applied == 1)
+
+  // The bug in issue #180: "preempted" after an unknown outcome makes the
+  // client write again, and the write takes effect twice.
+  run preemptedAfterUnknownTwiceTest =
+    init
+      .then(casUnknownWith(true))
+      .then(preemptedAfterUnknown)
+      .then(casCommits)
+      .expect(applied == 2)
 }

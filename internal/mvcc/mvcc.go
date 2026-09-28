@@ -360,18 +360,36 @@ const unknownOutcomeRetries = 8
 // write: appendOp skips an OpID already in the chain, and Compact never
 // moves the watermark back. The retry re-reads the register in its prepare
 // phase and applies change to that value.
+//
+// Once one attempt returns caspaxos.ErrUnknownOutcome, the outcome stays
+// unknown until a later round completes. An acceptor may still hold the
+// earlier value, and a later round can choose it. So after an unknown
+// outcome, every error from a later attempt comes back as
+// caspaxos.ErrUnknownOutcome. It never comes back as caspaxos.ErrPreempted,
+// which a caller reads as "nothing written". The one exception is
+// caspaxos.ErrConflict. The proposer returns it only after a round that
+// chose a value without the write, so the write can no longer land. The
+// caller must re-read after a conflict in any case.
 func (kv *KV) propose(ctx context.Context, key []byte, change caspaxos.ChangeFunc) ([]byte, error) {
 	//= docs/spec/fleet.md#3-storage-model
 	//# A retried write MUST be a compare-and-set, never a blind reapplication of a change.
-	var err error
+	//= docs/spec/fleet.md#3-storage-model
+	//# A write that returned a conflict MAY have been committed.
+	unknown := false
 	for range unknownOutcomeRetries {
-		var raw []byte
-		raw, err = kv.prop.Propose(ctx, key, change)
-		if !errors.Is(err, caspaxos.ErrUnknownOutcome) {
+		raw, err := kv.prop.Propose(ctx, key, change)
+		switch {
+		case errors.Is(err, caspaxos.ErrUnknownOutcome):
+			unknown = true
+		case err == nil, !unknown, errors.Is(err, caspaxos.ErrConflict):
 			return raw, err
+		default:
+			// An earlier attempt may still land. Keep err out of the
+			// chain, so errors.Is does not match ErrPreempted.
+			return nil, fmt.Errorf("%w: a later attempt failed: %v", caspaxos.ErrUnknownOutcome, err)
 		}
 	}
-	return nil, err
+	return nil, caspaxos.ErrUnknownOutcome
 }
 
 // Get performs a linearizable read of the current live value. found is false

@@ -339,6 +339,119 @@ func checkVersion(t *rapid.T, v mvcc.Version, lastSeq *uint64, lastHLC *hlc.Time
 	*lastHLC, *haveHLC = v.HLC, true
 }
 
+// round is what minorityAccept does with one write round.
+type round int
+
+const (
+	// holdMinority runs the change, leaves the result on a minority, and
+	// reports ErrUnknownOutcome. A later round can still choose it.
+	holdMinority round = iota
+	// preempt loses the round before any accept and reports ErrPreempted.
+	preempt
+)
+
+// minorityAccept is a fake proposer for one register. It plays the
+// scripted rounds in order. After the script, each round first adopts the
+// value that a minority holds, as a CASPaxos prepare can, and then runs
+// the change normally.
+type minorityAccept struct {
+	script  []round
+	value   []byte
+	pending []byte // held by a minority; nil when none
+}
+
+func (m *minorityAccept) Propose(_ context.Context, _ []byte, change caspaxos.ChangeFunc) ([]byte, error) {
+	if len(m.script) > 0 {
+		r := m.script[0]
+		m.script = m.script[1:]
+		if r == preempt {
+			return nil, caspaxos.ErrPreempted
+		}
+		if m.pending != nil {
+			m.value, m.pending = m.pending, nil
+		}
+		next, err := change(m.value)
+		if err != nil {
+			return nil, err
+		}
+		m.pending = next
+		return nil, caspaxos.ErrUnknownOutcome
+	}
+	if m.pending != nil {
+		m.value, m.pending = m.pending, nil
+	}
+	next, err := change(m.value)
+	if err != nil {
+		return nil, err
+	}
+	m.value = next
+	return next, nil
+}
+
+// A write whose first round has an unknown outcome and whose retry is
+// preempted must report the unknown outcome, not ErrPreempted. The first
+// round may still land, and callers read ErrPreempted as "nothing
+// written" (issue #180).
+func TestUnknownThenPreemptedReportsUnknown(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A write that returned a conflict MAY have been committed.
+	prop := &minorityAccept{script: []round{holdMinority, preempt}}
+	kv := mvcc.New(prop, hlc.New(func() int64 { return 1 }), 1)
+	_, err := kv.Put(context.Background(), []byte("k"), []byte("v"))
+	if !errors.Is(err, caspaxos.ErrUnknownOutcome) {
+		t.Fatalf("err = %v, want ErrUnknownOutcome", err)
+	}
+	if errors.Is(err, caspaxos.ErrPreempted) {
+		t.Fatalf("err = %v matches ErrPreempted; a caller takes that as nothing written", err)
+	}
+}
+
+// After an unknown outcome, the caller re-reads. The re-read is a round,
+// so it can choose the value that a minority holds. The caller then finds
+// its write by its OpID. A retry of the same operation adds nothing.
+func TestUnknownOutcomeWriteFoundByReread(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A write that returned a conflict MAY have been committed.
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A retried write MUST be a compare-and-set, never a blind reapplication of a change.
+	ctx := context.Background()
+	key := []byte("k")
+	for _, tc := range []struct {
+		name    string
+		script  []round
+		wantErr bool
+	}{
+		{"retry preempted", []round{holdMinority, preempt}, true},
+		{"retry adopts the minority value", []round{holdMinority}, false},
+		{"two unknown rounds", []round{holdMinority, holdMinority}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prop := &minorityAccept{script: tc.script}
+			kv := mvcc.New(prop, hlc.New(func() int64 { return 1 }), 1)
+			v, err := kv.Put(ctx, key, []byte("v"))
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("put: err = %v, want error %v", err, tc.wantErr)
+			}
+			if err != nil && !errors.Is(err, caspaxos.ErrUnknownOutcome) {
+				t.Fatalf("put: err = %v, want ErrUnknownOutcome", err)
+			}
+			if err == nil && (v.Seq != 1 || string(v.Value) != "v") {
+				t.Fatalf("put returned seq %d value %q, want seq 1 value v", v.Seq, v.Value)
+			}
+			chain, err := kv.History(ctx, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(chain.Versions) != 1 || string(chain.Versions[0].Value) != "v" {
+				t.Fatalf("history = %+v, want the one write v", chain.Versions)
+			}
+		})
+	}
+}
+
 func mustGet(t *testing.T, kv *mvcc.KV, key []byte) ([]byte, bool, error) {
 	t.Helper()
 	v, found, err := kv.Get(context.Background(), key)

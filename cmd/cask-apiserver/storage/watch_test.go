@@ -117,14 +117,28 @@ func expectedSteps(t *testing.T, s *Store, from, to uint64) []string {
 // open watches, and the index reads of every get, update, and delete,
 // compete with its rounds (issue #149).
 //
-// A mutation that lost too many rounds before its object write committed
-// wrote nothing, so untilLanded runs it again. The Store retries an index
-// write that lost a round, so "index write failed" is a test failure.
-// Any other error comes back unchanged.
+// A mutation that returned ErrPreempted wrote nothing, so untilLanded runs
+// it again. A mutation that returned ErrUnknownOutcome may still land
+// (issue #180). The next run re-reads the object first. If the earlier
+// write landed, a create then finds the object and a delete finds it gone,
+// and untilLanded counts the mutation as landed. An update runs again on
+// the fresh copy and writes nothing when the value is already there.
+// The Store retries an index write that lost a round, so "index write
+// failed" is a test failure. Any other error comes back unchanged.
 func untilLanded(op func() error) error {
+	unknown := false
 	for {
 		err := op()
-		if err == nil || !errors.Is(err, caspaxos.ErrPreempted) || strings.Contains(err.Error(), "index write failed") {
+		switch {
+		case err == nil:
+			return nil
+		case strings.Contains(err.Error(), "index write failed"):
+			return err
+		case unknown && (apistorage.IsExist(err) || apistorage.IsNotFound(err)):
+			return nil // the earlier write landed
+		case errors.Is(err, caspaxos.ErrUnknownOutcome):
+			unknown = true
+		case !errors.Is(err, caspaxos.ErrPreempted):
 			return err
 		}
 	}

@@ -135,3 +135,26 @@ func TestTwoRejectOneSlowReturnsUnknownOutcome(t *testing.T) {
 	<-slow.released // the phase cancelled the straggler
 }
 
+// scripted is a fake proposer that returns one scripted error per round
+// and runs no change.
+type scripted struct{ errs []error }
+
+func (s *scripted) Propose(context.Context, []byte, caspaxos.ChangeFunc) ([]byte, error) {
+	err := s.errs[0]
+	s.errs = s.errs[1:]
+	return nil, err
+}
+
+// A retry after an unknown outcome that is then preempted must still
+// report the unknown outcome. The first write may still land, and
+// ErrPreempted reads as "nothing written" (issue #180).
+func TestProposeResolvingKeepsUnknownAfterPreempted(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A write that returned a conflict MAY have been committed.
+	prop := &scripted{errs: []error{caspaxos.ErrUnknownOutcome, caspaxos.ErrPreempted}}
+	_, err := caspaxos.ProposeResolving(context.Background(), prop, []byte("k"), caspaxos.Identity)
+	if !errors.Is(err, caspaxos.ErrUnknownOutcome) || errors.Is(err, caspaxos.ErrPreempted) {
+		t.Fatalf("err = %v, want ErrUnknownOutcome and not ErrPreempted", err)
+	}
+}

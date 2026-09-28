@@ -194,9 +194,12 @@ func (DuelingProposers) Inject(s *sim.Sim) {
 				// 12-round proposer budget can exhaust probabilistically —
 				// that is noise, not livelock. Liveness demands convergence
 				// across a client retry; only exhausting THOSE is a WARNING.
+				// A Put that returned ErrUnknownOutcome lost its rounds as
+				// well, but may still land (issue #180). This fault checks
+				// liveness only, so a Put that lands twice is harmless.
 				var err error
 				for attempt := 0; attempt < 3; attempt++ {
-					if _, err = kv.Put(ctx, key, fmt.Appendf(nil, "w%d-%d-%d", w, step, op)); err == nil || !errors.Is(err, caspaxos.ErrPreempted) {
+					if _, err = kv.Put(ctx, key, fmt.Appendf(nil, "w%d-%d-%d", w, step, op)); !lostRounds(err) {
 						break
 					}
 				}
@@ -212,12 +215,19 @@ func (DuelingProposers) Inject(s *sim.Sim) {
 	for w, err := range errs {
 		switch {
 		case err == nil:
-		case errors.Is(err, caspaxos.ErrPreempted):
-			s.Trace.Add("step %d: dueling_proposers: WARNING writer %d preempted out (livelock: backoff failed to converge)", step, w)
+		case lostRounds(err):
+			s.Trace.Add("step %d: dueling_proposers: WARNING writer %d preempted out (livelock: backoff failed to converge): %v", step, w, err)
 		default:
 			s.Trace.Add("step %d: dueling_proposers: writer %d failed: %v", step, w, err)
 		}
 	}
+}
+
+// lostRounds reports whether a write ran out of rounds: preempted, or
+// with an unknown outcome after some round. A Put whose first round is
+// unknown and whose retry is preempted returns ErrUnknownOutcome.
+func lostRounds(err error) bool {
+	return errors.Is(err, caspaxos.ErrPreempted) || errors.Is(err, caspaxos.ErrUnknownOutcome)
 }
 
 // RestartSameNodeID drives issue #170. Writer processes that share a node id
