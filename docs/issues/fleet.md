@@ -1261,6 +1261,8 @@ three, stops the founder, and reads the descriptor back.
 
 ## ci: TestDuelingProposersConvergeWithBackoff fails when unknown outcomes repeat
 
+## ci: TestRevokeRetryKeepsNewSession fails when the minority accept lands late
+
 labels: ci, agent-5m
 
 Spec: docs/spec/fleet.md#3-storage-model
@@ -1284,3 +1286,21 @@ Files: `internal/caspaxos/backoff_test.go`
 
 Done when: `go test -race -count=500 -cpu=1,2,4 -run TestDuelingProposersConvergeWithBackoff ./internal/caspaxos/`
 passes in two copies at once, 3000 of 3000 runs.
+
+`TestRevokeRetryKeepsNewSession` in `internal/lease/revoke_test.go` fails on
+CI with `grant between attempts: caspaxos: change precondition failed`. The
+test downs the accept path to acceptors 1 and 2, so only acceptor 0 can take
+the first Revoke write. The proposer returns as soon as 1 and 2 fail. The
+accept to acceptor 0 can still be in flight. The in-between Grant can then
+read acceptor 0 before that accept lands, see agentA's live session, and fail
+with `ErrConflict`. Sixteen parallel stress copies fail 35 of 48000 runs.
+
+Task: make the test wait until acceptor 0 holds the first Revoke write
+before it runs the Grant. Keep what the test proves: a
+Grant lands between two Revoke attempts, agentB's session survives, and the
+test fails against the Revoke from before #101.
+
+Files: `internal/lease/revoke_test.go`
+
+Done when: `go test -race -count=1000 -cpu=1,2,4 -run TestRevokeRetryKeepsNewSession ./internal/lease/`
+passes in 16 copies at once, and the test fails against the pre-#101 Revoke.
