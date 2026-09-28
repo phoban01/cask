@@ -52,7 +52,7 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST,implementation,implication,test]: An acquire by the session that already holds the lock MUST return the current fence and MUST NOT mint a new one.
     TEXT[!MUST,implementation,test]: A Bound claim MUST carry its fence in its status.
     TEXT[!MUST]: A controller MUST include the claim's fence in every effect it applies for that object.
-    TEXT[!MUST,implementation,implication]: A receiver MUST reject an effect whose fence is lower than the highest fence it has accepted for that object.
+    TEXT[!MUST,implementation,implication,test]: A receiver MUST reject an effect whose fence is lower than the highest fence it has accepted for that object.
     TEXT[!MUST,implementation,test]: A status write MUST NOT lower an advertised fence.
     TEXT[!MUST,implementation]: A controller MUST reconcile only claims whose status names its own cluster.
     TEXT[!MUST,implementation,implication,test]: When a claim's session lapses, the controller MUST set the claim to Lost.
