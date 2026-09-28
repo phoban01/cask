@@ -41,9 +41,10 @@ type Index struct {
 	Entries map[string]Entry
 }
 
-// ReadIndex reads the index register of resource.
+// ReadIndex reads the index register of resource. It retries a read that
+// lost its round.
 func ReadIndex(ctx context.Context, kv *mvcc.KV, resource string) (Index, error) {
-	chain, err := kv.History(ctx, IndexKey(resource))
+	chain, err := indexHistory(ctx, kv, resource)
 	if err != nil {
 		return Index{}, err
 	}
@@ -247,18 +248,43 @@ func writeIndexOnce(ctx context.Context, kv *mvcc.KV, resource, name string) (in
 // that lost its round, so a mutation whose writes committed does not fail
 // on the read that finds its own index step.
 func indexHistory(ctx context.Context, kv *mvcc.KV, resource string) (mvcc.Chain, error) {
+	return readHistory(ctx, kv, IndexKey(resource))
+}
+
+// readHistory reads the history of the register at key. It retries a
+// read that lost its round.
+func readHistory(ctx context.Context, kv *mvcc.KV, key []byte) (mvcc.Chain, error) {
+	return retryRead(ctx, func() (mvcc.Chain, error) { return kv.History(ctx, key) })
+}
+
+// retryRead runs read, one read round on a register. While the round
+// loses, it waits a jittered backoff and runs read again. It gives up
+// after indexWriteRetries attempts and returns the last error.
+//
+// A read round proposes the value it found, unchanged. So a retry never
+// applies a change twice. A lost read round ends in ErrPreempted, or in
+// ErrUnknownOutcome when its accept phase failed. After an unknown
+// outcome, some acceptors may hold the write-back of the read. That
+// value is one the register held, or one that another proposer was
+// already writing. A later round may choose it, and a later read then
+// sees it, as it would anyway. So an unknown outcome of a read is a lost
+// read, and the retry is safe.
+func retryRead[T any](ctx context.Context, read func() (T, error)) (T, error) {
+	//= docs/spec/fleet.md#3-storage-model
+	//# A read of the index register or an object register MUST retry when its round loses or has an unknown outcome.
+	var zero T
 	var err error
 	for attempt := range indexWriteRetries {
-		var chain mvcc.Chain
-		chain, err = kv.History(ctx, IndexKey(resource))
+		var out T
+		out, err = read()
 		if err == nil || !lostRound(err) {
-			return chain, err
+			return out, err
 		}
 		if err := contentionBackoff(ctx, attempt); err != nil {
-			return mvcc.Chain{}, err
+			return zero, err
 		}
 	}
-	return mvcc.Chain{}, err
+	return zero, err
 }
 
 // ErrNotRecorded means that the retained index history holds no entry for
@@ -357,6 +383,13 @@ func versionEntries(v mvcc.Version) (map[string]Entry, error) {
 // only if the head is still that tombstone. Until the create lands the
 // head stays a tombstone, so no index write can name the object again.
 func PrepareCreate(ctx context.Context, kv *mvcc.KV, resource, name string) (seq uint64, exists bool, err error) {
+	seq, exists, _, err = readyCreate(ctx, kv, resource, name)
+	return seq, exists, err
+}
+
+// readyCreate is PrepareCreate. It also reports whether it tried to
+// write the index, so the Store wakes its watches only then.
+func readyCreate(ctx context.Context, kv *mvcc.KV, resource, name string) (seq uint64, exists, wrote bool, err error) {
 	//= docs/spec/fleet.md#3-storage-model
 	//# A create MUST NOT write over a tombstone while the index register still names the deleted object.
 	//= docs/spec/fleet.md#4-list-and-watch
@@ -364,29 +397,30 @@ func PrepareCreate(ctx context.Context, kv *mvcc.KV, resource, name string) (seq
 	for range indexWriteRetries {
 		seq, live, err := objectHead(ctx, kv, resource, name)
 		if err != nil {
-			return 0, false, err
+			return 0, false, wrote, err
 		}
 		if live {
-			return seq, true, nil
+			return seq, true, wrote, nil
 		}
 		idx, err := ReadIndex(ctx, kv, resource)
 		if err != nil {
-			return 0, false, err
+			return 0, false, wrote, err
 		}
 		if _, named := idx.Entries[name]; !named {
-			return seq, false, nil
+			return seq, false, wrote, nil
 		}
+		wrote = true
 		if _, err := writeIndex(ctx, kv, resource, name); err != nil {
-			return 0, false, err
+			return 0, false, wrote, err
 		}
 	}
-	return 0, false, fmt.Errorf("cask storage: %s create of %q lost %d races", resource, name, indexWriteRetries)
+	return 0, false, wrote, fmt.Errorf("cask storage: %s create of %q lost %d races", resource, name, indexWriteRetries)
 }
 
 // objectHead returns the sequence of the object's head version and
-// whether that version is live.
+// whether that version is live. It retries a read that lost its round.
 func objectHead(ctx context.Context, kv *mvcc.KV, resource, name string) (seq uint64, live bool, err error) {
-	chain, err := kv.History(ctx, ObjectKey(resource, name))
+	chain, err := readHistory(ctx, kv, ObjectKey(resource, name))
 	if err != nil {
 		return 0, false, err
 	}

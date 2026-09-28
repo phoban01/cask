@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	caskwatch "github.com/phoban01/cask/internal/watch"
+	"github.com/phoban01/cask/internal/mvcc"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
@@ -48,7 +48,8 @@ func (s *Store) Watch(ctx context.Context, key string, opts apistorage.ListOptio
 	if err != nil {
 		return nil, err
 	}
-	chain, err := s.kv.History(ctx, IndexKey(s.resource))
+	// A read that lost its round changed nothing, so it is retried.
+	chain, err := indexHistory(ctx, s.kv, s.resource)
 	if err != nil {
 		return nil, err
 	}
@@ -70,6 +71,7 @@ func (s *Store) Watch(ctx context.Context, key string, opts apistorage.ListOptio
 		s:      s,
 		ctx:    ctx,
 		cancel: cancel,
+		chains: make(chan *mvcc.Chain, 1),
 		result: make(chan watch.Event),
 		pred:   opts.Predicate,
 		marks:  opts.Predicate.AllowWatchBookmarks || opts.ProgressNotify,
@@ -98,6 +100,9 @@ type indexWatch struct {
 	s      *Store
 	ctx    context.Context
 	cancel context.CancelFunc
+	// chains holds the newest index history that the Store's feed read
+	// and this watch has not taken yet.
+	chains chan *mvcc.Chain
 	result chan watch.Event
 	pred   apistorage.SelectionPredicate
 	// name limits the watch to one object. It is empty for a watch on
@@ -177,42 +182,40 @@ func (w *indexWatch) run(base map[string]Entry, cursor uint64, initial, endMark 
 		return
 	}
 
-	//= docs/spec/fleet.md#4-list-and-watch
-	//= type=exception
-	//= reason=a write through another Store or cluster reaches the watch at the next poll of the index history; tracked in issue #148
-	//# Watch events SHOULD be pushed from the index register's change feed rather than polled.
-	feed := caskwatch.NewKeyWatcher(w.s.kv, IndexKey(w.s.resource), cursor)
+	// The Store's one index feed reads the history for every watch.
+	w.s.feed.subscribe(w)
+	defer w.s.feed.unsubscribe(w)
 	prev := base
 	lastSent := time.Now()
 	for {
-		// Take the wake-up channel before the read, so a write that
-		// lands during the read still wakes the next wait.
-		wake := w.s.indexChanged()
-		steps, err := feed.Poll(w.ctx)
-		if errors.Is(err, caskwatch.ErrCompacted) {
+		var chain *mvcc.Chain
+		select {
+		case <-w.ctx.Done():
+			w.fail(w.ctx.Err())
+			return
+		case chain = <-w.chains:
+		}
+		if cursor+1 < chain.CompactedBelow {
 			w.fail(apierrors.NewResourceExpired(watchExpired))
 			return
 		}
-		if err != nil {
-			w.fail(err)
-			return
-		}
-		for _, step := range steps {
+		for _, v := range chain.Versions {
+			if v.Seq <= cursor {
+				continue
+			}
 			//= docs/spec/fleet.md#4-list-and-watch
 			//# A watch from a resourceVersion MUST deliver every index change after that version, in order, with no gaps.
-			if step.Version.Seq != cursor+1 {
+			if v.Seq != cursor+1 {
 				// The history lost the step after the cursor.
 				w.fail(apierrors.NewResourceExpired(watchExpired))
 				return
 			}
-			next := map[string]Entry{}
-			if !step.Version.Tombstone {
-				if next, err = decodeIndex(step.Version.Value); err != nil {
-					w.fail(fmt.Errorf("cask storage: decode %s index at %d: %w", w.s.resource, step.Version.Seq, err))
-					return
-				}
+			next, err := versionEntries(v)
+			if err != nil {
+				w.fail(fmt.Errorf("cask storage: decode %s index at %d: %w", w.s.resource, v.Seq, err))
+				return
 			}
-			sent, err := w.step(prev, next, step.Version.Seq)
+			sent, err := w.step(prev, next, v.Seq)
 			if err != nil {
 				w.fail(err)
 				return
@@ -220,7 +223,7 @@ func (w *indexWatch) run(base map[string]Entry, cursor uint64, initial, endMark 
 			if sent {
 				lastSent = time.Now()
 			}
-			prev, cursor = next, step.Version.Seq
+			prev, cursor = next, v.Seq
 		}
 		if w.marks && time.Since(lastSent) >= w.s.bookmarkEvery {
 			if !w.bookmark(cursor, false) {
@@ -228,13 +231,6 @@ func (w *indexWatch) run(base map[string]Entry, cursor uint64, initial, endMark 
 				return
 			}
 			lastSent = time.Now()
-		}
-		select {
-		case <-w.ctx.Done():
-			w.fail(w.ctx.Err())
-			return
-		case <-wake:
-		case <-time.After(w.s.watchPoll):
 		}
 	}
 }

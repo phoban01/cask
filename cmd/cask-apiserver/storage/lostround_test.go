@@ -160,3 +160,108 @@ func TestIndexWriteSurvivesUnknownOutcome(t *testing.T) {
 		})
 	}
 }
+
+// failingProposer fails the next rounds on one key with err, before any
+// acceptor sees them.
+type failingProposer struct {
+	next caspaxos.Proposing
+	err  error
+
+	mu      sync.Mutex
+	key     []byte
+	left    int // rounds still to fail
+	injects int // rounds failed so far
+}
+
+func (p *failingProposer) arm(key []byte, rounds int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.key, p.left, p.injects = key, rounds, 0
+}
+
+func (p *failingProposer) injected() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.injects
+}
+
+func (p *failingProposer) Propose(ctx context.Context, key []byte, change caspaxos.ChangeFunc) ([]byte, error) {
+	p.mu.Lock()
+	fail := p.left > 0 && bytes.Equal(key, p.key)
+	if fail {
+		p.left--
+		p.injects++
+	}
+	p.mu.Unlock()
+	if fail {
+		return nil, p.err
+	}
+	return p.next.Propose(ctx, key, change)
+}
+
+// A read round that loses must not fail a get, an update, or a delete.
+// The first reads of each operation, on the index register or on the
+// object register, lose. The Store reads again, and each operation
+// returns the right version at the right index sequence.
+func TestReadSurvivesLostRound(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A read of the index register or an object register MUST retry when its round loses or has an unknown outcome.
+	ctx := context.Background()
+	const lost = 3
+	for _, fault := range []struct {
+		name string
+		err  error
+	}{{"preempted", caspaxos.ErrPreempted}, {"unknown", caspaxos.ErrUnknownOutcome}} {
+		for _, reg := range []struct {
+			name string
+			key  []byte
+		}{{"index", IndexKey("devices")}, {"object", ObjectKey("devices", "gpu-0")}} {
+			t.Run(reg.name+" read/"+fault.name, func(t *testing.T) {
+				acceptors := make([]caspaxos.AcceptorClient, 3)
+				for i := range acceptors {
+					acceptors[i] = caspaxos.NewAcceptor(store.NewMem())
+				}
+				var now atomic.Int64
+				clock := hlc.New(func() int64 { return now.Add(1) })
+				failing := &failingProposer{next: caspaxos.NewProposer(1, acceptors), err: fault.err}
+				s := newStoreOn(t, mvcc.New(failing, clock, 1))
+				check := func(op string, err error, out *v1alpha1.Device, wantModel string, wantRV uint64) {
+					t.Helper()
+					if err != nil {
+						t.Fatalf("%s: %v", op, err)
+					}
+					if got := failing.injected(); got != lost {
+						t.Fatalf("%s: %d faults injected, want %d", op, got, lost)
+					}
+					if out.Spec.Model != wantModel || rvOf(t, out) != wantRV {
+						t.Fatalf("%s returned %s@%s, want %s@%d", op, out.Spec.Model, out.ResourceVersion, wantModel, wantRV)
+					}
+				}
+
+				if err := s.Create(ctx, keyPrefix+"gpu-0", device("gpu-0", "a100"), &v1alpha1.Device{}, 0); err != nil {
+					t.Fatal(err)
+				}
+
+				failing.arm(reg.key, lost)
+				got := &v1alpha1.Device{}
+				err := s.Get(ctx, keyPrefix+"gpu-0", apistorage.GetOptions{}, got)
+				check("get", err, got, "a100", 1)
+
+				failing.arm(reg.key, lost)
+				updated := &v1alpha1.Device{}
+				err = s.GuaranteedUpdate(ctx, keyPrefix+"gpu-0", updated, false, nil,
+					mutate(func(d *v1alpha1.Device) { d.Spec.Model = "h100" }), nil)
+				check("update", err, updated, "h100", 2)
+
+				failing.arm(reg.key, lost)
+				deleted := &v1alpha1.Device{}
+				err = s.Delete(ctx, keyPrefix+"gpu-0", deleted, nil, nil, nil, apistorage.DeleteOptions{})
+				check("delete", err, deleted, "h100", 3)
+				if _, named := indexEntry(t, s, "gpu-0"); named {
+					t.Fatal("the index still names gpu-0 after the delete")
+				}
+			})
+		}
+	}
+}
