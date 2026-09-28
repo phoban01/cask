@@ -3,8 +3,10 @@
 // In the extension server every data register uses the roster core as its
 // acceptor set. So a core change moves every data register, not only the
 // roster key. The roster moves through three configurations: old (gen 0),
-// joint (gen 1), and new (gen 2). Here the core grows from {1, 2, 3} to
-// {1, 2, 3, 4, 5}.
+// joint (gen 1), and new (gen 2). Each run picks one change at init: the
+// core grows from {1, 2, 3} to {1, 2, 3, 4, 5}, or it shrinks from
+// {1, 2, 3, 4, 5} to {1, 2, 3}. A shrink is what Roster.Remove does to a
+// voter, and it takes the same joint path as a grow.
 //
 // What the model keeps from the implementation:
 //   - The fence is per voter and durable: `rgen` is the ConfigGen of the
@@ -30,16 +32,20 @@
 // commits a fresh version. A read takes the highest version on a read quorum.
 //
 // The invariant is that every read quorum of the current configuration
-// holds the last committed version of every key. Four negative controls
+// holds the last committed version of every key. Five negative controls
 // break it: a release without the carry, a fence that reads a lagging view
 // instead of the accepted roster value, a key listing that counts old
-// voters that do not hold the joint roster value, and a resumed carry that
-// skips a key whose round did not commit.
+// voters that do not hold the joint roster value, a resumed carry that
+// skips a key whose round did not commit, and a remove that drops voters
+// from the core one at a time with no joint change and no carry.
 //
 // The gate finds each violation by random simulation, so a control must
-// find its bug in every gate run. Controls 3 and 4 keep only the actions
-// that lead to their bug. Each one violated NoCommittedLoss in 20 of 20
-// runs with random seeds at 30 steps and 2000 samples.
+// find its bug in every gate run. Controls 3, 4 and 5 keep only the
+// actions that lead to their bug. Each control violated NoCommittedLoss in
+// 20 of 20 runs with random seeds at 30 steps and 2000 samples.
+//
+// Every quorum set is a constant, so Apalache does not expand a powerset
+// of a variable. A boolean picks the grow or the shrink.
 //
 // Gate checks, read by scripts/quint-check.sh:
 // quint-check: invariants=NoCommittedLoss
@@ -47,6 +53,7 @@
 // quint-check: control=stepLaggingFence:NoCommittedLoss
 // quint-check: control=stepListAnyVoter:NoCommittedLoss
 // quint-check: control=stepCarryCountsAnyAck:NoCommittedLoss
+// quint-check: control=stepRemoveNoJoint:NoCommittedLoss
 // quint-check: verify-steps=6
 module core_change {
   type Phase = Old | Joint | New
@@ -61,8 +68,8 @@ module core_change {
 
   pure val KEYS: Set[str] = Set("a", "b")
   pure val ACCS: Set[int] = Set(1, 2, 3, 4, 5)
-  pure val COLD: Set[int] = Set(1, 2, 3)
-  pure val CNEW: Set[int] = Set(1, 2, 3, 4, 5)
+  pure val SMALL: Set[int] = Set(1, 2, 3)
+  pure val BIG: Set[int] = Set(1, 2, 3, 4, 5)
   pure val MAXV: int = 4
 
   pure val NO_PEND: Pend = {
@@ -73,18 +80,24 @@ module core_change {
   pure def quorums(c: Set[int]): Set[Set[int]] =
     c.powerset().filter(q => 2 * q.size() > c.size())
 
-  // A joint quorum is a majority of the old core plus a majority of the new.
-  pure val JOINT_QUORUMS: Set[Set[int]] =
-    tuples(quorums(COLD), quorums(CNEW)).map(p => p._1.union(p._2))
+  pure val Q_SMALL: Set[Set[int]] = quorums(SMALL)
+  pure val Q_BIG: Set[Set[int]] = quorums(BIG)
 
-  // The quorums a writer uses with a view of configuration gen.
-  pure def quorumsFor(gen: int): Set[Set[int]] =
-    if (gen == 0) quorums(COLD) else if (gen == 1) JOINT_QUORUMS else quorums(CNEW)
+  // A joint quorum is a majority of the old core plus a majority of the
+  // new. The set is the same for a grow and a shrink.
+  pure val JOINT_QUORUMS: Set[Set[int]] =
+    tuples(Q_SMALL, Q_BIG).map(p => p._1.union(p._2))
+
+  // The cores the remove control passes through on a shrink.
+  pure val Q_NO5: Set[Set[int]] = quorums(Set(1, 2, 3, 4))
+  pure val Q_NO4: Set[Set[int]] = quorums(Set(1, 2, 3, 5))
 
   // The highest version a set of acceptors holds for one key.
   pure def maxOn(row: int -> int, q: Set[int]): int =
     q.fold(0, (m, a) => if (row.get(a) > m) row.get(a) else m)
 
+  var shrink: bool                  // the change is {1..5} to {1, 2, 3}, else {1, 2, 3} to {1..5}
+  var dropped: Set[int]             // voters the remove control took out of the old core
   var phase: Phase                  // the chosen roster configuration
   var rgen: int -> int              // acceptor -> ConfigGen of its accepted roster value
   var view: int -> int              // acceptor -> ConfigGen its member has learned (lags)
@@ -96,10 +109,29 @@ module core_change {
   var carried: Set[str]             // keys carried forward
   var nextV: int                    // the next fresh version
 
+  // Majority quorums of the core before the change.
+  def coldQuorums: Set[Set[int]] = if (shrink) Q_BIG else Q_SMALL
+
+  // Majority quorums of the old core as it stands. Only the remove
+  // control takes voters out of it.
+  def oldQuorums: Set[Set[int]] =
+    if (dropped.contains(5)) Q_NO5 else if (dropped.contains(4)) Q_NO4 else coldQuorums
+
+  // The quorums a writer uses with a view of configuration gen.
+  def quorumsFor(gen: int): Set[Set[int]] =
+    if (gen == 0) oldQuorums
+    else if (gen == 1) JOINT_QUORUMS
+    else if (shrink) Q_SMALL
+    else Q_BIG
+
   def curGen: int = match phase { | Old => 0 | Joint => 1 | New => 2 }
   def phaseQuorums: Set[Set[int]] = quorumsFor(curGen)
 
-  action init = all {
+  // The change itself stays fixed after init.
+  action keepCores = all { shrink' = shrink, dropped' = dropped }
+
+  action initWith(s: bool): bool = all {
+    shrink' = s, dropped' = Set(),
     phase' = Old,
     rgen' = ACCS.mapBy(a => 0),
     view' = ACCS.mapBy(a => 0),
@@ -109,6 +141,10 @@ module core_change {
     didList' = false, listed' = Set(), carried' = Set(),
     nextV' = 1,
   }
+
+  // nondet, not any: with any, the simulator samples one branch far less
+  // often, and a control that needs the grow misses its bug.
+  action init = { nondet s = oneOf(Set(false, true)) initWith(s) }
 
   // ---- writes ------------------------------------------------------------
 
@@ -122,7 +158,7 @@ module core_change {
     pend' = { active: true, k: k, vg: vg, q: q, v: nextV, acked: Set(), blocked: Set() },
     nextV' = nextV + 1,
     phase' = phase, rgen' = rgen, view' = view, stored' = stored, committed' = committed,
-    didList' = didList, listed' = listed, carried' = carried,
+    didList' = didList, listed' = listed, carried' = carried, keepCores,
   }
   action writeStart = {
     nondet k = oneOf(KEYS)
@@ -144,7 +180,7 @@ module core_change {
       committed' = if (done) committed.set(pend.k, pend.v) else committed,
       pend' = if (done) NO_PEND else pend.with("acked", acked),
       phase' = phase, rgen' = rgen, view' = view, nextV' = nextV,
-      didList' = didList, listed' = listed, carried' = carried,
+      didList' = didList, listed' = listed, carried' = carried, keepCores,
     }
   }
 
@@ -157,20 +193,24 @@ module core_change {
   action writeAbort = all {
     pend.active, pend' = NO_PEND,
     phase' = phase, rgen' = rgen, view' = view, stored' = stored, committed' = committed,
-    didList' = didList, listed' = listed, carried' = carried, nextV' = nextV,
+    didList' = didList, listed' = listed, carried' = carried, nextV' = nextV, keepCores,
   }
 
   // ---- the roster --------------------------------------------------------
 
-  // The joint roster value is chosen on a majority of the old core.
+  //= docs/spec/fleet.md#6-membership
+  //= type=implication
+  //# The voter set MUST change only by joint-consensus reconfiguration of the roster.
+  // The joint roster value is chosen on a majority of the old core. A grow
+  // and a shrink both start here; no other action changes the core.
   action publishJointOn(q: Set[int]): bool = all {
-    phase == Old, quorums(COLD).contains(q),
+    phase == Old, coldQuorums.contains(q),
     phase' = Joint,
     rgen' = ACCS.mapBy(a => if (q.contains(a) and rgen.get(a) < 1) 1 else rgen.get(a)),
     view' = view, stored' = stored, committed' = committed, pend' = pend,
-    didList' = didList, listed' = listed, carried' = carried, nextV' = nextV,
+    didList' = didList, listed' = listed, carried' = carried, nextV' = nextV, keepCores,
   }
-  action publishJoint = { nondet q = oneOf(quorums(COLD)) publishJointOn(q) }
+  action publishJoint = { nondet q = oneOf(coldQuorums) publishJointOn(q) }
 
   // A later roster round gives acceptor a the chosen roster value.
   action spread = {
@@ -179,7 +219,7 @@ module core_change {
       rgen.get(a) < curGen,
       rgen' = rgen.set(a, curGen),
       phase' = phase, view' = view, stored' = stored, committed' = committed, pend' = pend,
-      didList' = didList, listed' = listed, carried' = carried, nextV' = nextV,
+      didList' = didList, listed' = listed, carried' = carried, nextV' = nextV, keepCores,
     }
   }
 
@@ -190,7 +230,7 @@ module core_change {
     all {
       view' = view.set(a, curGen),
       phase' = phase, rgen' = rgen, stored' = stored, committed' = committed, pend' = pend,
-      didList' = didList, listed' = listed, carried' = carried, nextV' = nextV,
+      didList' = didList, listed' = listed, carried' = carried, nextV' = nextV, keepCores,
     }
   }
 
@@ -204,14 +244,14 @@ module core_change {
     didList' = true,
     listed' = KEYS.filter(k => L.exists(a => stored.get(k).get(a) > 0)),
     phase' = phase, rgen' = rgen, view' = view, stored' = stored, committed' = committed,
-    pend' = pend, carried' = carried, nextV' = nextV,
+    pend' = pend, carried' = carried, nextV' = nextV, keepCores,
   }
 
   //= docs/spec/fleet.md#6-membership
   //= type=implication
   //# A core change MUST list data keys only on old voters that have accepted the joint roster value.
   action list = {
-    nondet L = oneOf(quorums(COLD))
+    nondet L = oneOf(coldQuorums)
     listWith(L, L.forall(a => rgen.get(a) >= 1))
   }
 
@@ -227,7 +267,7 @@ module core_change {
       pend' = if (pend.active and pend.k == k) pend.with("blocked", pend.blocked.union(qr).union(qw)) else pend,
       carried' = if (counts) carried.union(Set(k)) else carried,
       phase' = phase, rgen' = rgen, view' = view, committed' = committed,
-      didList' = didList, listed' = listed, nextV' = nextV,
+      didList' = didList, listed' = listed, nextV' = nextV, keepCores,
     }
   }
 
@@ -252,7 +292,7 @@ module core_change {
     phase' = New,
     rgen' = ACCS.mapBy(a => if (q.contains(a)) 2 else rgen.get(a)),
     view' = view, stored' = stored, committed' = committed, pend' = pend,
-    didList' = didList, listed' = listed, carried' = carried, nextV' = nextV,
+    didList' = didList, listed' = listed, carried' = carried, nextV' = nextV, keepCores,
   }
 
   //= docs/spec/fleet.md#6-membership
@@ -318,7 +358,7 @@ module core_change {
   }
   action publishJointMidWrite = all { pend.active, pend.acked != Set(), publishJoint }
   action listAnyVoter = {
-    nondet L = oneOf(quorums(COLD))
+    nondet L = oneOf(coldQuorums)
     all { not(didList), pend.active, listWith(L, true) }
   }
   action carryCommitted = {
@@ -349,12 +389,33 @@ module core_change {
     writeStartOld, writeAcceptInQuorum, publishJoint, list, carryCountsAnyAck, release,
   }
 
+  // ---- negative control 5: remove a voter without a joint change ---------
+
+  // The bug in issue #124: Roster.Remove dropped a voter from a quiescent
+  // core in one roster write, so no joint change and no carry ran. On a
+  // shrink, each remove drops voter 4 or 5. After both, the old core is
+  // the new one and the change is done. The roster write bumps ConfigGen,
+  // but the fence does not matter here: the lost writes committed before
+  // the remove. The step uses the write guards of control 3.
+  action removeNoJointOf(a: int): bool = all {
+    phase == Old, shrink, Set(4, 5).contains(a), not(dropped.contains(a)),
+    dropped' = dropped.union(Set(a)),
+    phase' = if (dropped == Set()) Old else New,
+    shrink' = shrink,
+    rgen' = rgen, view' = view, stored' = stored, committed' = committed, pend' = pend,
+    didList' = didList, listed' = listed, carried' = carried, nextV' = nextV,
+  }
+  action removeNoJoint = { nondet a = oneOf(Set(4, 5)) removeNoJointOf(a) }
+  action stepRemoveNoJoint = any {
+    writeStartOld, writeAcceptInQuorum, removeNoJoint,
+  }
+
   // ---- witness runs --------------------------------------------------------
 
   // Write key a on the old core, grow to five, and read it from 3, 4 and 5
   // alone, as if 1 and 2 had stopped.
   run growKeepsWritesTest =
-    init
+    initWith(false)
       .then(writeStartWith("a", 0, Set(1, 2)))
       .then(acceptWith(1, 0))
       .then(acceptWith(2, 0))
@@ -365,10 +426,39 @@ module core_change {
       .expect(NoCommittedLoss)
       .expect(maxOn(stored.get("a"), Set(3, 4, 5)) == 1)
 
+  // The case from issue #124. Key a commits on {3, 4, 5} while 1 and 2
+  // hang. Shrink to {1, 2, 3} through the joint path, and read a from 1 and
+  // 2 alone, as if 3 had stopped.
+  run shrinkKeepsWritesTest =
+    initWith(true)
+      .then(writeStartWith("a", 0, Set(3, 4, 5)))
+      .then(acceptWith(3, 0))
+      .then(acceptWith(4, 0))
+      .then(acceptWith(5, 0))
+      .then(publishJointOn(Set(1, 2, 3)))
+      .then(listWith(Set(1, 2, 3), true))
+      .then(carryWith("a", Set(1, 2, 3, 4), Set(1, 2, 3, 4)))
+      .then(releaseOn(Set(1, 2, 3, 4), didList and listed.subseteq(carried)))
+      .expect(NoCommittedLoss)
+      .expect(maxOn(stored.get("a"), Set(1, 2)) == 1)
+
+  // The same writes, but the remove drops 5 and then 4 with no joint
+  // change. Voters 1 and 2 never got key a, so the write is lost.
+  run removeNoJointLosesWriteTest =
+    initWith(true)
+      .then(writeStartWith("a", 0, Set(3, 4, 5)))
+      .then(acceptWith(3, 0))
+      .then(acceptWith(4, 0))
+      .then(acceptWith(5, 0))
+      .then(removeNoJointOf(5))
+      .expect(NoCommittedLoss)
+      .then(removeNoJointOf(4))
+      .expect(not(NoCommittedLoss))
+
   // A carry of key a commits, then the change stops. The resumed change
   // lists again, skips a, and releases. The new core alone still reads a.
   run resumeSkipsCarriedKeyTest =
-    init
+    initWith(false)
       .then(writeStartWith("a", 0, Set(1, 2)))
       .then(acceptWith(1, 0))
       .then(acceptWith(2, 0))
@@ -383,7 +473,7 @@ module core_change {
   // A stale writer (view gen 0) after the joint: voter 2 holds the joint
   // roster value and rejects it, so the write cannot commit on {1, 2}.
   run staleWriteIsFencedTest =
-    init
+    initWith(false)
       .then(publishJointOn(Set(2, 3)))
       .then(writeStartWith("a", 0, Set(1, 2)))
       .then(acceptWith(1, 0))

@@ -205,46 +205,97 @@ func (r *Roster) Add(ctx context.Context, m Member) (Value, error) {
 // or to the Joint bumps ConfigGen, so every holder of a cached quorum sees
 // that it moved.
 //
+// When a carry hook is set, other registers live on the core too, so Remove
+// never drops a voter from a quiescent core directly. It first runs a core
+// change to the core without that voter, which carries every register, and
+// then removes the member. It refuses to remove the last voter. A Remove
+// that narrows an in-flight Joint.New stays safe: finishJoint sees the
+// narrowed joint and carries again before it releases.
+//
 // While a Joint is in flight, a node in Joint.Old stays in Members. The old
 // quorum still counts it, and members resolve its address from Members.
 // Remove drops it on a later call, after the release.
 func (r *Roster) Remove(ctx context.Context, nodeID uint64) (Value, error) {
-	return r.write(ctx, func(cur Value) (Value, error) {
-		configChanged := false
-		if next := dropID(cur.Core, nodeID); len(next) != len(cur.Core) {
-			cur.Core = next
+	const attempts = 16
+	for i := 0; i < attempts; i++ {
+		carries := r.carryFunc() != nil
+		v, err := r.write(ctx, func(cur Value) (Value, error) {
+			return removeFrom(cur, nodeID, carries)
+		})
+		if !errors.Is(err, errNeedsCoreChange) {
+			return v, err
+		}
+		//= docs/spec/fleet.md#6-membership
+		//# The voter set MUST change only by joint-consensus reconfiguration of the roster.
+		if _, err := r.reconfigureTo(ctx, func(core []uint64) []uint64 {
+			if next := dropID(core, nodeID); len(next) > 0 {
+				return next
+			}
+			return core // the next write refuses to remove the last voter
+		}); err != nil {
+			return Value{}, fmt.Errorf("roster: remove voter %d: %w", nodeID, err)
+		}
+	}
+	return Value{}, fmt.Errorf("roster: remove voter %d: core did not settle after %d core changes", nodeID, attempts)
+}
+
+// errNeedsCoreChange stops a Remove write that would drop a voter from a
+// quiescent core while other registers live on it. Remove then runs a core
+// change and tries again.
+var errNeedsCoreChange = errors.New("roster: removing a voter needs a core change")
+
+// ErrLastVoter is returned by Remove when the node is the only voter left.
+var ErrLastVoter = errors.New("roster: cannot remove the last voter")
+
+// removeFrom is the Remove change on one roster value. carries is true when
+// a carry hook is set: then a voter of a quiescent core leaves only through
+// a core change.
+func removeFrom(cur Value, nodeID uint64, carries bool) (Value, error) {
+	if carries {
+		if cur.Joint == nil && slices.Contains(cur.Core, nodeID) {
+			if len(cur.Core) == 1 {
+				return Value{}, ErrLastVoter
+			}
+			return Value{}, errNeedsCoreChange
+		}
+		if cur.Joint != nil && idsEqual(cur.Joint.New, []uint64{nodeID}) {
+			return Value{}, ErrLastVoter
+		}
+	}
+	configChanged := false
+	if next := dropID(cur.Core, nodeID); len(next) != len(cur.Core) {
+		cur.Core = next
+		configChanged = true
+	}
+	inOld := false
+	if cur.Joint != nil {
+		if next := dropID(cur.Joint.New, nodeID); len(next) != len(cur.Joint.New) {
+			cur.Joint.New = next
 			configChanged = true
 		}
-		inOld := false
-		if cur.Joint != nil {
-			if next := dropID(cur.Joint.New, nodeID); len(next) != len(cur.Joint.New) {
-				cur.Joint.New = next
-				configChanged = true
-			}
-			inOld = slices.Contains(cur.Joint.Old, nodeID)
-		}
-		if configChanged {
-			cur.ConfigGen++
-		}
-		if inOld {
-			return cur, nil
-		}
-		out := cur.Members[:0:0]
-		removed := false
-		for _, e := range cur.Members {
-			if e.NodeID == nodeID {
-				removed = true
-				continue
-			}
-			out = append(out, e)
-		}
-		if !removed {
-			return cur, nil
-		}
-		cur.Members = out
-		cur.Epoch++
+		inOld = slices.Contains(cur.Joint.Old, nodeID)
+	}
+	if configChanged {
+		cur.ConfigGen++
+	}
+	if inOld {
 		return cur, nil
-	})
+	}
+	out := cur.Members[:0:0]
+	removed := false
+	for _, e := range cur.Members {
+		if e.NodeID == nodeID {
+			removed = true
+			continue
+		}
+		out = append(out, e)
+	}
+	if !removed {
+		return cur, nil
+	}
+	cur.Members = out
+	cur.Epoch++
+	return cur, nil
 }
 
 // ConfigGenOf returns the ConfigGen of an encoded roster value. An empty
