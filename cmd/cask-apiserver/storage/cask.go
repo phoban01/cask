@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/phoban01/cask/internal/caspaxos"
 	"github.com/phoban01/cask/internal/mvcc"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
@@ -82,13 +83,56 @@ func (*Store) Versioner() apistorage.Versioner {
 	return nil
 }
 
-// Create returns ErrNotImplemented.
-func (*Store) Create(_ context.Context, _ string, _, _ runtime.Object, _ uint64) error {
+// encode clears the resourceVersion of obj and encodes it. The register
+// sequence is the resourceVersion, so the stored bytes never carry one.
+func (s *Store) encode(obj runtime.Object) ([]byte, error) {
+	if err := s.versioner.PrepareObjectForStorage(obj); err != nil {
+		return nil, err
+	}
+	return runtime.Encode(s.codec, obj)
+}
+
+// Create stores obj at key if no live object is there, records it in the
+// index, and decodes the stored object into out. It returns the storage
+// KeyExists error when a live object is there. The store has no TTL, so
+// ttl must be 0.
+func (s *Store) Create(ctx context.Context, key string, obj, out runtime.Object, ttl uint64) error {
+	reg, name, err := s.objectKey(key)
+	if err != nil {
+		return err
+	}
+	if ttl != 0 {
+		return fmt.Errorf("cask storage: create %q: TTL is not supported", key)
+	}
+	if rv, err := s.versioner.ObjectResourceVersion(obj); err != nil {
+		return err
+	} else if rv != 0 {
+		return apistorage.ErrResourceVersionSetOnCreate
+	}
+	raw, err := s.encode(obj)
+	if err != nil {
+		return err
+	}
 	//= docs/spec/fleet.md#3-storage-model
-	//= type=exception
-	//= reason=the storage.Interface seam does not write registers yet; tracked in issue #29
-	//# Each object MUST be stored in one cask register keyed by resource type and name.
-	return ErrNotImplemented
+	//# A create MUST use a compare-and-set that requires the object register to be absent.
+	v, err := s.kv.CAS(ctx, reg, nil, raw)
+	if errors.Is(err, caspaxos.ErrConflict) {
+		return apistorage.NewKeyExistsError(key, 0)
+	}
+	if err != nil {
+		return err
+	}
+	//= docs/spec/fleet.md#3-storage-model
+	//# A mutation MUST write the object register before the index register.
+	if err := WriteIndex(ctx, s.kv, s.resource, name); err != nil {
+		// The object is committed. The next index write for this name,
+		// or the sweep, records it.
+		return fmt.Errorf("cask storage: create %q: object written, index write failed: %w", key, err)
+	}
+	if out == nil {
+		return nil
+	}
+	return s.decode(key, raw, v.Seq, out)
 }
 
 // Delete returns ErrNotImplemented.
