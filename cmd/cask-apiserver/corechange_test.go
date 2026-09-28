@@ -36,16 +36,16 @@ func hasMembers(m *membership, ids []uint64) bool {
 // startFleetOfThree founds a fleet on member 1 and joins members 2 and 3 as
 // participants. It returns the founder's server and a cancel func that stops
 // the founder's loop.
-func startFleetOfThree(t *testing.T, ctx context.Context) (ms []*membership, stopFounder func()) {
+func startFleetOfThree(t *testing.T, ctx context.Context, opts ...func(*membershipConfig)) (ms []*membership, stopFounder func()) {
 	t.Helper()
 	fctx, fcancel := context.WithCancel(ctx)
-	founder, fsrv := newTestMemberServer(t, 1, true, nil, 10*time.Second)
+	founder, fsrv := newTestMemberServer(t, 1, true, nil, 10*time.Second, opts...)
 	if err := founder.start(fctx); err != nil {
 		t.Fatalf("founder: %v", err)
 	}
 	ms = []*membership{founder}
 	for _, id := range []uint64{2, 3} {
-		j := newTestMember(t, id, false, []string{founder.cfg.Advertise}, 10*time.Second)
+		j := newTestMember(t, id, false, []string{founder.cfg.Advertise}, 10*time.Second, opts...)
 		if err := j.start(ctx); err != nil {
 			t.Fatalf("joiner %d: %v", id, err)
 		}
@@ -110,6 +110,49 @@ func TestCoreGrowthCarriesDataRegisters(t *testing.T) {
 		}
 		if string(got) != val {
 			t.Fatalf("read %s = %q after the founder stopped, want %q: the core change lost a committed write", key, got, val)
+		}
+	}
+}
+
+// A resumed carry skips only the keys carried under the same joint
+// configuration. A Remove that narrows the new core, or any later core
+// change, gives a new configuration, and every key must go again.
+func TestCarryRecordIsPerJointConfiguration(t *testing.T) {
+	//= docs/spec/fleet.md#6-membership
+	//= type=test
+	//# A resumed core change MUST carry every data register that it did not carry under the same joint configuration.
+	joint := func(gen uint64, old, nw []uint64) roster.Value {
+		return roster.Value{ConfigGen: gen, Core: old, Joint: &roster.Joint{Old: old, New: nw}}
+	}
+	a := joint(1, []uint64{1}, []uint64{1, 2, 3})
+	keys := [][]byte{[]byte("a"), []byte("b"), []byte("c")}
+	names := func(ks [][]byte) []string {
+		var out []string
+		for _, k := range ks {
+			out = append(out, string(k))
+		}
+		return out
+	}
+
+	var r carryRecord
+	if got := names(r.pending(a, keys)); !slices.Equal(got, []string{"a", "b", "c"}) {
+		t.Fatalf("first attempt pending = %v, want every key", got)
+	}
+	r.mark(a, []byte("a"))
+	r.mark(joint(3, []uint64{1}, []uint64{1, 2, 3}), []byte("b")) // another configuration
+	if got := names(r.pending(a, keys)); !slices.Equal(got, []string{"b", "c"}) {
+		t.Fatalf("resume pending = %v, want [b c]", got)
+	}
+	for name, v := range map[string]roster.Value{
+		"newer gen": joint(2, []uint64{1}, []uint64{1, 2, 3}),
+		"narrowed":  joint(1, []uint64{1}, []uint64{1, 2}),
+		"other old": joint(1, []uint64{1, 2, 3}, []uint64{1, 2, 3}),
+	} {
+		var r carryRecord
+		r.pending(a, keys)
+		r.mark(a, []byte("a"))
+		if got := names(r.pending(v, keys)); !slices.Equal(got, []string{"a", "b", "c"}) {
+			t.Errorf("%s: pending = %v, want every key", name, got)
 		}
 	}
 }

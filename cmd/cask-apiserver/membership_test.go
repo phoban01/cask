@@ -18,22 +18,23 @@ import (
 
 // newTestMember serves a member's acceptor and roster endpoints on a local
 // port, the way main does with --listen-consensus.
-func newTestMember(t *testing.T, id uint64, bootstrap bool, seeds []string, joinTimeout time.Duration) *membership {
+func newTestMember(t *testing.T, id uint64, bootstrap bool, seeds []string, joinTimeout time.Duration, opts ...func(*membershipConfig)) *membership {
 	t.Helper()
-	m, _ := newTestMemberServer(t, id, bootstrap, seeds, joinTimeout)
+	m, _ := newTestMemberServer(t, id, bootstrap, seeds, joinTimeout, opts...)
 	return m
 }
 
 // newTestMemberServer is newTestMember that also returns the server, so a
-// test can stop the member.
-func newTestMemberServer(t *testing.T, id uint64, bootstrap bool, seeds []string, joinTimeout time.Duration) (*membership, *http.Server) {
+// test can stop the member. Each opt changes the config before the member
+// starts.
+func newTestMemberServer(t *testing.T, id uint64, bootstrap bool, seeds []string, joinTimeout time.Duration, opts ...func(*membershipConfig)) (*membership, *http.Server) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	st := store.NewMem()
-	m := newMembership(membershipConfig{
+	cfg := membershipConfig{
 		ID:          id,
 		Advertise:   ln.Addr().String(),
 		Bootstrap:   bootstrap,
@@ -43,7 +44,11 @@ func newTestMemberServer(t *testing.T, id uint64, bootstrap bool, seeds []string
 		Store:       st,
 		Interval:    20 * time.Millisecond,
 		JoinTimeout: joinTimeout,
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}
+	for _, o := range opts {
+		o(&cfg)
+	}
+	m := newMembership(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	srv := &http.Server{Handler: hangable(t, m, m.handler())}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
