@@ -113,31 +113,19 @@ func expectedSteps(t *testing.T, s *Store, from, to uint64) []string {
 	return out
 }
 
-// withRepair runs op, a mutation of name through s, until it lands. The
-// reads of the open watches, and the index reads of every get, update,
-// and delete, add to the rounds that an index register round loses
-// (issue #149).
+// untilLanded runs op, a mutation, until it lands. The reads of the
+// open watches, and the index reads of every get, update, and delete,
+// compete with its rounds (issue #149).
 //
 // A mutation that lost too many rounds before its object write committed
-// wrote nothing, so withRepair runs it again. A mutation whose object
-// write committed but whose index write lost too many rounds reports
-// "index write failed". withRepair then runs the index write again, as
-// the sweep does, and returns nil once it lands. Any other error comes
-// back unchanged.
-func withRepair(ctx context.Context, s *Store, name string, op func() error) error {
+// wrote nothing, so untilLanded runs it again. The Store retries an index
+// write that lost a round, so "index write failed" is a test failure.
+// Any other error comes back unchanged.
+func untilLanded(op func() error) error {
 	for {
 		err := op()
-		if err == nil || !errors.Is(err, caspaxos.ErrPreempted) {
+		if err == nil || !errors.Is(err, caspaxos.ErrPreempted) || strings.Contains(err.Error(), "index write failed") {
 			return err
-		}
-		if !strings.Contains(err.Error(), "index write failed") {
-			continue
-		}
-		for {
-			_, _, err = WriteIndex(ctx, s.kv, s.resource, name)
-			if !errors.Is(err, caspaxos.ErrPreempted) {
-				return err
-			}
 		}
 	}
 }
@@ -182,17 +170,17 @@ func TestWatchFromOldVersionDeliversEveryChangeInOrder(t *testing.T) {
 			defer wg.Done()
 			name := fmt.Sprintf("gpu-%d", i)
 			for r := range rounds {
-				err := withRepair(ctx, st, name, func() error {
+				err := untilLanded(func() error {
 					return st.Create(ctx, keyPrefix+name, device(name, "a100"), nil, 0)
 				})
 				if err == nil {
-					err = withRepair(ctx, st, name, func() error {
+					err = untilLanded(func() error {
 						return st.GuaranteedUpdate(ctx, keyPrefix+name, &v1alpha1.Device{}, false, nil,
 							mutate(func(d *v1alpha1.Device) { d.Spec.Model = fmt.Sprint(r) }), nil)
 					})
 				}
 				if err == nil {
-					err = withRepair(ctx, st, name, func() error {
+					err = untilLanded(func() error {
 						return st.Delete(ctx, keyPrefix+name, &v1alpha1.Device{}, nil, nil, nil, apistorage.DeleteOptions{})
 					})
 				}

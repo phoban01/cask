@@ -278,8 +278,14 @@ module fleet {
   //= type=implication
   //# Each index entry MUST record both the object register sequence and
   //# the index sequence at which the index register recorded it.
+  //= docs/spec/fleet.md#3-storage-model
+  //= type=implication
+  //# A mutation whose object write committed MUST retry its index write
+  //# when that index write loses a round or has an unknown outcome.
   // The writer's index write records the head, which may be newer than
   // its own write. The response looks its own entry up in the history.
+  // An attempt that lost its round and still landed is a `repair` step
+  // before `finish`. An attempt that did not land changes nothing.
   action finish(w) = all {
     writer.get(w) != Idle,
     { val p = wrote(writer.get(w))

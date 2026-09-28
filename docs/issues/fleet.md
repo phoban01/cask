@@ -1569,3 +1569,32 @@ lower.
 Files: `cmd/cask-apiserver/storage/index.go`, `internal/mvcc`, `internal/caspaxos`, `internal/owner`
 
 Done when: the reproduction runs 500 times with no regression, and the cause is written in the PR.
+
+## storage: a committed mutation fails when its index write loses a round
+
+labels: fleet, apiserver, agent-5m
+
+Spec: docs/spec/fleet.md#3-storage-model
+> When the index write of a mutation did not complete, the next index write for that object MUST record the object register's current sequence.
+
+CI on PR #167 failed in `TestWatchFromOldVersionDeliversEveryChangeInOrder`:
+
+```
+cask storage: delete ".../devices/gpu-1": object tombstoned, index write failed: caspaxos: write outcome unknown; re-read before retry
+```
+
+The delete's tombstone committed. Its index write then lost its round
+with `ErrUnknownOutcome`, and `writeIndex` returned the error. A client
+gets a 500 for a delete that happened. Create and update have the same
+shape. `writeIndex` retries only `ErrConflict`, and with no backoff.
+
+Task: retry an index write that ends in `ErrPreempted` or
+`ErrUnknownOutcome`, with jittered backoff and a bounded budget. Each
+attempt re-reads the index and the object head and compares and sets on
+the index sequence it read. Add a test that injects `ErrUnknownOutcome`
+into the index write of a create, an update, and a delete, and checks
+the returned resourceVersion.
+
+Files: `cmd/cask-apiserver/storage/index.go`, `cmd/cask-apiserver/storage/lostround_test.go`
+
+Done when: the new test passes, and fails without the change.

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
+	"github.com/phoban01/cask/internal/backoff"
 	"github.com/phoban01/cask/internal/caspaxos"
 	"github.com/phoban01/cask/internal/mvcc"
 )
@@ -82,9 +84,21 @@ func decodeIndex(raw []byte) (map[string]Entry, error) {
 	return entries, nil
 }
 
-// indexWriteRetries bounds how often WriteIndex retries after another
-// index writer changed the register first.
+// indexWriteRetries bounds how often WriteIndex retries. It retries after
+// another index writer changed the register first, and after a round
+// lost to other proposers.
 const indexWriteRetries = 32
+
+// contentionBackoff spaces the retries after a lost round. A round loses
+// when other rounds on the same register preempt it, so an immediate
+// retry often meets the same rounds again.
+var contentionBackoff = backoff.FullJitter(time.Millisecond, 50*time.Millisecond)
+
+// lostRound reports whether err means that a round lost to other
+// proposers: caspaxos.ErrPreempted, or caspaxos.ErrUnknownOutcome.
+func lostRound(err error) bool {
+	return errors.Is(err, caspaxos.ErrPreempted) || errors.Is(err, caspaxos.ErrUnknownOutcome)
+}
 
 // WriteIndex makes the index entry for name agree with the object
 // register. It records the object's current sequence, or removes the name
@@ -117,75 +131,134 @@ type indexWrite struct {
 
 // writeIndex is WriteIndex. It also reports whether it changed the index.
 //
-// It reads the index before the object. Object sequences only grow, so
-// the sequence it records is never lower than the entry it read. The
-// compare-and-set on the index sequence then makes sure no other writer
-// changed the index in between. An entry therefore never goes backwards
-// and never passes the object register.
+// It retries an attempt that another index writer beat, and an attempt
+// that lost its round. A lost round can end in ErrUnknownOutcome: the
+// compare-and-set on the index may or may not land. The retry is still
+// safe. Each attempt reads the index and the object head again, computes
+// the entry from that head, and compares and sets on the index sequence
+// it read. The read is itself a round on the index register. It either
+// chooses the lost write or chooses a value without it, and after that
+// the lost write can never land. If the lost write landed, the attempt
+// finds nothing to do. If not, the attempt writes the entry.
+//
+// When an earlier attempt landed, wrote is false. So a caller that needs
+// the index sequence of its own write looks the step up in the index
+// history when wrote is false, as Store.written and Store.Delete do.
 func writeIndex(ctx context.Context, kv *mvcc.KV, resource, name string) (indexWrite, error) {
 	//= docs/spec/fleet.md#3-storage-model
-	//# Each resource type MUST have one index register that maps every object name to that object's latest sequence.
-	//= docs/spec/fleet.md#3-storage-model
-	//# The index register MUST NOT record a sequence higher than the object register holds.
-	//= docs/spec/fleet.md#3-storage-model
 	//# When the index write of a mutation did not complete, the next index write for that object MUST record the object register's current sequence.
+	//= docs/spec/fleet.md#3-storage-model
+	//# A mutation whose object write committed MUST retry its index write when that index write loses a round or has an unknown outcome.
+	var lost error
+	lostRounds := 0
 	for range indexWriteRetries {
-		chain, err := kv.History(ctx, IndexKey(resource))
-		if err != nil {
-			return indexWrite{}, err
-		}
-		idx, live, err := indexHead(chain)
-		if err != nil {
-			return indexWrite{}, fmt.Errorf("cask storage: decode %s index: %w", resource, err)
-		}
-		seq, objLive, err := objectHead(ctx, kv, resource, name)
-		if err != nil {
-			return indexWrite{}, err
-		}
-		cur, had := idx.Entries[name]
+		w, err := writeIndexOnce(ctx, kv, resource, name)
 		switch {
-		case objLive && had && cur.Obj == seq:
-			return indexWrite{entry: cur, live: true}, nil
-		case !objLive && !had:
-			return indexWrite{entry: Entry{Idx: idx.Seq}}, nil
-		case objLive:
-			//= docs/spec/fleet.md#3-storage-model
-			//# Each index entry MUST record both the object register sequence and the index sequence at which the index register recorded it.
-			idx.Entries[name] = Entry{Obj: seq, Idx: idx.Seq + 1}
+		case err == nil:
+			return w, nil
+		case errors.Is(err, caspaxos.ErrConflict):
+			// Another index writer changed the register after the read.
+		case lostRound(err):
+			lost = err
+			if err := contentionBackoff(ctx, lostRounds); err != nil {
+				return indexWrite{}, err
+			}
+			lostRounds++
 		default:
-			delete(idx.Entries, name)
-		}
-		next, err := json.Marshal(idx.Entries)
-		if err != nil {
-			return indexWrite{}, err
-		}
-		// The compare-and-set is on the index sequence, not the value. An
-		// index value can repeat, for example after a create and a
-		// delete of the same name, but a sequence never does. CASSeq
-		// with 0 matches an absent or tombstoned register.
-		expect := idx.Seq
-		if !live {
-			expect = 0
-		}
-		v, err := kv.CASSeq(ctx, IndexKey(resource), expect, next)
-		if err == nil {
-			if v.Seq != idx.Seq+1 {
-				return indexWrite{}, fmt.Errorf("cask storage: %s index write landed at %d, want %d",
-					resource, v.Seq, idx.Seq+1)
-			}
-			if objLive {
-				return indexWrite{entry: idx.Entries[name], live: true, wrote: true}, nil
-			}
-			return indexWrite{entry: Entry{Idx: v.Seq}, wrote: true, removed: cur}, nil
-		}
-		if !errors.Is(err, caspaxos.ErrConflict) {
 			return indexWrite{}, err
 		}
 		if err := ctx.Err(); err != nil {
 			return indexWrite{}, err
 		}
 	}
+	if lost != nil {
+		return indexWrite{}, fmt.Errorf("cask storage: %s index write for %q failed %d times, %d on lost rounds: %w",
+			resource, name, indexWriteRetries, lostRounds, lost)
+	}
 	return indexWrite{}, fmt.Errorf("cask storage: %s index write for %q lost %d races", resource, name, indexWriteRetries)
+}
+
+// writeIndexOnce is one attempt of writeIndex. It returns
+// caspaxos.ErrConflict when another index writer changed the register
+// after the read.
+//
+// It reads the index before the object. Object sequences only grow, so
+// the sequence it records is never lower than the entry it read. The
+// compare-and-set on the index sequence then makes sure no other writer
+// changed the index in between. An entry therefore never goes backwards
+// and never passes the object register.
+func writeIndexOnce(ctx context.Context, kv *mvcc.KV, resource, name string) (indexWrite, error) {
+	//= docs/spec/fleet.md#3-storage-model
+	//# Each resource type MUST have one index register that maps every object name to that object's latest sequence.
+	//= docs/spec/fleet.md#3-storage-model
+	//# The index register MUST NOT record a sequence higher than the object register holds.
+	chain, err := kv.History(ctx, IndexKey(resource))
+	if err != nil {
+		return indexWrite{}, err
+	}
+	idx, live, err := indexHead(chain)
+	if err != nil {
+		return indexWrite{}, fmt.Errorf("cask storage: decode %s index: %w", resource, err)
+	}
+	seq, objLive, err := objectHead(ctx, kv, resource, name)
+	if err != nil {
+		return indexWrite{}, err
+	}
+	cur, had := idx.Entries[name]
+	switch {
+	case objLive && had && cur.Obj == seq:
+		return indexWrite{entry: cur, live: true}, nil
+	case !objLive && !had:
+		return indexWrite{entry: Entry{Idx: idx.Seq}}, nil
+	case objLive:
+		//= docs/spec/fleet.md#3-storage-model
+		//# Each index entry MUST record both the object register sequence and the index sequence at which the index register recorded it.
+		idx.Entries[name] = Entry{Obj: seq, Idx: idx.Seq + 1}
+	default:
+		delete(idx.Entries, name)
+	}
+	next, err := json.Marshal(idx.Entries)
+	if err != nil {
+		return indexWrite{}, err
+	}
+	// The compare-and-set is on the index sequence, not the value. An
+	// index value can repeat, for example after a create and a delete of
+	// the same name, but a sequence never does. CASSeq with 0 matches an
+	// absent or tombstoned register.
+	expect := idx.Seq
+	if !live {
+		expect = 0
+	}
+	v, err := kv.CASSeq(ctx, IndexKey(resource), expect, next)
+	if err != nil {
+		return indexWrite{}, err
+	}
+	if v.Seq != idx.Seq+1 {
+		return indexWrite{}, fmt.Errorf("cask storage: %s index write landed at %d, want %d",
+			resource, v.Seq, idx.Seq+1)
+	}
+	if objLive {
+		return indexWrite{entry: idx.Entries[name], live: true, wrote: true}, nil
+	}
+	return indexWrite{entry: Entry{Idx: v.Seq}, wrote: true, removed: cur}, nil
+}
+
+// indexHistory reads the index history of resource. It retries a read
+// that lost its round, so a mutation whose writes committed does not fail
+// on the read that finds its own index step.
+func indexHistory(ctx context.Context, kv *mvcc.KV, resource string) (mvcc.Chain, error) {
+	var err error
+	for attempt := range indexWriteRetries {
+		var chain mvcc.Chain
+		chain, err = kv.History(ctx, IndexKey(resource))
+		if err == nil || !lostRound(err) {
+			return chain, err
+		}
+		if err := contentionBackoff(ctx, attempt); err != nil {
+			return mvcc.Chain{}, err
+		}
+	}
+	return mvcc.Chain{}, err
 }
 
 // ErrNotRecorded means that the retained index history holds no entry for
@@ -202,7 +275,7 @@ var ErrNotRecorded = errors.New("cask storage: the index history no longer holds
 // sets only on a sequence that the index recorded. So the index recorded
 // objSeq before the overwrite, and RecordedAt finds it.
 func RecordedAt(ctx context.Context, kv *mvcc.KV, resource, name string, objSeq uint64) (uint64, error) {
-	chain, err := kv.History(ctx, IndexKey(resource))
+	chain, err := indexHistory(ctx, kv, resource)
 	if err != nil {
 		return 0, err
 	}
@@ -230,7 +303,7 @@ func RecordedAt(ctx context.Context, kv *mvcc.KV, resource, name string, objSeq 
 // index write removed the name. It returns ErrNotRecorded when the
 // retained index history holds no such step.
 func RemovedAt(ctx context.Context, kv *mvcc.KV, resource, name string, objSeq uint64) (uint64, error) {
-	chain, err := kv.History(ctx, IndexKey(resource))
+	chain, err := indexHistory(ctx, kv, resource)
 	if err != nil {
 		return 0, err
 	}
