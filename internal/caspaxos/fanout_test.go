@@ -3,6 +3,7 @@ package caspaxos_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -240,6 +241,98 @@ func TestRejectionEndsPrepareWithHungPeer(t *testing.T) {
 			start := time.Now()
 			if _, err := p.Propose(ctx, key, caspaxos.Write([]byte("v"))); err != nil {
 				t.Fatalf("propose with one hung and one ahead acceptor: %v after %v", err, time.Since(start))
+			}
+		})
+	}
+}
+
+// preemptOnce promises prepares as usual. On its first accept, a competing
+// proposer first takes a higher promise, so that accept is rejected. This
+// is how an accept is rejected after its prepare succeeded.
+type preemptOnce struct {
+	inner caspaxos.AcceptorClient
+	once  sync.Once
+}
+
+func (p *preemptOnce) Prepare(ctx context.Context, key []byte, b caspaxos.Ballot) (caspaxos.PrepareReply, error) {
+	return p.inner.Prepare(ctx, key, b)
+}
+
+func (p *preemptOnce) Accept(ctx context.Context, key []byte, b caspaxos.Ballot, val []byte) (caspaxos.AcceptReply, error) {
+	var err error
+	p.once.Do(func() {
+		_, err = p.inner.Prepare(ctx, key, caspaxos.Ballot{Counter: b.Counter + 1, NodeID: 9})
+	})
+	if err != nil {
+		return caspaxos.AcceptReply{}, err
+	}
+	return p.inner.Accept(ctx, key, b, val)
+}
+
+// One acceptor accepts, one rejects because a competitor promised a higher
+// ballot between the phases, and one hangs. The accept must not wait for
+// the hung acceptor. Before #151, it waited, because the hung acceptor
+// could still complete a quorum.
+//
+// Returning early must not hide a write that may land. The first acceptor
+// holds the new value and the hung one may too, so a write returns
+// ErrUnknownOutcome and runs its change once. A read writes back the
+// current value, so it retries and succeeds.
+func TestRejectionEndsAcceptWithHungPeer(t *testing.T) {
+	//= docs/spec/fleet.md#6-membership
+	//= type=test
+	//# A core change MUST finish while a majority of the old core and a majority of the new core answer.
+	for _, tc := range []struct {
+		name  string
+		joint bool
+		write bool
+	}{
+		{"single group write", false, true},
+		{"single group read", false, false},
+		{"joint write", true, true},
+		{"joint read", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			key := []byte("k")
+			fresh := caspaxos.NewAcceptor(store.NewMem())
+			preempted := &preemptOnce{inner: caspaxos.NewAcceptor(store.NewMem())}
+			hung := newBlocking()
+			var p *caspaxos.Proposer
+			if tc.joint {
+				// The shape of the core change: old {1,2,3} with 2 hung,
+				// new {1,2,3,4,5} with 4 and 5 empty.
+				old := []caspaxos.AcceptorClient{fresh, hung, preempted}
+				nw := []caspaxos.AcceptorClient{fresh, hung, preempted,
+					caspaxos.NewAcceptor(store.NewMem()), caspaxos.NewAcceptor(store.NewMem())}
+				p = caspaxos.NewJointProposer(1, [][]caspaxos.AcceptorClient{old, nw})
+			} else {
+				p = caspaxos.NewProposer(1, []caspaxos.AcceptorClient{fresh, hung, preempted})
+			}
+			calls := 0
+			change := func(cur []byte) ([]byte, error) {
+				calls++
+				if tc.write {
+					return []byte("v"), nil
+				}
+				return cur, nil
+			}
+			start := time.Now()
+			_, err := p.Propose(ctx, key, change)
+			elapsed := time.Since(start)
+			if tc.write {
+				if !errors.Is(err, caspaxos.ErrUnknownOutcome) {
+					t.Fatalf("write: err = %v after %v, want ErrUnknownOutcome", err, elapsed)
+				}
+				if calls != 1 {
+					t.Fatalf("write: change ran %d times, want 1", calls)
+				}
+			} else if err != nil {
+				t.Fatalf("read: %v after %v", err, elapsed)
+			}
+			if elapsed > time.Second {
+				t.Fatalf("propose took %v; the hung acceptor set the pace", elapsed)
 			}
 		})
 	}

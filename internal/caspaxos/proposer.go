@@ -175,18 +175,19 @@ func (p *Proposer) quorumStillPossible(ok, undecided []bool) bool {
 //   - The round writes back the current value (a read, or a change that
 //     returned ErrConflict). That value changes nothing if chosen.
 //   - Every acceptor explicitly rejected the accept. No acceptor holds the
-//     value. In practice only a single-acceptor configuration reaches
-//     this case, because the accept phase returns as soon as a quorum is
-//     lost. With two or more acceptors, some acceptor is then still in
-//     flight and may hold the value.
+//     value. Only a single-acceptor configuration reaches this case,
+//     because the accept phase returns at the first rejection. With two
+//     or more acceptors, each other acceptor then accepted, failed, or
+//     was still in flight, and may hold the value.
 //
 // In every other failed accept phase, some acceptor may hold the new value.
 // It accepted, or its reply was lost, or it was still in flight. A later
 // round can adopt that value and choose it. So Propose returns
-// ErrUnknownOutcome and does not start a new round. For three or more
-// acceptors, this is the result of every contended write whose accept
-// fails. The caller must re-read and retry with a compare-and-set, or with
-// a change that detects its own earlier write (mvcc does this with OpIDs;
+// ErrUnknownOutcome and does not start a new round. With two or more
+// acceptors, this is the result of every write whose accept is rejected,
+// even when the other acceptors would have formed a quorum. The caller
+// must re-read and retry with a compare-and-set, or with a change that
+// detects its own earlier write (mvcc does this with OpIDs;
 // ProposeResolving does it by comparing values).
 func (p *Proposer) Propose(ctx context.Context, key []byte, change ChangeFunc) ([]byte, error) {
 	var floor Ballot
@@ -345,7 +346,9 @@ func (p *Proposer) prepare(ctx context.Context, key []byte, b Ballot) (current [
 // the same early-quorum return and straggler cancellation as prepare. A
 // cancelled accept may still land on a straggler later — Paxos tolerates
 // this, and the duplicate_delivery sim fault exercises the idempotency it
-// relies on.
+// relies on. Like prepare, it returns at the first rejection. Without
+// this, an accept, a rejection, and a hung acceptor wait forever on the
+// hung one.
 //
 // mayHold reports whether any acceptor may now hold val: one that accepted,
 // one whose reply failed (the accept may have landed and the reply got
@@ -376,8 +379,16 @@ func (p *Proposer) accept(ctx context.Context, key []byte, b Ballot, val []byte)
 		case r.err != nil:
 			// unreachable acceptor: a non-vote, but the accept may have landed
 		case !r.v.Accepted:
-			conflict = conflict.Max(r.v.Conflict)
+			// A higher ballot preempts this round. Stop here. Do not
+			// wait for the undecided acceptors: one of them can hang,
+			// and the round must not wait on it while a majority
+			// answers (#151). Stopping does not change what the other
+			// acceptors may hold. Each one that did not reject still
+			// counts in mayHold.
+			//= docs/spec/fleet.md#6-membership
+			//# A core change MUST finish while a majority of the old core and a majority of the new core answer.
 			rejected++
+			return conflict.Max(r.v.Conflict), false, rejected < n, nil
 		default:
 			accepted[r.i] = true
 		}

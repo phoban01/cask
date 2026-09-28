@@ -108,8 +108,8 @@ func (s slowAccept) Accept(ctx context.Context, _ []byte, _ caspaxos.Ballot, _ [
 	return caspaxos.AcceptReply{}, ctx.Err()
 }
 
-// With three acceptors, two rejections end the accept phase while the
-// third is still in flight. That acceptor may still take the value, so
+// With three acceptors, the first rejection ends the accept phase while
+// the third acceptor is still in flight. That acceptor may still take the value, so
 // Propose must return ErrUnknownOutcome and must not run the change again.
 func TestTwoRejectOneSlowReturnsUnknownOutcome(t *testing.T) {
 	//= docs/spec/fleet.md#3-storage-model
