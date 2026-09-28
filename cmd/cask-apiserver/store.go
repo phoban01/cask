@@ -23,6 +23,10 @@ type fleetStore struct {
 	kv       *mvcc.KV
 	sessions *lease.Sessions
 	locks    *lease.Locks
+
+	// afterRead, if set, runs after update or delete reads the object and
+	// before it writes. Tests use it to land a concurrent write in that gap.
+	afterRead func()
 }
 
 // errConflict maps to HTTP 409 (stale resourceVersion or failed create-only).
@@ -85,7 +89,7 @@ func (s *fleetStore) create(ctx context.Context, resource, name string, raw []by
 // concurrency: k8s resourceVersion semantics ARE per-key CAS), then records
 // the new sequence in the type index.
 func (s *fleetStore) update(ctx context.Context, resource, name string, raw []byte, expectRV uint64) (uint64, error) {
-	cur, rv, err := s.get(ctx, resource, name)
+	_, rv, err := s.get(ctx, resource, name)
 	if err != nil {
 		return 0, err
 	}
@@ -94,9 +98,14 @@ func (s *fleetStore) update(ctx context.Context, resource, name string, raw []by
 	if rv != expectRV {
 		return 0, fmt.Errorf("%w: resourceVersion %d is stale (current %d)", errConflict, expectRV, rv)
 	}
+	if s.afterRead != nil {
+		s.afterRead()
+	}
+	// Compare the sequence, not the value. A value can change and change
+	// back, but a sequence never repeats.
 	//= docs/spec/fleet.md#3-storage-model
 	//# An update MUST use a compare-and-set on the resourceVersion the client supplied.
-	v, err := s.kv.CAS(ctx, objectKey(resource, name), cur, raw)
+	v, err := s.kv.CASSeq(ctx, objectKey(resource, name), expectRV, raw)
 	// An accept that reached only a minority gives an unknown outcome.
 	// mvcc retries it and finds its own OpID if the write landed, but the
 	// retry budget can run out. The caller then sees an error for a write
@@ -109,21 +118,38 @@ func (s *fleetStore) update(ctx context.Context, resource, name string, raw []by
 	if err != nil {
 		return 0, err
 	}
+	//= docs/spec/fleet.md#3-storage-model
+	//# A mutation MUST write the object register before the index register.
 	if err := storage.WriteIndex(ctx, s.kv, resource, name); err != nil {
 		return 0, err
 	}
 	return v.Seq, nil
 }
 
+// delete tombstones the version it read, then removes the name from the
+// type index. A write that lands between the read and the tombstone makes
+// the delete return errConflict. The caller re-reads and decides again.
 func (s *fleetStore) delete(ctx context.Context, resource, name string) error {
-	if _, _, err := s.get(ctx, resource, name); err != nil {
+	_, rv, err := s.get(ctx, resource, name)
+	if err != nil {
 		return err
+	}
+	if s.afterRead != nil {
+		s.afterRead()
 	}
 	//= docs/spec/fleet.md#3-storage-model
 	//# A delete MUST tombstone the object register before it removes the name from the index register.
-	if _, err := s.kv.Delete(ctx, objectKey(resource, name)); err != nil {
+	_, err = s.kv.DeleteSeq(ctx, objectKey(resource, name), rv)
+	//= docs/spec/fleet.md#3-storage-model
+	//# A write that returned a conflict MAY have been committed.
+	if errors.Is(err, caspaxos.ErrConflict) {
+		return fmt.Errorf("%w: concurrent write to %s %q", errConflict, resource, name)
+	}
+	if err != nil {
 		return err
 	}
+	//= docs/spec/fleet.md#3-storage-model
+	//# A mutation MUST write the object register before the index register.
 	return storage.WriteIndex(ctx, s.kv, resource, name)
 }
 
