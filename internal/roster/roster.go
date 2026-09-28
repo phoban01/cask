@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 
@@ -98,6 +99,10 @@ type Roster struct {
 	mu       sync.Mutex
 	believed []uint64
 	gen      uint64
+
+	// carry moves registers other than the roster key onto the new core.
+	// It is nil when the core hosts only the roster key.
+	carry CarryFunc
 }
 
 // New returns a Roster for node self whose proposers are built by mk. The
@@ -196,9 +201,34 @@ func (r *Roster) Add(ctx context.Context, m Member) (Value, error) {
 
 // Remove deletes the node with the given id (idempotent if absent). It also
 // strips the id from the Core and from any in-flight Joint.New, so a
-// reconfiguration never finalises onto a removed node.
+// reconfiguration never finalises onto a removed node. A change to the Core
+// or to the Joint bumps ConfigGen, so every holder of a cached quorum sees
+// that it moved.
+//
+// While a Joint is in flight, a node in Joint.Old stays in Members. The old
+// quorum still counts it, and members resolve its address from Members.
+// Remove drops it on a later call, after the release.
 func (r *Roster) Remove(ctx context.Context, nodeID uint64) (Value, error) {
 	return r.write(ctx, func(cur Value) (Value, error) {
+		configChanged := false
+		if next := dropID(cur.Core, nodeID); len(next) != len(cur.Core) {
+			cur.Core = next
+			configChanged = true
+		}
+		inOld := false
+		if cur.Joint != nil {
+			if next := dropID(cur.Joint.New, nodeID); len(next) != len(cur.Joint.New) {
+				cur.Joint.New = next
+				configChanged = true
+			}
+			inOld = slices.Contains(cur.Joint.Old, nodeID)
+		}
+		if configChanged {
+			cur.ConfigGen++
+		}
+		if inOld {
+			return cur, nil
+		}
 		out := cur.Members[:0:0]
 		removed := false
 		for _, e := range cur.Members {
@@ -208,10 +238,6 @@ func (r *Roster) Remove(ctx context.Context, nodeID uint64) (Value, error) {
 			}
 			out = append(out, e)
 		}
-		cur.Core = dropID(cur.Core, nodeID)
-		if cur.Joint != nil {
-			cur.Joint.New = dropID(cur.Joint.New, nodeID)
-		}
 		if !removed {
 			return cur, nil
 		}
@@ -219,6 +245,22 @@ func (r *Roster) Remove(ctx context.Context, nodeID uint64) (Value, error) {
 		cur.Epoch++
 		return cur, nil
 	})
+}
+
+// ConfigGenOf returns the ConfigGen of an encoded roster value. An empty
+// value has ConfigGen 0. The write fence in the extension server reads it
+// from the roster value its acceptor holds.
+func ConfigGenOf(raw []byte) (uint64, error) {
+	if len(raw) == 0 {
+		return 0, nil
+	}
+	var v struct {
+		ConfigGen uint64 `json:"cfg_gen"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return 0, fmt.Errorf("roster: decode: %w", err)
+	}
+	return v.ConfigGen, nil
 }
 
 // UpdateRangeIDs atomically rewrites the live range-id list (§4.3). This is

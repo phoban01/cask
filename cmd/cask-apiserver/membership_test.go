@@ -20,24 +20,34 @@ import (
 // port, the way main does with --listen-consensus.
 func newTestMember(t *testing.T, id uint64, bootstrap bool, seeds []string, joinTimeout time.Duration) *membership {
 	t.Helper()
+	m, _ := newTestMemberServer(t, id, bootstrap, seeds, joinTimeout)
+	return m
+}
+
+// newTestMemberServer is newTestMember that also returns the server, so a
+// test can stop the member.
+func newTestMemberServer(t *testing.T, id uint64, bootstrap bool, seeds []string, joinTimeout time.Duration) (*membership, *http.Server) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	st := store.NewMem()
 	m := newMembership(membershipConfig{
 		ID:          id,
 		Advertise:   ln.Addr().String(),
 		Bootstrap:   bootstrap,
 		Seeds:       seeds,
-		Local:       caspaxos.NewAcceptor(store.NewMem()),
+		Local:       caspaxos.NewAcceptor(st),
 		HTTP:        transport.TCP{}.HTTPClient(),
+		Store:       st,
 		Interval:    20 * time.Millisecond,
 		JoinTimeout: joinTimeout,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	srv := &http.Server{Handler: m.handler()}
+	srv := &http.Server{Handler: hangable(t, m, m.handler())}
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
-	return m
+	return m, srv
 }
 
 func memberIDs(v roster.Value) []uint64 {

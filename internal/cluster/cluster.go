@@ -234,25 +234,44 @@ func containsMember(members []roster.Member, id uint64) bool {
 // FetchCoreHint queries each candidate's GET /roster and returns the value
 // with the highest ConfigGen. It is a non-consensus hint that lets a joiner
 // discover the current acceptor core before it can read the register itself.
+//
+// It asks every candidate at once and waits for all answers or for ctx, so
+// one hung peer costs at most the caller's deadline, not every tick.
 func FetchCoreHint(ctx context.Context, hc *http.Client, candidates []roster.Member) (Snapshot, bool) {
-	var best Snapshot
-	found := false
+	answers := make(chan Snapshot, len(candidates))
+	asked := 0
 	for _, m := range candidates {
 		if m.Addr == "" {
 			continue
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+m.Addr+"/roster", nil)
-		if err != nil {
-			continue
-		}
-		resp, err := hc.Do(req)
-		if err != nil {
-			continue
-		}
+		asked++
+		go func(addr string) {
+			var v Snapshot
+			defer func() { answers <- v }()
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/roster", nil)
+			if err != nil {
+				return
+			}
+			resp, err := hc.Do(req)
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+			if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+				v = Snapshot{}
+			}
+		}(m.Addr)
+	}
+	var best Snapshot
+	found := false
+	for range asked {
 		var v Snapshot
-		derr := json.NewDecoder(resp.Body).Decode(&v)
-		resp.Body.Close()
-		if derr != nil || v.ConfigGen == 0 {
+		select {
+		case v = <-answers:
+		case <-ctx.Done():
+			return best, found
+		}
+		if v.ConfigGen == 0 {
 			continue
 		}
 		// Prefer the freshest snapshot: higher config generation (newest core)

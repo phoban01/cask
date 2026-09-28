@@ -128,13 +128,18 @@ func main() {
 			local = caspaxos.NewAcceptor(st)
 			var h http.Handler
 			if dynamic {
+				// Every peer call carries a context, and the client also has
+				// a timeout, so no peer request can hang forever.
+				hc := transport.TCP{}.HTTPClient()
+				hc.Timeout = 10 * time.Second
 				mem = newMembership(membershipConfig{
 					ID:        *self,
 					Advertise: *adv,
 					Bootstrap: *boot,
 					Seeds:     parseSeeds(*seed),
 					Local:     local,
-					HTTP:      transport.TCP{}.HTTPClient(),
+					Store:     st,
+					HTTP:      hc,
 				}, log)
 				h = mem.handler()
 			} else {

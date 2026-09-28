@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/phoban01/cask/internal/caspaxos"
 )
 
 // apiServer serves the fleet.cask.dev/v1alpha1 group in the shapes kubectl
@@ -434,6 +436,14 @@ func httpStoreErr(w http.ResponseWriter, err error) {
 		code, reason = http.StatusNotFound, "NotFound"
 	case errors.Is(err, errConflict):
 		code, reason = http.StatusConflict, "Conflict"
+	case errors.Is(err, caspaxos.ErrRangeChanged):
+		// A voter fenced the write because the core changed under it. The
+		// write did not apply; the client retries after the member's view
+		// catches up.
+		//= docs/spec/fleet.md#6-membership
+		//# The extension server MUST answer a data write that a voter rejected as stale with a retryable status.
+		code, reason = http.StatusServiceUnavailable, "ServiceUnavailable"
+		w.Header().Set("Retry-After", "1")
 	}
 	writeJSON(w, code, map[string]any{
 		"kind": "Status", "apiVersion": "v1", "status": "Failure",
