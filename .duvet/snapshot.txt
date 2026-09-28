@@ -12,7 +12,7 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST,implementation,test]: Each object MUST be stored in one cask register keyed by resource type and name.
     TEXT[!MUST,implementation,test]: Each resource type MUST have one index register that maps every object name to that object's latest sequence.
     TEXT[!MUST,implementation,test]: An object's resourceVersion MUST be the sequence of its object register.
-    TEXT[!MUST]: A list's resourceVersion MUST be the sequence of the index register.
+    TEXT[!MUST,implementation,test]: A list's resourceVersion MUST be the sequence of the index register.
     TEXT[!MUST,implementation,implication,test]: A mutation MUST write the object register before the index register.
     TEXT[!MUST,implementation,implication,test]: The index register MUST NOT record a sequence higher than the object register holds.
     TEXT[!MUST,implementation,implication,test]: When the index write of a mutation did not complete, the next index write for that object MUST record the object register's current sequence.
@@ -28,7 +28,7 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST]: An object value MUST NOT exceed 1 MiB.
 
   SECTION: [4. List and watch](#4-list-and-watch)
-    TEXT[!MUST,exception]: A list MUST return every object that the index register names at the index sequence the list reports.
+    TEXT[!MUST,implementation,test,exception]: A list MUST return every object that the index register names at the index sequence the list reports.
     TEXT[!MUST,implication,exception]: A watch from a resourceVersion MUST deliver every index change after that version, in order, with no gaps.
     TEXT[!MUST,exception]: A watch whose start version is compacted MUST end with 410 Gone.
     TEXT[!MUST,exception]: Each watch event MUST carry the object at the sequence the index recorded.
