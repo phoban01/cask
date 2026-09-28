@@ -31,6 +31,79 @@ data:
   tls.crt: __CONSENSUS_CERT__
   tls.key: __CONSENSUS_KEY__
 ---
+# The identity of the apiserver toward the kube-apiserver of this cluster.
+# The apiserver delegates authentication and authorization of each request
+# for the group to the kube-apiserver, with TokenReview and
+# SubjectAccessReview.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cask-apiserver
+  namespace: cask-system
+---
+# system:auth-delegator allows TokenReview and SubjectAccessReview.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cask-apiserver:auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: cask-apiserver
+    namespace: cask-system
+---
+# The extension-apiserver-authentication ConfigMap holds the CA of the
+# aggregation front proxy and the client CA of the cluster.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cask-apiserver:auth-reader
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: cask-apiserver
+    namespace: cask-system
+---
+# The generic server watches namespaces, admission configuration, and
+# priority and fairness configuration, as every aggregated apiserver does.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cask-apiserver
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, watch]
+  - apiGroups: [admissionregistration.k8s.io]
+    resources: ["*"]
+    verbs: [get, list, watch]
+  - apiGroups: [flowcontrol.apiserver.k8s.io]
+    resources: [prioritylevelconfigurations, flowschemas]
+    verbs: [get, list, watch]
+  - apiGroups: [flowcontrol.apiserver.k8s.io]
+    resources: [prioritylevelconfigurations/status, flowschemas/status]
+    verbs: [patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cask-apiserver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cask-apiserver
+subjects:
+  - kind: ServiceAccount
+    name: cask-apiserver
+    namespace: cask-system
+---
 # A StatefulSet, not a Deployment: each voter keeps its acceptor state on
 # its own PersistentVolumeClaim. The claim outlives the pod, so the state
 # survives a restart, a reschedule, and a scale to zero (the zombie act
@@ -50,6 +123,7 @@ spec:
     metadata:
       labels: {app: cask-apiserver}
     spec:
+      serviceAccountName: cask-apiserver
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       containers:
@@ -62,14 +136,13 @@ spec:
               valueFrom:
                 fieldRef: {fieldPath: status.hostIP}
           args:
-            - --listen=:9443
+            - --secure-port=9443
             - --cluster=__CLUSTER__
             - --id=__ID__
             - --listen-consensus=:8001
             - --advertise-consensus=$(HOST_IP):8001
             - --cask-peers=__CASK_PEERS__
             - --data-dir=/var/lib/cask
-            - --self-signed-tls
             - --consensus-cert=/etc/cask/consensus/tls.crt
             - --consensus-key=/etc/cask/consensus/tls.key
             - --consensus-ca=/etc/cask/consensus/ca.crt
@@ -85,7 +158,7 @@ spec:
               mountPath: /etc/cask/consensus
               readOnly: true
           readinessProbe:
-            httpGet: {path: /healthz, port: 9443, scheme: HTTPS}
+            httpGet: {path: /readyz, port: 9443, scheme: HTTPS}
             initialDelaySeconds: 1
       volumes:
         - name: consensus-tls
@@ -139,7 +212,7 @@ spec:
   version: v1alpha1
   groupPriorityMinimum: 1000
   versionPriority: 15
-  insecureSkipTLSVerify: true # demo: the backend serves a self-signed cert
+  insecureSkipTLSVerify: true # demo: the backend serves a self-signed cert (issue #41)
   service:
     name: cask-apiserver
     namespace: cask-system

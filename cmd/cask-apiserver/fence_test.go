@@ -13,11 +13,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/phoban01/cask/cmd/cask-apiserver/apis/fleet/v1alpha1"
 	"github.com/phoban01/cask/internal/caspaxos"
 	"github.com/phoban01/cask/internal/ranges"
 	"github.com/phoban01/cask/internal/roster"
 	"github.com/phoban01/cask/internal/store"
 	"github.com/phoban01/cask/internal/transport"
+	"k8s.io/apiserver/pkg/endpoints/handlers/responsewriters"
 )
 
 // acceptRoster makes acc accept a roster value with ConfigGen gen, the way
@@ -200,5 +202,27 @@ func TestStaleWriteGetsRetryableStatus(t *testing.T) {
 	}
 	if rec.Header().Get("Retry-After") == "" {
 		t.Fatal("no Retry-After header")
+	}
+}
+
+// The generic server answers a fenced write with 503 and Retry-After too.
+func TestStaleWriteGetsRetryableStatusFromGenericServer(t *testing.T) {
+	//= docs/spec/fleet.md#6-membership
+	//= type=test
+	//# The extension server MUST answer a data write that a voter rejected as stale with a retryable status.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, groupPrefix+"/devices/gpu-1", nil)
+	err := retryable(fmt.Errorf("update: %w", caspaxos.ErrRangeChanged))
+	responsewriters.ErrorNegotiated(err, fleetCodecs, v1alpha1.SchemeGroupVersion, rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") != "1" {
+		t.Fatalf("Retry-After = %q, want 1", rec.Header().Get("Retry-After"))
+	}
+	// Other errors pass through unchanged.
+	other := errors.New("boom")
+	if got := retryable(other); got != other {
+		t.Fatalf("retryable(%v) = %v", other, got)
 	}
 }

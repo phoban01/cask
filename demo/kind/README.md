@@ -83,9 +83,16 @@ The script walks four acts:
   across clusters. Upgrade one cluster at a time, as
   [docs/runbooks/rolling-upgrade.md](../../docs/runbooks/rolling-upgrade.md)
   describes.
-- The APIService is registered with `insecureSkipTLSVerify: true` against
-  the apiserver's per-boot self-signed cert (`--self-signed-tls`); real
-  deployments want real serving certs and cask's §5.4 wire hardening.
+- **Delegated auth.** The apiserver is a generic server from
+  `k8s.io/apiserver`. The kube-apiserver of each cluster authenticates and
+  authorizes every request for the group: the apiserver asks it with
+  TokenReview and SubjectAccessReview. The `cask-apiserver`
+  ServiceAccount is bound to `system:auth-delegator` and may read the
+  `extension-apiserver-authentication` ConfigMap.
+- The APIService is registered with `insecureSkipTLSVerify: true`. With
+  no `--tls-cert-file`, the apiserver makes a self-signed certificate in
+  memory at each start. Issue #41 replaces it with a certificate that the
+  kube-apiserver can verify.
 - Claim TTLs in the demo are 15s so the zombie act completes quickly; the
   lease is renewed by the claim's managing apiserver every 2s reconcile tick.
 - Everything the demo shows also runs as in-process tests

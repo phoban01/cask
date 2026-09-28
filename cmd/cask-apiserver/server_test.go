@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/phoban01/cask/cmd/cask-apiserver/apis/fleet/v1alpha1"
 	"github.com/phoban01/cask/internal/caspaxos"
 	"github.com/phoban01/cask/internal/hlc"
 	"github.com/phoban01/cask/internal/lease"
@@ -298,7 +299,7 @@ func TestZombieHolderIsFenced(t *testing.T) {
 
 	// The zombie's stale device-status write cannot mask the live lease.
 	if err := f.a.api.claims.setDeviceLease(ctx, "lidar-3",
-		&LeaseRef{Cluster: "cluster-a", Claim: "mapper", Fence: zombieFence}); err != nil {
+		&v1alpha1.LeaseRef{Cluster: "cluster-a", Claim: "mapper", Fence: zombieFence}); err != nil {
 		t.Fatal(err)
 	}
 	dev := getDevice(t, f.b, "lidar-3")

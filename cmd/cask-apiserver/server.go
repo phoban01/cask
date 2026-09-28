@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/phoban01/cask/cmd/cask-apiserver/apis/fleet/v1alpha1"
 	"github.com/phoban01/cask/internal/caspaxos"
 )
 
@@ -30,9 +31,10 @@ type apiServer struct {
 
 func newAPIServer(cluster string, store *fleetStore, log *slog.Logger) *apiServer {
 	return &apiServer{
-		cluster:   cluster,
-		store:     store,
-		claims:    &claimController{cluster: cluster, store: store, log: log},
+		cluster: cluster,
+		store:   store,
+		claims: &claimController{cluster: cluster, store: legacyClaims{fs: store},
+			sessions: store.sessions, locks: store.locks, log: log},
 		log:       log,
 		watchPoll: 500 * time.Millisecond,
 	}
@@ -46,11 +48,11 @@ func (s *apiServer) routes() *http.ServeMux {
 	// delegated authentication or authorization.
 	//= docs/spec/fleet.md#2-resources
 	//= type=exception
-	//= reason=the server is a plain net/http mux; tracked in issue #38
+	//= reason=the legacy mux behind --legacy-http is plain net/http; tracked in issue #190
 	//# The extension server MUST be built on the generic server in k8s.io/apiserver.
 	//= docs/spec/fleet.md#2-resources
 	//= type=exception
-	//= reason=the plain mux does no delegated auth; tracked in issue #38
+	//= reason=the legacy mux behind --legacy-http does no delegated auth; tracked in issue #190
 	//# The extension server MUST delegate authentication and authorization to the local kube-apiserver.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/apis", s.serveGroupList)
@@ -226,7 +228,10 @@ func (s *apiServer) keepLastFence(ctx context.Context, name string, raw []byte, 
 	if err != nil || rv != expect {
 		return raw, nil // the update reports the error or the conflict
 	}
-	var old, dev Device
+	var (
+		old v1alpha1.Device
+		dev Device
+	)
 	if err := json.Unmarshal(stored, &old); err != nil {
 		return nil, err
 	}
@@ -247,12 +252,12 @@ func (s *apiServer) serveDelete(w http.ResponseWriter, r *http.Request, resource
 	// Deleting a Bound claim releases its device's global lease.
 	if resource == "deviceclaims" {
 		if raw, _, err := s.store.get(r.Context(), resource, name); err == nil {
-			var claim DeviceClaim
+			var claim v1alpha1.DeviceClaim
 			if json.Unmarshal(raw, &claim) == nil {
 				// The device must keep the claim's fence before the
 				// claim goes. If it does not, the delete fails and the
 				// client retries.
-				if err := s.claims.release(r.Context(), claim); err != nil {
+				if err := s.claims.release(r.Context(), &claim); err != nil {
 					httpStoreErr(w, err)
 					return
 				}
@@ -276,10 +281,10 @@ func (s *apiServer) serveDelete(w http.ResponseWriter, r *http.Request, resource
 func (s *apiServer) serveList(w http.ResponseWriter, r *http.Request, resource string) {
 	// The list reads the index and then each object at the sequence the
 	// index recorded. This plain mux does not report the index sequence.
-	// storage.Store.GetList does; issue #38 serves lists through it.
+	// storage.Store.GetList does; the generic server serves lists through it.
 	//= docs/spec/fleet.md#4-list-and-watch
 	//= type=exception
-	//= reason=the plain mux list reports no index sequence; tracked in issue #38
+	//= reason=the plain mux list reports no index sequence; tracked in issue #190
 	//# A list MUST return every object that the index register names at the index sequence the list reports.
 	_, raws, rvs, err := s.store.list(r.Context(), resource)
 	if err != nil {
@@ -306,23 +311,23 @@ func (s *apiServer) serveWatch(w http.ResponseWriter, r *http.Request, resource 
 	// The watch ignores the start resourceVersion and diffs one poll against
 	// the next. Two changes between polls merge into one event. An ADDED or
 	// MODIFIED event carries the object at the sequence the index recorded.
-	// storage.Store.Watch follows the index history instead; issue #38
+	// storage.Store.Watch follows the index history instead; the generic server
 	// serves watches through it.
 	//= docs/spec/fleet.md#4-list-and-watch
 	//= type=exception
-	//= reason=the plain mux poll-diff can merge changes and ignores the start version; tracked in issue #38
+	//= reason=the plain mux poll-diff can merge changes and ignores the start version; tracked in issue #190
 	//# A watch from a resourceVersion MUST deliver every index change after that version, in order, with no gaps.
 	//= docs/spec/fleet.md#4-list-and-watch
 	//= type=exception
-	//= reason=the plain mux watch has no compaction check and no 410; tracked in issue #38
+	//= reason=the plain mux watch has no compaction check and no 410; tracked in issue #190
 	//# A watch whose start version is compacted MUST end with 410 Gone.
 	//= docs/spec/fleet.md#4-list-and-watch
 	//= type=exception
-	//= reason=a plain mux DELETED event carries only the name, not the object; tracked in issue #38
+	//= reason=a plain mux DELETED event carries only the name, not the object; tracked in issue #190
 	//# Each watch event MUST carry the object at the sequence the index recorded.
 	//= docs/spec/fleet.md#4-list-and-watch
 	//= type=exception
-	//= reason=the plain mux poll-diffs the list; tracked in issue #38
+	//= reason=the plain mux poll-diffs the list; tracked in issue #190
 	//# Watch events SHOULD be pushed from the index register's change feed rather than polled.
 	fl, ok := w.(http.Flusher)
 	if !ok {
@@ -431,16 +436,7 @@ func (s *apiServer) normalize(resource string, body []byte, isCreate bool) (stri
 
 // runReconciler drives claim binding on an interval until ctx ends.
 func (s *apiServer) runReconciler(ctx context.Context, every time.Duration) {
-	t := time.NewTicker(every)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			s.claims.reconcileOnce(ctx)
-		}
-	}
+	s.claims.run(ctx, every)
 }
 
 // --- plumbing ---------------------------------------------------------------
