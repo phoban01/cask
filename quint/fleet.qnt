@@ -16,8 +16,9 @@
 //                     with no gaps
 //
 // Negative controls (`stepIndexFirst`, `stepIncrementIndex`,
-// `stepNoFenceCheck`, `stepDeleteIndexFirst`, `stepWatchJump`) each drop one
-// rule and MUST violate the matching invariant. scripts/quint-check.sh runs
+// `stepNoFenceCheck`, `stepDeleteIndexFirst`, `stepWatchJump`,
+// `stepReacquireAnyone`) each drop one rule and MUST violate the matching
+// invariant. scripts/quint-check.sh runs
 // both directions.
 //
 // Gate checks, read by scripts/quint-check.sh:
@@ -27,6 +28,7 @@
 // quint-check: control=stepNoFenceCheck:NoStaleEffect
 // quint-check: control=stepDeleteIndexFirst:IndexNeverAhead
 // quint-check: control=stepWatchJump:WatchGapFree
+// quint-check: control=stepReacquireAnyone:SingleHolder
 // quint-check: verify-steps=12
 module fleet {
   pure val NAMES = Set("a", "b")
@@ -198,6 +200,23 @@ module fleet {
     watchCursor' = watchCursor, delivered' = delivered,
   }
 
+  // The holder acquires again, as after a release that did not land. It
+  // keeps its tenure, so the fence stays the same.
+  //= docs/spec/fleet.md#5-claims-and-fencing
+  //= type=implication
+  //# An acquire by the session that already holds the lock MUST return the
+  //# current fence and MUST NOT mint a new one.
+  action reacquire(c, n) = all {
+    holder.get(n) == Held(c),
+    phase' = phase.set((c, n), Bound),
+    claimFence' = claimFence.set((c, n), fence.get(n)),
+    holder' = holder, fence' = fence,
+    objSeq' = objSeq, idxEntries' = idxEntries, idxSeq' = idxSeq,
+    pending' = pending, dirty' = dirty,
+    accepted' = accepted, regressions' = regressions,
+    watchCursor' = watchCursor, delivered' = delivered,
+  }
+
   // The holder's session lapses. The holder does not know yet: its claim
   // stays Bound until it observes the loss. That is the zombie.
   action expire(n) = all {
@@ -261,6 +280,7 @@ module fleet {
   action anyWriteObject = { nondet n = oneOf(NAMES) writeObject(n) }
   action anyDeleteObject = { nondet n = oneOf(NAMES) deleteObject(n) }
   action anyAcquire = { nondet c = oneOf(CLUSTERS) nondet n = oneOf(NAMES) acquire(c, n) }
+  action anyReacquire = { nondet c = oneOf(CLUSTERS) nondet n = oneOf(NAMES) reacquire(c, n) }
   action anyExpire = { nondet n = oneOf(NAMES) expire(n) }
   action anyObserveLost = { nondet c = oneOf(CLUSTERS) nondet n = oneOf(NAMES) observeLost(c, n) }
   action anyRelease = { nondet c = oneOf(CLUSTERS) nondet n = oneOf(NAMES) release(c, n) }
@@ -268,7 +288,7 @@ module fleet {
 
   action step = any {
     anyWriteObject, anyDeleteObject, writeIndex, crash, sweep, deliver,
-    anyAcquire, anyExpire, anyObserveLost, anyRelease, anyApplyEffect,
+    anyAcquire, anyReacquire, anyExpire, anyObserveLost, anyRelease, anyApplyEffect,
   }
 
   // ---- invariants -------------------------------------------------------------
@@ -397,6 +417,22 @@ module fleet {
   }
   action stepWatchJump = any { anyWriteObject, writeIndex, deliverJump }
 
+  // Bug 6: the re-entrant acquire does not check that the caller holds the
+  // lock, so a second cluster gets the current fence while the holder is
+  // still Bound.
+  action reacquireAnyone(c, n) = all {
+    holder.get(n) != Nobody,
+    phase' = phase.set((c, n), Bound),
+    claimFence' = claimFence.set((c, n), fence.get(n)),
+    holder' = holder, fence' = fence,
+    objSeq' = objSeq, idxEntries' = idxEntries, idxSeq' = idxSeq,
+    pending' = pending, dirty' = dirty,
+    accepted' = accepted, regressions' = regressions,
+    watchCursor' = watchCursor, delivered' = delivered,
+  }
+  action anyReacquireAnyone = { nondet c = oneOf(CLUSTERS) nondet n = oneOf(NAMES) reacquireAnyone(c, n) }
+  action stepReacquireAnyone = any { anyWriteObject, writeIndex, anyAcquire, anyReacquireAnyone }
+
   // ---- witness runs (`quint test`) ---------------------------------------------
 
   // A zombie's late effect is rejected once a successor has applied.
@@ -409,6 +445,18 @@ module fleet {
       .then(applyEffect("west", "a"))
       .then(applyEffect("east", "a"))
       .expect(accepted.get("a") == 2 and regressions == 0)
+
+  // A holder that acquires again keeps its fence. The next holder after a
+  // release still gets a higher one.
+  run reacquireKeepsFenceTest =
+    init
+      .then(writeObject("a")).then(writeIndex)
+      .then(acquire("east", "a"))
+      .then(reacquire("east", "a"))
+      .expect(fence.get("a") == 1 and claimFence.get(("east", "a")) == 1)
+      .then(release("east", "a"))
+      .then(acquire("west", "a"))
+      .expect(fence.get("a") == 2)
 
   // A crash between the two writes leaves the object invisible to lists
   // until the sweep runs. This is the window the spec's startup and
