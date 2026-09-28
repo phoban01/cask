@@ -38,7 +38,7 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST,implementation]: Binding a claim to an object MUST be the acquisition of that object's cask lock under the claim's session.
     TEXT[!MUST,implementation,implication,test]: At most one claim MUST be Bound to an object at the object's current fence.
     TEXT[!MUST,implementation,implication,test]: Every successful acquisition MUST mint a fence strictly greater than every fence previously minted for that object.
-    TEXT[!MUST,implementation]: A Bound claim MUST carry its fence in its status.
+    TEXT[!MUST,implementation,test]: A Bound claim MUST carry its fence in its status.
     TEXT[!MUST]: A controller MUST include the claim's fence in every effect it applies for that object.
     TEXT[!MUST,implementation,implication]: A receiver MUST reject an effect whose fence is lower than the highest fence it has accepted for that object.
     TEXT[!MUST,implementation,test]: A status write MUST NOT lower an advertised fence.
