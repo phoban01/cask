@@ -69,6 +69,59 @@ func TestStartupSweepRepairsLostIndexWrite(t *testing.T) {
 	}
 }
 
+// A running server repairs a lost index write on the next interval, with
+// no restart. The loop stops when its context ends.
+func TestIntervalSweepRepairsWithoutRestart(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# The extension server MUST reconcile the index register against the object registers at a fixed interval.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	founder := newTestMember(t, 1, true, nil, 10*time.Second)
+	if err := founder.start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	kv := newMemberKV(founder)
+	sw := &indexSweeper{kv: kv, list: founder.listDataKeys, log: quietLog()}
+	if err := sw.sweepAtStartup(ctx, 10*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	sctx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sw.sweepEvery(sctx, 20*time.Millisecond)
+	}()
+
+	// After startup, an object write lands and its index write is lost.
+	d, err := kv.Put(ctx, storage.ObjectKey("devices", "gpu-0"), []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, "the interval sweep to record gpu-0", func() bool {
+		seq, ok := indexEntry(t, kv, "devices", "gpu-0")
+		return ok && seq == d.Seq
+	})
+
+	stop()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sweep loop did not stop when its context ended")
+	}
+}
+
+func TestWithJitter(t *testing.T) {
+	for range 100 {
+		if got := withJitter(time.Second); got < time.Second || got >= time.Second+100*time.Millisecond {
+			t.Fatalf("withJitter(1s) = %v, want in [1s, 1.1s)", got)
+		}
+	}
+	if got := withJitter(5); got != 5 {
+		t.Fatalf("withJitter(5ns) = %v, want 5ns", got)
+	}
+}
+
 // On a core of three with one voter down, the sweep lists the keys on the
 // two voters that answer and still finds the object.
 func TestSweepListsMajorityOfCore(t *testing.T) {

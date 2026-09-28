@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"time"
 
 	"github.com/phoban01/cask/cmd/cask-apiserver/storage"
@@ -71,6 +72,36 @@ func (s *indexSweeper) sweepAtStartup(ctx context.Context, retry time.Duration) 
 		case <-time.After(retry):
 		}
 	}
+}
+
+// sweepEvery runs the sweep about once per interval until ctx ends. Each
+// wait adds a random jitter of up to a tenth of interval, so members
+// that start together do not sweep in step. A failed pass is logged, and
+// the next pass tries again.
+func (s *indexSweeper) sweepEvery(ctx context.Context, interval time.Duration) {
+	//= docs/spec/fleet.md#3-storage-model
+	//# The extension server MUST reconcile the index register against the object registers at a fixed interval.
+	t := time.NewTimer(withJitter(interval))
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if err := s.sweepOnce(ctx); err != nil && ctx.Err() == nil {
+			s.log.Warn("index sweep", "err", err)
+		}
+		t.Reset(withJitter(interval))
+	}
+}
+
+// withJitter returns d plus a random duration in [0, d/10).
+func withJitter(d time.Duration) time.Duration {
+	if j := int64(d / 10); j > 0 {
+		return d + time.Duration(rand.Int64N(j))
+	}
+	return d
 }
 
 // listDataKeys lists the data keys on a majority of the current core.

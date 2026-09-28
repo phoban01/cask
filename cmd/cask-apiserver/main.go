@@ -29,6 +29,7 @@ func main() {
 		adv     = flag.String("advertise-consensus", "", "this node's consensus address as peers reach it; required with --listen-consensus")
 		self    = flag.Uint64("id", 0, "node id (unique per apiserver); required with --bootstrap, --seed, and --cask-peers")
 		dataDir = flag.String("data-dir", "", "directory for durable consensus state (Pebble); empty = in-memory (an embedded acceptor that restarts empty forgets its promises — demo only)")
+		sweepIv = flag.Duration("index-sweep-interval", time.Minute, "how often to repair index entries that a crash left behind (each wait adds up to 10% jitter)")
 		selfTLS = flag.Bool("self-signed-tls", false, "serve HTTPS with an in-memory self-signed cert (required for k8s API aggregation; pair with insecureSkipTLSVerify on the APIService)")
 	)
 	flag.Parse()
@@ -56,6 +57,10 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if *cluster == "" {
 		log.Error("--cluster is required (e.g. --cluster eu-west-a)")
+		os.Exit(1)
+	}
+	if *sweepIv <= 0 {
+		log.Error("--index-sweep-interval must be positive", "value", *sweepIv)
 		os.Exit(1)
 	}
 
@@ -213,6 +218,7 @@ func main() {
 			os.Exit(1)
 		}
 		log.Info("index sweep at startup done")
+		go sw.sweepEvery(ctx, *sweepIv)
 	} else {
 		// A proposer over a static peer list cannot list keys on the peers.
 		log.Warn("no index sweep: --cask-peers cannot list keys on a majority; use --bootstrap or --seed")
