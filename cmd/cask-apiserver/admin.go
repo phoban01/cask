@@ -125,11 +125,13 @@ func planVoters(cur roster.Value, ids []uint64, promote bool) ([]uint64, error) 
 // POST /admin/demote.
 func (m *membership) serveVoterChange(promote bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// The endpoints share the consensus listener, which has no mutual
-		// TLS yet. Anyone who can reach it can change the voter set.
+		// The endpoints share the consensus listener. With the consensus
+		// TLS flags, only a client with a certificate from the fleet CA
+		// reaches them. Without the flags, anyone who can reach the
+		// listener can change the voter set.
 		//= docs/spec/fleet.md#8-security
 		//= type=exception
-		//= reason=promote and demote serve on the consensus listener, which has no mutual TLS yet; tracked in issues #47 and #48
+		//= reason=promote and demote are open when the consensus TLS flags are absent; tracked in issue #158
 		//# The cask client API and control endpoints MUST NOT be reachable outside the pod without authentication.
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -195,7 +197,14 @@ func (m *membership) redirectToDriver(w http.ResponseWriter, r *http.Request, cu
 		m.retryLater(w, fmt.Errorf("membership: no address for the driver of core %v", cur.Core))
 		return
 	}
-	w.Header().Set("Location", "http://"+addr+r.URL.Path)
+	// On a TLS listener, point at https, so a tool such as curl keeps TLS
+	// on the redirect. A member client runs TLS below HTTP, so it follows
+	// an https URL too.
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	w.Header().Set("Location", scheme+"://"+addr+r.URL.Path)
 	writeJSON(w, http.StatusTemporaryRedirect, map[string]string{
 		"error":  fmt.Sprintf("node %d is not the driver; send the request to the driver", m.self.NodeID),
 		"driver": addr,

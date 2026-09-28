@@ -78,13 +78,30 @@ func main() {
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	consensusTLS, err := mtls.Setup(consensusFiles, log)
-	if err != nil {
-		log.Error("consensus TLS", "err", err)
-		os.Exit(1)
+	// The static topology serves consensus and the client API on --listen.
+	// With the consensus flags, that listener needs a client certificate
+	// from the fleet CA, and every peer call presents one. The Nebula
+	// overlay already authenticates peers with its own certificates, so the
+	// flags do not apply there.
+	var consensusTLS *mtls.Config
+	if *nebConf != "" || *mintURL != "" {
+		if consensusFiles.Any() {
+			log.Error("--consensus-cert, --consensus-key, and --consensus-ca apply to the TCP transport; the Nebula overlay authenticates peers with its own certificates")
+			os.Exit(1)
+		}
+	} else {
+		var err error
+		if consensusTLS, err = mtls.Setup(consensusFiles, log); err != nil {
+			log.Error("consensus TLS", "err", err)
+			os.Exit(1)
+		}
 	}
+	var network transport.Network = transport.TCP{}
 	if consensusTLS != nil {
-		log.Warn("consensus TLS files are valid but not used yet; tracked in issue #48")
+		//= docs/spec/fleet.md#8-security
+		//# Consensus traffic between members MUST use mutual TLS.
+		network = transport.TLS{Net: transport.TCP{}, Server: consensusTLS.Server, Client: consensusTLS.Client}
+		log.Info("consensus traffic and the client API on --listen use mutual TLS")
 	}
 
 	// Local acceptor: durable consensus state for this node, served to peers
@@ -217,12 +234,12 @@ func main() {
 		// Consensus rides the overlay; the client API rides the host listener
 		// below so operators can still curl localhost.
 		go func() {
-			if err := http.Serve(overlayLn, mux); err != nil {
+			if err := transport.NewServer(mux).Serve(overlayLn); err != nil {
 				log.Error("overlay server stopped", "err", err)
 			}
 		}()
 	} else {
-		clients := buildClients(*tport, *listen, *peers, localAcc, transport.TCP{}.HTTPClient())
+		clients := buildClients(*tport, *listen, *peers, localAcc, network.HTTPClient())
 		log.Info("starting", "id", *id, "listen", *listen, "transport", *tport, "replicas", len(clients))
 		prop = caspaxos.NewProposer(*id, clients, caspaxos.WithBackoff(contentionBackoff()))
 	}
@@ -244,12 +261,12 @@ func main() {
 	mux.HandleFunc("/session/", srv.handleSession)
 	mux.HandleFunc("/lock/", srv.handleLock)
 
-	ln, err := transport.TCP{}.Listen(ctx, *listen)
+	ln, err := network.Listen(ctx, *listen)
 	if err != nil {
 		log.Error("listen failed", "err", err)
 		os.Exit(1)
 	}
-	if err := http.Serve(ln, mux); err != nil {
+	if err := transport.NewServer(mux).Serve(ln); err != nil {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
 	}

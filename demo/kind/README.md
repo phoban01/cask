@@ -67,6 +67,13 @@ The script walks four acts:
   the kind nodes share the `kind` docker network — so consensus rides the
   node IPs, which the script wires into `__CASK_PEERS__` and each pod learns
   its own via the downward API.
+- **Mutual TLS on consensus.** The script runs
+  `cask-apiserver gen-consensus-certs` in the demo image. It makes a fleet
+  CA and one certificate per cluster in `demo/kind/.consensus-certs`. Each
+  apiserver gets its certificate in the `cask-consensus-tls` Secret and
+  starts with `--consensus-cert`, `--consensus-key`, and `--consensus-ca`.
+  The consensus port then accepts only peers with a certificate that the
+  fleet CA signed. `teardown.sh` deletes the files.
 - **Durability.** Each embedded acceptor persists to Pebble on the
   StatefulSet's PersistentVolumeClaim (`--data-dir`). This is not optional
   hygiene: an acceptor that restarts empty forgets its promises, which is

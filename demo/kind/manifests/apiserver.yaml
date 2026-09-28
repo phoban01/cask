@@ -9,12 +9,27 @@
 # port rides the node IP. The pod learns that IP from the downward API.
 #
 # demo.sh substitutes __CLUSTER__ (this cluster's name), __ID__ (a unique
-# proposer id per apiserver), and __CASK_PEERS__ (every member's node
-# IP:8001, including this one's).
+# proposer id per apiserver), __CASK_PEERS__ (every member's node
+# IP:8001, including this one's), and the three __CONSENSUS_*__ values
+# (base64 PEM: the fleet CA and this member's certificate and key).
 apiVersion: v1
 kind: Namespace
 metadata:
   name: cask-system
+---
+# The consensus identity of this member. Consensus traffic between the
+# apiservers runs mutual TLS: each one presents this certificate and
+# accepts only peers whose certificate the same fleet CA signed.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cask-consensus-tls
+  namespace: cask-system
+type: Opaque
+data:
+  ca.crt: __CONSENSUS_CA__
+  tls.crt: __CONSENSUS_CERT__
+  tls.key: __CONSENSUS_KEY__
 ---
 # A StatefulSet, not a Deployment: each voter keeps its acceptor state on
 # its own PersistentVolumeClaim. The claim outlives the pod, so the state
@@ -55,6 +70,9 @@ spec:
             - --cask-peers=__CASK_PEERS__
             - --data-dir=/var/lib/cask
             - --self-signed-tls
+            - --consensus-cert=/etc/cask/consensus/tls.crt
+            - --consensus-key=/etc/cask/consensus/tls.key
+            - --consensus-ca=/etc/cask/consensus/ca.crt
           ports:
             - containerPort: 9443
             - containerPort: 8001
@@ -63,9 +81,17 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/cask
+            - name: consensus-tls
+              mountPath: /etc/cask/consensus
+              readOnly: true
           readinessProbe:
             httpGet: {path: /healthz, port: 9443, scheme: HTTPS}
             initialDelaySeconds: 1
+      volumes:
+        - name: consensus-tls
+          secret:
+            secretName: cask-consensus-tls
+            defaultMode: 0400
   volumeClaimTemplates:
     - metadata:
         name: data

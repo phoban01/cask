@@ -29,7 +29,14 @@ func newTestMember(t *testing.T, id uint64, bootstrap bool, seeds []string, join
 // starts.
 func newTestMemberServer(t *testing.T, id uint64, bootstrap bool, seeds []string, joinTimeout time.Duration, opts ...func(*membershipConfig)) (*membership, *http.Server) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	return newTestMemberOn(t, transport.TCP{}, id, bootstrap, seeds, joinTimeout, opts...)
+}
+
+// newTestMemberOn is newTestMemberServer on the network nw: the member
+// listens on nw and dials its peers through it.
+func newTestMemberOn(t *testing.T, nw transport.Network, id uint64, bootstrap bool, seeds []string, joinTimeout time.Duration, opts ...func(*membershipConfig)) (*membership, *http.Server) {
+	t.Helper()
+	ln, err := nw.Listen(context.Background(), "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +47,7 @@ func newTestMemberServer(t *testing.T, id uint64, bootstrap bool, seeds []string
 		Bootstrap:   bootstrap,
 		Seeds:       seeds,
 		Local:       caspaxos.NewAcceptor(st),
-		HTTP:        transport.TCP{}.HTTPClient(),
+		HTTP:        nw.HTTPClient(),
 		Store:       st,
 		Interval:    20 * time.Millisecond,
 		JoinTimeout: joinTimeout,

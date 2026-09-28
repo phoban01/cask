@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,6 +26,8 @@ import (
 	"sigs.k8s.io/e2e-framework/pkg/env"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/envfuncs"
+
+	"github.com/phoban01/cask/internal/mtls"
 )
 
 // The fleet deploy follows demo/kind/demo.sh. It uses the same Dockerfile
@@ -118,13 +121,38 @@ func nodeIP(ctx context.Context, r *resources.Resources) (string, error) {
 	return "", fmt.Errorf("no node has an InternalIP")
 }
 
+// consensusIdentity is one member's consensus TLS files in PEM form.
+type consensusIdentity struct{ ca, cert, key []byte }
+
+// issueConsensus makes a fleet CA and one consensus identity per logical
+// cluster, as `cask-apiserver gen-consensus-certs` does for demo.sh.
+func issueConsensus() (map[string]consensusIdentity, error) {
+	ca, err := mtls.NewCA("cask-consensus-ca", 24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]consensusIdentity, len(logicalClusters))
+	for _, logical := range logicalClusters {
+		cert, key, err := ca.Issue(logical, logical)
+		if err != nil {
+			return nil, err
+		}
+		out[logical] = consensusIdentity{ca: ca.CertPEM(), cert: cert, key: key}
+	}
+	return out, nil
+}
+
 // renderManifest fills the demo manifest placeholders for one cluster, as
 // demo.sh does, and points the pod at the suite image.
-func renderManifest(tmpl []byte, cluster string, id int, peers string) string {
+func renderManifest(tmpl []byte, cluster string, id int, peers string, tlsID consensusIdentity) string {
+	b64 := base64.StdEncoding.EncodeToString
 	return strings.NewReplacer(
 		"__CLUSTER__", cluster,
 		"__ID__", strconv.Itoa(id),
 		"__CASK_PEERS__", peers,
+		"__CONSENSUS_CA__", b64(tlsID.ca),
+		"__CONSENSUS_CERT__", b64(tlsID.cert),
+		"__CONSENSUS_KEY__", b64(tlsID.key),
 		demoImage, image,
 	).Replace(string(tmpl))
 }
@@ -167,9 +195,14 @@ func deployFleet() env.Func {
 			peers = append(peers, fmt.Sprintf("%s:%d", ip, consensusPort))
 		}
 
+		// The apiservers run consensus over mutual TLS, as in the demo.
+		ids, err := issueConsensus()
+		if err != nil {
+			return ctx, fmt.Errorf("consensus certificates: %w", err)
+		}
 		for i, logical := range logicalClusters {
 			// --cluster takes the logical name, as in the demo.
-			m := renderManifest(tmpl, logical, firstID+i, strings.Join(peers, ","))
+			m := renderManifest(tmpl, logical, firstID+i, strings.Join(peers, ","), ids[logical])
 			h := decoder.CreateHandler(clients[logical])
 			if err := decoder.DecodeEach(ctx, strings.NewReader(m), h); err != nil {
 				return ctx, fmt.Errorf("apply manifest to %s: %w", logical, err)

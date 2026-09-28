@@ -98,7 +98,7 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST,exception]: The cutover MUST be rehearsed on a copy of the management cluster before it runs on the real one.
 
   SECTION: [8. Security](#8-security)
-    TEXT[!MUST,exception]: Consensus traffic between members MUST use mutual TLS.
+    TEXT[!MUST,implementation,test]: Consensus traffic between members MUST use mutual TLS.
     TEXT[!MUST,exception]: The extension server MUST serve HTTPS with a certificate the kube-apiserver can verify.
     TEXT[!MUST,exception]: The cask client API and control endpoints MUST NOT be reachable outside the pod without authentication.
 
