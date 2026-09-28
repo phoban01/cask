@@ -79,7 +79,15 @@ func TestConcurrentWritersGetTheirOwnVersion(t *testing.T) {
 	cask := newCask(t)
 	east := fastWatch(newStoreOn(t, cask(1)))
 	west := fastWatch(newStoreOn(t, cask(2)))
+	// The seed makes the list resourceVersion 1. The drain below resumes a
+	// watch from the last resourceVersion it saw. Resuming from "0" means
+	// "from now" and skips every step before it, so the drain then waited
+	// for steps that never came (issue #172).
+	mustCreate(t, east, device("seed", "m0"))
 	start := listRV(t, mustList(t, east, listOpts()))
+	if start == 0 {
+		t.Fatal("list resourceVersion is 0 after the seed")
+	}
 	w := mustWatch(t, east, keyPrefix, watchFrom(start))
 
 	var (
