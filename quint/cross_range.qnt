@@ -2,6 +2,7 @@
 // quint-check: control=stepNoReadGuard:UncertaintyContract
 // quint-check: control=stepNoSkewGuard:NoSkewOverflow
 // quint-check: verify-steps=10
+// quint-check: verify-split=each
 //
 // Inv is TypeOK, NoSkewOverflow and UncertaintyContract under the TLA+
 // name, so the gate lists the three parts. TLC reports a search depth of

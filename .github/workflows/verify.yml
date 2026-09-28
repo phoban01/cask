@@ -37,19 +37,20 @@ jobs:
 
   # The Quint gate is three jobs. quint-checks runs typecheck, witness
   # runs, simulation and negative controls for every module. quint-verify
-  # runs bounded Apalache verification, one module per job, so a slow
+  # runs bounded Apalache verification in parallel jobs: one per module,
+  # or per invariant or per init where a module header asks, so a slow
   # module does not push the others past the timeout. quint is the
   # required check and passes only when both pass.
   quint-modules:
     runs-on: ubuntu-latest
     outputs:
-      modules: ${{ steps.list.outputs.modules }}
+      jobs: ${{ steps.list.outputs.jobs }}
     steps:
       - uses: actions/checkout@v4
+      # One verify job per module, or per invariant (verify-split=each)
+      # or per init (verify-init) as each module's header asks.
       - id: list
-        run: |
-          mods=$(grep -lE '^[[:space:]]*//[[:space:]]*quint-check:' quint/*.qnt | jq -R . | jq -sc .)
-          echo "modules=$mods" >> "$GITHUB_OUTPUT"
+        run: echo "jobs=$(scripts/quint-check.sh --verify-jobs)" >> "$GITHUB_OUTPUT"
 
   quint-checks:
     runs-on: ubuntu-latest
@@ -66,12 +67,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        module: ${{ fromJSON(needs.quint-modules.outputs.modules) }}
-    name: quint-verify (${{ matrix.module }})
+        include: ${{ fromJSON(needs.quint-modules.outputs.jobs) }}
+    name: quint-verify (${{ matrix.module }}${{ matrix.invariants && format(' {0}', matrix.invariants) || '' }}${{ matrix.init && format(' {0}', matrix.init) || '' }})
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-quint
-      - run: scripts/quint-check.sh --verify-only --module ${{ matrix.module }}
+      - run: >-
+          scripts/quint-check.sh --verify-only --module "${{ matrix.module }}"
+          ${{ matrix.invariants && format('--invariants {0}', matrix.invariants) || '' }}
+          ${{ matrix.init && format('--init {0}', matrix.init) || '' }}
 
   quint:
     needs: [quint-checks, quint-verify]
