@@ -30,8 +30,7 @@ type Store struct {
 	kv       *mvcc.KV
 	codec    runtime.Codec
 	resource string
-	// versioner sets and reads resourceVersion on objects. Versioner()
-	// does not expose it until #35.
+	// versioner sets and reads resourceVersion on objects and lists.
 	versioner apistorage.APIObjectVersioner
 }
 
@@ -80,9 +79,15 @@ func (s *Store) decode(key string, raw []byte, seq uint64, out runtime.Object) e
 	return s.versioner.UpdateObject(out, seq)
 }
 
-// Versioner returns nil until the Versioner lands (#35).
-func (*Store) Versioner() apistorage.Versioner {
-	return nil
+// Versioner returns the Versioner that the store uses. A resourceVersion
+// is a decimal sequence. On an object it is the sequence of the object
+// register. On a list it is the sequence of the index register.
+// ParseResourceVersion reads "" and "0" as 0. It rejects a value that is
+// not a decimal number with a storage InvalidError.
+func (s *Store) Versioner() apistorage.Versioner {
+	//= docs/spec/fleet.md#3-storage-model
+	//# An object's resourceVersion MUST be the sequence of its object register.
+	return s.versioner
 }
 
 // encode clears the resourceVersion of obj and encodes it. The register
