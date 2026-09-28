@@ -10,12 +10,12 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
 
   SECTION: [3. Storage model](#3-storage-model)
     TEXT[!MUST,implementation,exception]: Each object MUST be stored in one cask register keyed by resource type and name.
-    TEXT[!MUST]: Each resource type MUST have one index register that maps every object name to that object's latest sequence.
+    TEXT[!MUST,implementation,test]: Each resource type MUST have one index register that maps every object name to that object's latest sequence.
     TEXT[!MUST]: An object's resourceVersion MUST be the sequence of its object register.
     TEXT[!MUST]: A list's resourceVersion MUST be the sequence of the index register.
     TEXT[!MUST,implementation,implication]: A mutation MUST write the object register before the index register.
-    TEXT[!MUST,implication,exception]: The index register MUST NOT record a sequence higher than the object register holds.
-    TEXT[!MUST,implication,exception]: When the index write of a mutation did not complete, the next index write for that object MUST record the object register's current sequence.
+    TEXT[!MUST,implementation,implication,test]: The index register MUST NOT record a sequence higher than the object register holds.
+    TEXT[!MUST,implementation,implication,test]: When the index write of a mutation did not complete, the next index write for that object MUST record the object register's current sequence.
     TEXT[!MUST,implication,exception]: The extension server MUST reconcile the index register against the object registers at startup.
     TEXT[!MUST]: The extension server MUST reconcile the index register against the object registers at a fixed interval.
     TEXT[!MUST,implementation,test]: A create MUST use a compare-and-set that requires the object register to be absent.
