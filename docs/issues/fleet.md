@@ -1840,3 +1840,25 @@ was read.
 Files: `internal/mvcc/mvcc.go`, `internal/mvcc/*_test.go`
 
 Done when: the new test passes and fails without the guard.
+
+## caspaxos: backoff restarts at the shortest delay after each unknown outcome
+
+labels: fleet, ci
+
+Spec: docs/spec/fleet.md#3-storage-model
+> A retried write MUST be a compare-and-set, never a blind reapplication of a change.
+
+Filed as #208. Main is red: `TestGateCleanAcrossProfiles/contention`
+and `contentionowned` fail at seed 54 with a dueling proposers WARNING.
+Since #168, a write whose accept is rejected returns `ErrUnknownOutcome`.
+`mvcc.KV.propose` and `caspaxos.ProposeResolving` then call `Propose`
+again, and each call starts its backoff at attempt 0. So the delay after
+an unknown outcome never grows, and contending writers keep colliding.
+
+Task: carry the retry number into `Propose`, so the backoff grows across
+calls. Add a spec sentence for the rule, and cite it in code and tests.
+
+Files: `docs/spec/fleet.md`, `internal/caspaxos/proposer.go`,
+`internal/caspaxos/unknown.go`, `internal/mvcc/mvcc.go`, tests
+
+Done when: `go test -race -run 'TestGateCleanAcrossProfiles/contention' ./testutil/sim/` passes, and a new test fails when `Propose` ignores the retry number.

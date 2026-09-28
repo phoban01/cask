@@ -3,6 +3,7 @@ package mvcc_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync/atomic"
 	"testing"
 
@@ -449,6 +450,35 @@ func TestUnknownOutcomeWriteFoundByReread(t *testing.T) {
 				t.Fatalf("history = %+v, want the one write v", chain.Versions)
 			}
 		})
+	}
+}
+
+// retryRecorder records the retry number on each call to the proposer it
+// wraps.
+type retryRecorder struct {
+	mvcc.Proposer
+	seen []int
+}
+
+func (r *retryRecorder) Propose(ctx context.Context, key []byte, change caspaxos.ChangeFunc) ([]byte, error) {
+	r.seen = append(r.seen, caspaxos.RetryOf(ctx))
+	return r.Proposer.Propose(ctx, key, change)
+}
+
+// Each retry after an unknown outcome carries its retry number, so the
+// proposer's backoff grows across calls. Without it, every call starts at
+// the shortest delay, and contending writers keep colliding.
+func TestUnknownOutcomeRetriesGrowBackoff(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A write that retries after an unknown outcome MUST wait longer before each retry, up to a fixed limit.
+	prop := &retryRecorder{Proposer: &minorityAccept{script: []round{holdMinority, holdMinority}}}
+	kv := mvcc.New(prop, hlc.New(func() int64 { return 1 }), 1)
+	if _, err := kv.Put(context.Background(), []byte("k"), []byte("v")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if want := []int{0, 1, 2}; !slices.Equal(prop.seen, want) {
+		t.Fatalf("retry numbers = %v, want %v", prop.seen, want)
 	}
 }
 

@@ -255,12 +255,35 @@ func (p *Proposer) Propose(ctx context.Context, key []byte, change ChangeFunc) (
 }
 
 // pause runs the configured backoff after a preempted round (attempt is the
-// 0-based round that just failed).
+// 0-based round that just failed). A caller that retries after
+// ErrUnknownOutcome marks its context with WithRetry, and pause adds that
+// retry number to attempt, so the delay keeps growing across calls.
 func (p *Proposer) pause(ctx context.Context, attempt int) error {
 	if p.backoff == nil {
 		return nil
 	}
-	return p.backoff(ctx, attempt)
+	//= docs/spec/fleet.md#3-storage-model
+	//# A write that retries after an unknown outcome MUST wait longer before each retry, up to a fixed limit.
+	return p.backoff(ctx, attempt+RetryOf(ctx))
+}
+
+type retryKey struct{}
+
+// WithRetry marks ctx as retry number n of one write, where 0 is the
+// first call. Each Propose call starts its rounds at attempt 0, so without
+// the mark a caller that retries after ErrUnknownOutcome gets the shortest
+// delay every time. Under contention the writers then keep colliding.
+// Propose adds n to every attempt it passes to the backoff. The backoff
+// caps the delay, so a large n waits no longer than the cap.
+func WithRetry(ctx context.Context, n int) context.Context {
+	return context.WithValue(ctx, retryKey{}, n)
+}
+
+// RetryOf returns the retry number WithRetry set on ctx, or 0. A layer
+// that wraps a proposer can read it; tests use it to check the mark.
+func RetryOf(ctx context.Context) int {
+	n, _ := ctx.Value(retryKey{}).(int)
+	return max(n, 0)
 }
 
 // errVoteDropped marks a reply the proposer_drop_vote buggify site discarded.
