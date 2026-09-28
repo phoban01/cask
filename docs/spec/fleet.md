@@ -137,6 +137,8 @@ A core change MUST list data keys only on old voters that have accepted the join
 
 A core change MUST finish while a majority of the old core and a majority of the new core answer.
 
+A resumed core change MUST carry every data register that it did not carry under the same joint configuration.
+
 The extension server MUST answer a data write that a voter rejected as stale with a retryable status.
 
 An operator MUST NOT grow the voter set by restarting members with a longer static peer list.

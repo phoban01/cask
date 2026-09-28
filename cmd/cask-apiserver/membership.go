@@ -35,11 +35,15 @@ type membershipConfig struct {
 	// the wait for a live member to add this one. Settle is how long a
 	// core change waits for members to see the joint core before it
 	// carries the data registers (default: three intervals). CarryTimeout
-	// bounds one attempt at a core change (default: one minute).
+	// ends an attempt at a core change that makes no progress for that long
+	// (default: one minute). A key listing and each carried key count as
+	// progress. CarryWorkers bounds the carry rounds in flight at once
+	// (default: 16).
 	Interval     time.Duration
 	JoinTimeout  time.Duration
 	Settle       time.Duration
 	CarryTimeout time.Duration
+	CarryWorkers int
 }
 
 // membership is this apiserver's place in the fleet. It founds the roster or
@@ -66,6 +70,7 @@ type membership struct {
 	fence    *fencedAcceptor // the embedded acceptor behind the write fence
 	local    *fencedClient   // the proposer side of fence, for local rounds
 	coreReqs chan coreChange // core changes for the run loop to drive
+	carried  carryRecord     // keys the driver carried under the current joint core
 
 	mu      sync.Mutex
 	addrs   map[uint64]string
@@ -86,6 +91,9 @@ func newMembership(cfg membershipConfig, log *slog.Logger) *membership {
 	}
 	if cfg.CarryTimeout == 0 {
 		cfg.CarryTimeout = time.Minute
+	}
+	if cfg.CarryWorkers == 0 {
+		cfg.CarryWorkers = 16
 	}
 	m := &membership{
 		cfg:   cfg,

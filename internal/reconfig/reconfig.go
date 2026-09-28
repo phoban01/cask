@@ -17,6 +17,8 @@ package reconfig
 
 import (
 	"context"
+	"fmt"
+	"sync"
 
 	"github.com/phoban01/cask/internal/caspaxos"
 )
@@ -33,12 +35,54 @@ func CarryForward(ctx context.Context, nodeID uint64, key []byte, old, new []cas
 // CarryForwardKeys carries every key forward into the new replica set. A range
 // reconfiguration calls this for the keys it holds before releasing the old set.
 func CarryForwardKeys(ctx context.Context, nodeID uint64, keys [][]byte, old, new []caspaxos.AcceptorClient) error {
+	return CarryForwardPool(ctx, nodeID, keys, old, new, 1, nil)
+}
+
+// CarryForwardPool carries every key forward with at most workers joint
+// rounds in flight (one if workers < 1). Each key gets its own proposer, as
+// in CarryForward, so the ballots of one key never move the ballots of
+// another.
+//
+// After the round for a key commits on a quorum of both sets, it calls
+// done(key), if done is not nil. done may run on several goroutines at once.
+// A key whose round failed or did not finish is never passed to done.
+//
+// It stops at the first error and returns it. The keys already passed to
+// done stay carried, so a caller may skip them when it tries again under the
+// same joint configuration.
+func CarryForwardPool(ctx context.Context, nodeID uint64, keys [][]byte, old, new []caspaxos.AcceptorClient, workers int, done func(key []byte)) error {
+	workers = max(1, min(workers, len(keys)))
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+
+	next := make(chan []byte)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for key := range next {
+				if err := CarryForward(ctx, nodeID, key, old, new); err != nil {
+					cancel(fmt.Errorf("reconfig: carry key %q: %w", key, err))
+					return
+				}
+				if done != nil {
+					done(key)
+				}
+			}
+		}()
+	}
+feed:
 	for _, key := range keys {
-		if err := CarryForward(ctx, nodeID, key, old, new); err != nil {
-			return err
+		select {
+		case next <- key:
+		case <-ctx.Done():
+			break feed
 		}
 	}
-	return nil
+	close(next)
+	wg.Wait()
+	return context.Cause(ctx)
 }
 
 // JointProposer builds a proposer requiring a quorum in both replica sets, for

@@ -19,23 +19,34 @@
 //     listing or the release.
 //   - The carry runs a joint Identity round per listed key. Its prepare
 //     makes the acceptors it touches reject a lower ballot, so an older
-//     write in flight on that key can no longer land there.
+//     write in flight on that key can no longer land there. A round can
+//     fail part way. The driver records a key as carried only when its
+//     round committed.
+//   - A resumed change lists the keys again and keeps its record, so it
+//     carries only the keys it has not recorded.
 //   - Keys can be written at any time, also after the listing.
 //
 // Ballots are abstracted: caspaxos.qnt has the per-ballot agreement. A write
 // commits a fresh version. A read takes the highest version on a read quorum.
 //
 // The invariant is that every read quorum of the current configuration
-// holds the last committed version of every key. Three negative controls
+// holds the last committed version of every key. Four negative controls
 // break it: a release without the carry, a fence that reads a lagging view
-// instead of the accepted roster value, and a key listing that counts old
-// voters that do not hold the joint roster value.
+// instead of the accepted roster value, a key listing that counts old
+// voters that do not hold the joint roster value, and a resumed carry that
+// skips a key whose round did not commit.
+//
+// The gate finds each violation by random simulation, so a control must
+// find its bug in every gate run. Controls 3 and 4 keep only the actions
+// that lead to their bug. Each one violated NoCommittedLoss in 20 of 20
+// runs with random seeds at 30 steps and 2000 samples.
 //
 // Gate checks, read by scripts/quint-check.sh:
 // quint-check: invariants=NoCommittedLoss
 // quint-check: control=stepNoCarry:NoCommittedLoss
 // quint-check: control=stepLaggingFence:NoCommittedLoss
 // quint-check: control=stepListAnyVoter:NoCommittedLoss
+// quint-check: control=stepCarryCountsAnyAck:NoCommittedLoss
 // quint-check: verify-steps=6
 module core_change {
   type Phase = Old | Joint | New
@@ -186,9 +197,10 @@ module core_change {
   // ---- the carry ---------------------------------------------------------
 
   // List the keys on the old voters in L, as one step per voter set. ok
-  // says whether L qualifies.
+  // says whether L qualifies. A resumed change lists again. The new listing
+  // replaces the old one, and the keys carried so far stay carried.
   action listWith(L: Set[int], ok: bool): bool = all {
-    phase == Joint, not(didList), ok,
+    phase == Joint, ok,
     didList' = true,
     listed' = KEYS.filter(k => L.exists(a => stored.get(k).get(a) > 0)),
     phase' = phase, rgen' = rgen, view' = view, stored' = stored, committed' = committed,
@@ -204,23 +216,33 @@ module core_change {
   }
 
   // Carry key k: read it on the joint quorum qr and write the value back on
-  // the joint quorum qw. The round's prepare blocks an older write in
-  // flight on k at every acceptor it touches.
-  action carryWith(k: str, qr: Set[int], qw: Set[int]): bool = {
+  // the acceptors qw. The round's prepare blocks an older write in flight on
+  // k at every acceptor it touches. A round that fails part way writes back
+  // on fewer acceptors. counts says whether the driver records k as carried.
+  action carryMark(k: str, qr: Set[int], qw: Set[int], counts: bool): bool = {
     val v = maxOn(stored.get(k), qr)
     all {
-      phase == Joint, didList, listed.contains(k),
+      phase == Joint, didList, listed.contains(k), JOINT_QUORUMS.contains(qr),
       stored' = stored.setBy(k, row => ACCS.mapBy(a => if (qw.contains(a)) v else row.get(a))),
       pend' = if (pend.active and pend.k == k) pend.with("blocked", pend.blocked.union(qr).union(qw)) else pend,
-      carried' = carried.union(Set(k)),
+      carried' = if (counts) carried.union(Set(k)) else carried,
       phase' = phase, rgen' = rgen, view' = view, committed' = committed,
       didList' = didList, listed' = listed, nextV' = nextV,
     }
   }
+
+  //= docs/spec/fleet.md#6-membership
+  //= type=implication
+  //# A resumed core change MUST carry every data register that it did not carry under the same joint configuration.
+  // The driver records k as carried only when the write-back reached a
+  // joint quorum, that is, when the round committed. A resumed change
+  // lists again (listWith) and carries only the keys not recorded.
+  action carryWith(k: str, qr: Set[int], qw: Set[int]): bool =
+    carryMark(k, qr, qw, JOINT_QUORUMS.contains(qw))
   action carry = {
     nondet k = oneOf(KEYS)
     nondet qr = oneOf(JOINT_QUORUMS)
-    nondet qw = oneOf(JOINT_QUORUMS)
+    nondet qw = oneOf(ACCS.powerset())
     carryWith(k, qr, qw)
   }
 
@@ -272,12 +294,59 @@ module core_change {
   // ---- negative control 3: list on voters without the joint value --------
 
   // A voter without the joint value still takes a stale write after the
-  // listing. So its listing can miss a key that later commits. The step
-  // leaves out writeAbort and spread: they only hide the bug, and without
-  // them the simulator finds it in every run.
-  action listAnyVoter = { nondet L = oneOf(quorums(COLD)) listWith(L, true) }
+  // listing. So its listing can miss a key that later commits.
+  //
+  // The gate runs a fixed number of random samples, and the bug needs one
+  // narrow order: a write starts on the old core, one voter takes it, the
+  // joint is published, the listing misses the key, and then the last
+  // voter takes the write. So this step keeps only the actions of that
+  // order, and each guard below keeps only real behaviour of the buggy
+  // system:
+  //   - writes start only while the old core is chosen, because a stale
+  //     write that starts later cannot commit;
+  //   - accepts pick only from the write's quorum;
+  //   - the joint is published only while a write is part way through;
+  //   - the change lists once, while that write is in flight, because a
+  //     later listing finds the key and hides the bug;
+  //   - every carry commits, because a partial carry only delays the
+  //     release.
+  // writeAbort and spread are left out: they only hide the bug.
+  action writeStartOld = all { phase == Old, writeStart }
+  action writeAcceptInQuorum = {
+    nondet a = oneOf(if (pend.active) pend.q else ACCS)
+    acceptWith(a, rgen.get(a))
+  }
+  action publishJointMidWrite = all { pend.active, pend.acked != Set(), publishJoint }
+  action listAnyVoter = {
+    nondet L = oneOf(quorums(COLD))
+    all { not(didList), pend.active, listWith(L, true) }
+  }
+  action carryCommitted = {
+    nondet k = oneOf(KEYS)
+    nondet qr = oneOf(JOINT_QUORUMS)
+    nondet qw = oneOf(JOINT_QUORUMS)
+    carryWith(k, qr, qw)
+  }
   action stepListAnyVoter = any {
-    writeStart, writeAccept, publishJoint, listAnyVoter, carry, release,
+    writeStartOld, writeAcceptInQuorum, publishJointMidWrite, listAnyVoter, carryCommitted, release,
+  }
+
+  // ---- negative control 4: count a key as carried before it commits ------
+
+  // The driver records a key as carried after a round that wrote it back on
+  // only some acceptors. A resumed change then skips the key, and the
+  // release leaves its value off a quorum of the new core. The step counts
+  // only partial rounds, because counting a committed round is correct. It
+  // uses the same write guards as control 3 and leaves out writeAbort and
+  // spread, which only hide the bug.
+  action carryCountsAnyAck = {
+    nondet k = oneOf(KEYS)
+    nondet qr = oneOf(JOINT_QUORUMS)
+    nondet qw = oneOf(ACCS.powerset().exclude(JOINT_QUORUMS))
+    carryMark(k, qr, qw, true)
+  }
+  action stepCarryCountsAnyAck = any {
+    writeStartOld, writeAcceptInQuorum, publishJoint, list, carryCountsAnyAck, release,
   }
 
   // ---- witness runs --------------------------------------------------------
@@ -293,6 +362,21 @@ module core_change {
       .then(listWith(Set(2, 3), true))
       .then(carryWith("a", Set(2, 3, 4, 5), Set(3, 4, 5)))
       .then(releaseOn(Set(2, 3, 4, 5), true))
+      .expect(NoCommittedLoss)
+      .expect(maxOn(stored.get("a"), Set(3, 4, 5)) == 1)
+
+  // A carry of key a commits, then the change stops. The resumed change
+  // lists again, skips a, and releases. The new core alone still reads a.
+  run resumeSkipsCarriedKeyTest =
+    init
+      .then(writeStartWith("a", 0, Set(1, 2)))
+      .then(acceptWith(1, 0))
+      .then(acceptWith(2, 0))
+      .then(publishJointOn(Set(2, 3)))
+      .then(listWith(Set(2, 3), true))
+      .then(carryWith("a", Set(2, 3, 4, 5), Set(2, 3, 4, 5)))
+      .then(listWith(Set(2, 3), true))
+      .then(releaseOn(Set(2, 3, 4, 5), didList and listed.subseteq(carried)))
       .expect(NoCommittedLoss)
       .expect(maxOn(stored.get("a"), Set(3, 4, 5)) == 1)
 

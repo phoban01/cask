@@ -2,7 +2,9 @@ package reconfig_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -148,5 +150,97 @@ func TestCarryForwardManyKeys(t *testing.T) {
 		if err != nil || !found || string(got) != v {
 			t.Fatalf("key %q lost: %q,%v err=%v want %q", k, got, found, err, v)
 		}
+	}
+}
+
+// failKey is an acceptor link that fails every accept for one key, like a
+// new replica that cannot store it.
+type failKey struct {
+	caspaxos.AcceptorClient
+	key string
+}
+
+func (f failKey) Accept(ctx context.Context, key []byte, b caspaxos.Ballot, val []byte) (caspaxos.AcceptReply, error) {
+	if string(key) == f.key {
+		return caspaxos.AcceptReply{}, errors.New("accept refused")
+	}
+	return f.AcceptorClient.Accept(ctx, key, b, val)
+}
+
+// The pool carries keys in parallel and reports a key as done only after
+// its joint round committed. A key that the new set cannot take stops the
+// pool, is never reported, and the reported keys read back from the new set.
+func TestCarryForwardPoolReportsOnlyCommittedKeys(t *testing.T) {
+	//= docs/spec/fleet.md#6-membership
+	//= type=test
+	//# A resumed core change MUST carry every data register that it did not carry under the same joint configuration.
+	ctx := context.Background()
+	stores := make([]caspaxos.Storage, 5)
+	for i := range stores {
+		stores[i] = store.NewMem()
+	}
+	nw := sim.NewNetwork(stores)
+	old := group(nw, 0, 1, 2)
+	const bad = "key-30"
+	// Two of the three new replicas refuse the bad key, so its joint round
+	// cannot reach a quorum of the new set.
+	newSet := []caspaxos.AcceptorClient{nw.Client(2), failKey{nw.Client(3), bad}, failKey{nw.Client(4), bad}}
+
+	w := caspaxos.NewProposer(1, old)
+	var keys [][]byte
+	for i := range 60 {
+		k := []byte(fmt.Sprintf("key-%d", i))
+		v := []byte(fmt.Sprintf("val-%d", i))
+		if _, err := w.Propose(ctx, k, func([]byte) ([]byte, error) { return v, nil }); err != nil {
+			t.Fatal(err)
+		}
+		keys = append(keys, k)
+	}
+
+	var mu sync.Mutex
+	done := map[string]bool{}
+	err := reconfig.CarryForwardPool(ctx, 1, keys, old, newSet, 8, func(k []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		if done[string(k)] {
+			t.Errorf("key %q reported twice", k)
+		}
+		done[string(k)] = true
+	})
+	if err == nil {
+		t.Fatal("the pool carried a key that the new set refused")
+	}
+	if done[bad] {
+		t.Fatalf("the pool reported %s as carried, but its round failed", bad)
+	}
+	if len(done) == 0 {
+		t.Fatal("the pool reported no key; the test has no teeth")
+	}
+	r := caspaxos.NewProposer(3, group(nw, 2, 3, 4))
+	for k := range done {
+		got, err := r.Propose(ctx, []byte(k), caspaxos.Identity)
+		want := "val-" + k[len("key-"):]
+		if err != nil || string(got) != want {
+			t.Fatalf("reported key %s reads %q, %v from the new set; want %q", k, got, err, want)
+		}
+	}
+
+	// Without the bad key, every key is carried and reported once.
+	done = map[string]bool{}
+	var rest [][]byte
+	for _, k := range keys {
+		if string(k) != bad {
+			rest = append(rest, k)
+		}
+	}
+	if err := reconfig.CarryForwardPool(ctx, 1, rest, old, newSet, 8, func(k []byte) {
+		mu.Lock()
+		defer mu.Unlock()
+		done[string(k)] = true
+	}); err != nil {
+		t.Fatalf("carry: %v", err)
+	}
+	if len(done) != len(rest) {
+		t.Fatalf("reported %d keys, want %d", len(done), len(rest))
 	}
 }
