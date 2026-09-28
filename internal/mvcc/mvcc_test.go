@@ -114,6 +114,43 @@ func TestCASSeqSemantics(t *testing.T) {
 	}
 }
 
+func TestCreateAtSemantics(t *testing.T) {
+	ctx := context.Background()
+	acc, clock := cluster(3)
+	kv := mvcc.New(caspaxos.NewProposer(1, acc), clock, 1)
+	key := []byte("k")
+
+	if _, err := kv.CreateAt(ctx, key, 1, []byte("a")); !errors.Is(err, caspaxos.ErrConflict) {
+		t.Fatalf("CreateAt 1 on an absent key = %v, want ErrConflict", err)
+	}
+	v1, err := kv.CreateAt(ctx, key, 0, []byte("a"))
+	if err != nil || v1.Seq != 1 {
+		t.Fatalf("CreateAt 0 on an absent key = %+v, %v", v1, err)
+	}
+	if _, err := kv.CreateAt(ctx, key, 1, []byte("x")); !errors.Is(err, caspaxos.ErrConflict) {
+		t.Fatalf("CreateAt on a live key = %v, want ErrConflict", err)
+	}
+	// Two tombstones: CreateAt matches only the one at the head.
+	if _, err := kv.Delete(ctx, key); err != nil { // 2
+		t.Fatal(err)
+	}
+	if _, err := kv.CreateAt(ctx, key, 2, []byte("b")); err != nil { // 3
+		t.Fatal(err)
+	}
+	if _, err := kv.Delete(ctx, key); err != nil { // 4
+		t.Fatal(err)
+	}
+	for _, seq := range []uint64{0, 2, 3} {
+		if _, err := kv.CreateAt(ctx, key, seq, []byte("x")); !errors.Is(err, caspaxos.ErrConflict) {
+			t.Fatalf("CreateAt %d with tombstone 4 at the head = %v, want ErrConflict", seq, err)
+		}
+	}
+	v, err := kv.CreateAt(ctx, key, 4, []byte("c"))
+	if err != nil || v.Seq != 5 {
+		t.Fatalf("CreateAt over tombstone 4 = %+v, %v", v, err)
+	}
+}
+
 func TestDeleteSeqSemantics(t *testing.T) {
 	ctx := context.Background()
 	acc, clock := cluster(3)

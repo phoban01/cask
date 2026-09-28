@@ -87,18 +87,21 @@ func expectedSteps(t *testing.T, s *Store, from, to uint64) []string {
 			t.Fatalf("index at %d: ok=%v err=%v", seq, ok, err)
 		}
 		n := 0
-		for name, s := range cur {
+		for name, e := range cur {
+			if p, had := prev[name]; (!had || p != e) && e.Idx != seq {
+				t.Fatalf("index step %d wrote %s at index sequence %d", seq, name, e.Idx)
+			}
 			if p, had := prev[name]; !had {
-				out = append(out, fmt.Sprintf("ADDED %s@%d", name, s))
+				out = append(out, fmt.Sprintf("ADDED %s@%d", name, e.Idx))
 				n++
-			} else if p != s {
-				out = append(out, fmt.Sprintf("MODIFIED %s@%d", name, s))
+			} else if p != e {
+				out = append(out, fmt.Sprintf("MODIFIED %s@%d", name, e.Idx))
 				n++
 			}
 		}
-		for name, p := range prev {
+		for name := range prev {
 			if _, has := cur[name]; !has {
-				out = append(out, fmt.Sprintf("DELETED %s@%d", name, p))
+				out = append(out, fmt.Sprintf("DELETED %s@%d", name, seq))
 				n++
 			}
 		}
@@ -110,19 +113,31 @@ func expectedSteps(t *testing.T, s *Store, from, to uint64) []string {
 	return out
 }
 
-// repairIndex handles a mutation whose object write committed but whose
-// index write lost too many rounds to other proposals. It runs the index
-// write again, as the sweep does, and returns nil once it lands. Any other
-// error comes back unchanged. The reads of the open watches add to the
-// rounds that an index write loses (issue #149).
-func repairIndex(ctx context.Context, s *Store, name string, err error) error {
-	if err == nil || !errors.Is(err, caspaxos.ErrPreempted) || !strings.Contains(err.Error(), "index write failed") {
-		return err
-	}
+// withRepair runs op, a mutation of name through s, until it lands. The
+// reads of the open watches, and the index reads of every get, update,
+// and delete, add to the rounds that an index register round loses
+// (issue #149).
+//
+// A mutation that lost too many rounds before its object write committed
+// wrote nothing, so withRepair runs it again. A mutation whose object
+// write committed but whose index write lost too many rounds reports
+// "index write failed". withRepair then runs the index write again, as
+// the sweep does, and returns nil once it lands. Any other error comes
+// back unchanged.
+func withRepair(ctx context.Context, s *Store, name string, op func() error) error {
 	for {
-		err = WriteIndex(ctx, s.kv, s.resource, name)
-		if !errors.Is(err, caspaxos.ErrPreempted) {
+		err := op()
+		if err == nil || !errors.Is(err, caspaxos.ErrPreempted) {
 			return err
+		}
+		if !strings.Contains(err.Error(), "index write failed") {
+			continue
+		}
+		for {
+			_, _, err = WriteIndex(ctx, s.kv, s.resource, name)
+			if !errors.Is(err, caspaxos.ErrPreempted) {
+				return err
+			}
 		}
 	}
 }
@@ -167,15 +182,19 @@ func TestWatchFromOldVersionDeliversEveryChangeInOrder(t *testing.T) {
 			defer wg.Done()
 			name := fmt.Sprintf("gpu-%d", i)
 			for r := range rounds {
-				err := st.Create(ctx, keyPrefix+name, device(name, "a100"), nil, 0)
-				if err = repairIndex(ctx, st, name, err); err == nil {
-					err = st.GuaranteedUpdate(ctx, keyPrefix+name, &v1alpha1.Device{}, false, nil,
-						mutate(func(d *v1alpha1.Device) { d.Spec.Model = fmt.Sprint(r) }), nil)
-					err = repairIndex(ctx, st, name, err)
+				err := withRepair(ctx, st, name, func() error {
+					return st.Create(ctx, keyPrefix+name, device(name, "a100"), nil, 0)
+				})
+				if err == nil {
+					err = withRepair(ctx, st, name, func() error {
+						return st.GuaranteedUpdate(ctx, keyPrefix+name, &v1alpha1.Device{}, false, nil,
+							mutate(func(d *v1alpha1.Device) { d.Spec.Model = fmt.Sprint(r) }), nil)
+					})
 				}
 				if err == nil {
-					err = st.Delete(ctx, keyPrefix+name, &v1alpha1.Device{}, nil, nil, nil, apistorage.DeleteOptions{})
-					err = repairIndex(ctx, st, name, err)
+					err = withRepair(ctx, st, name, func() error {
+						return st.Delete(ctx, keyPrefix+name, &v1alpha1.Device{}, nil, nil, nil, apistorage.DeleteOptions{})
+					})
 				}
 				if err != nil {
 					t.Error(err)
@@ -237,7 +256,7 @@ func TestWatchCompactedStartEndsWithGone(t *testing.T) {
 	// Version 3 is retained, so a watch from 3 sees the next change.
 	w := mustWatch(t, s, keyPrefix, watchFrom(3))
 	mustCreate(t, s, device("gpu-3", "a100"))
-	if got := short(next(t, w)); got != "ADDED gpu-3@1" {
+	if got := short(next(t, w)); got != "ADDED gpu-3@4" {
 		t.Fatalf("watch from 3: %s", got)
 	}
 }
@@ -258,13 +277,13 @@ func TestWatchInitialEventsAndBookmarks(t *testing.T) {
 
 	// resourceVersion "0" starts with the current state.
 	w := mustWatch(t, s, keyPrefix, watchFrom(0))
-	for _, want := range []string{"ADDED gpu-0@1", "ADDED gpu-1@1"} {
+	for _, want := range []string{"ADDED gpu-0@2", "ADDED gpu-1@1"} {
 		if got := short(next(t, w)); got != want {
 			t.Fatalf("initial event = %q, want %q", got, want)
 		}
 	}
 	mustCreate(t, s, device("gpu-2", "a100"))
-	if got := short(next(t, w)); got != "ADDED gpu-2@1" {
+	if got := short(next(t, w)); got != "ADDED gpu-2@3" {
 		t.Fatalf("after initial events: %s", got)
 	}
 
@@ -288,11 +307,14 @@ func TestWatchInitialEventsAndBookmarks(t *testing.T) {
 		t.Fatalf("end of initial events = %s %+v", short(ev), ev.Object)
 	}
 
-	// An idle watch that allows bookmarks sends the index sequence.
-	s.bookmarkEvery = 10 * time.Millisecond
+	// An idle watch that allows bookmarks sends the index sequence. A new
+	// Store on the same cask gets the short interval, so the setting does
+	// not race with the watches above, which still run.
+	idle := fastWatch(newStoreOn(t, s.kv))
+	idle.bookmarkEvery = 10 * time.Millisecond
 	opts = watchFrom(3)
 	opts.Predicate.AllowWatchBookmarks = true
-	w = mustWatch(t, s, keyPrefix, opts)
+	w = mustWatch(t, idle, keyPrefix, opts)
 	if ev := next(t, w); ev.Type != watch.Bookmark || ev.Object.(*v1alpha1.Device).ResourceVersion != "3" {
 		t.Fatalf("idle bookmark = %s", short(ev))
 	}
@@ -328,12 +350,12 @@ func TestWatchPredicateAndOneObject(t *testing.T) {
 	}
 
 	// gpu-1 moves into the selector, gpu-0 moves out, then gpu-1 goes.
-	for _, want := range []string{"ADDED gpu-1@2", "DELETED gpu-0@1", "DELETED gpu-1@2"} {
+	for _, want := range []string{"ADDED gpu-1@3", "DELETED gpu-0@4", "DELETED gpu-1@5"} {
 		if got := short(next(t, sel)); got != want {
 			t.Fatalf("selector watch: %q, want %q", got, want)
 		}
 	}
-	for _, want := range []string{"ADDED gpu-1@1", "MODIFIED gpu-1@2", "DELETED gpu-1@2"} {
+	for _, want := range []string{"ADDED gpu-1@2", "MODIFIED gpu-1@3", "DELETED gpu-1@5"} {
 		if got := short(next(t, one)); got != want {
 			t.Fatalf("one-object watch: %q, want %q", got, want)
 		}

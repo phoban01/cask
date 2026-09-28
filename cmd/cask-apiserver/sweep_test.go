@@ -19,15 +19,16 @@ func newMemberKV(m *membership) *mvcc.KV {
 
 func quietLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-// indexEntry reads the index entry of name.
+// indexEntry returns the object sequence that the index entry of name
+// records, and whether the index names it.
 func indexEntry(t *testing.T, kv *mvcc.KV, resource, name string) (uint64, bool) {
 	t.Helper()
 	idx, err := storage.ReadIndex(context.Background(), kv, resource)
 	if err != nil {
 		t.Fatal(err)
 	}
-	seq, ok := idx.Entries[name]
-	return seq, ok
+	e, ok := idx.Entries[name]
+	return e.Obj, ok
 }
 
 // A crash lost the index write of an object. The startup sweep of the

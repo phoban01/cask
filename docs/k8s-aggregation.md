@@ -32,7 +32,16 @@ transaction in the storage interface at all:
 | `GetList(prefix)` | range scan over ordered keyspace | prefix locality is why ranges are ordered, not hashed |
 | `Watch(key/prefix, fromRV)` | `mvcc.History` cursors / `watch.KeyWatcher` | Plumtree push (§3.5) upgrades poll → push later |
 | `Count(prefix)` | scan count | cheap at coordination-store scale |
-| `Versioner` (resourceVersion) | **per-key MVCC `Seq`** | see below |
+| `Versioner` (resourceVersion) | **index sequence of the object's index entry** | see below (issue #150) |
+
+**Decided (issue #150): resourceVersion = index sequence.** Every
+resourceVersion a client sees is a sequence of the resource type's index
+register. Each index entry records the object sequence and the index
+sequence at which the index recorded it. An update checks the client's
+resourceVersion against the entry, then compares and sets on the object
+sequence. A reflector can then resume a watch from any event. The rules
+are in `docs/spec/fleet.md` sections 3 and 4. The paragraph below is the
+earlier design sketch.
 
 **resourceVersion = per-key Seq.** k8s semantics require: RV monotonic per
 object; watch-from-RV per object; list RVs usable for "not older than"

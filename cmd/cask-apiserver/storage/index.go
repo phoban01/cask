@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,14 +20,23 @@ func IndexKey(resource string) []byte {
 	return fmt.Appendf(nil, "fleet/%s.index", resource)
 }
 
+// Entry is the index entry of one object.
+type Entry struct {
+	// Obj is the object register sequence that the index recorded. A
+	// write to the object compares and sets on it.
+	Obj uint64 `json:"o"`
+	// Idx is the index sequence at which the index recorded Obj. It is
+	// the object's resourceVersion.
+	Idx uint64 `json:"i"`
+}
+
 // Index is one read of a resource type's index register.
 type Index struct {
 	// Seq is the sequence of the index register. It is the list
 	// resourceVersion.
 	Seq uint64
-	// Entries maps each object name to the object sequence that the index
-	// recorded.
-	Entries map[string]uint64
+	// Entries maps each object name to its index entry.
+	Entries map[string]Entry
 }
 
 // ReadIndex reads the index register of resource.
@@ -37,26 +45,34 @@ func ReadIndex(ctx context.Context, kv *mvcc.KV, resource string) (Index, error)
 	if err != nil {
 		return Index{}, err
 	}
-	idx := Index{Entries: map[string]uint64{}}
+	idx, _, err := indexHead(chain)
+	if err != nil {
+		return Index{}, fmt.Errorf("cask storage: decode %s index: %w", resource, err)
+	}
+	return idx, nil
+}
+
+// indexHead decodes the newest version in chain. live is false when the
+// register is absent or its head is a tombstone.
+func indexHead(chain mvcc.Chain) (idx Index, live bool, err error) {
+	idx.Entries = map[string]Entry{}
 	n := len(chain.Versions)
 	if n == 0 {
-		return idx, nil
+		return idx, false, nil
 	}
 	head := chain.Versions[n-1]
 	idx.Seq = head.Seq
 	if head.Tombstone {
-		return idx, nil
+		return idx, false, nil
 	}
-	entries, err := decodeIndex(head.Value)
-	if err != nil {
-		return Index{}, fmt.Errorf("cask storage: decode %s index: %w", resource, err)
+	if idx.Entries, err = decodeIndex(head.Value); err != nil {
+		return Index{}, false, err
 	}
-	idx.Entries = entries
-	return idx, nil
+	return idx, true, nil
 }
 
-func decodeIndex(raw []byte) (map[string]uint64, error) {
-	entries := map[string]uint64{}
+func decodeIndex(raw []byte) (map[string]Entry, error) {
+	entries := map[string]Entry{}
 	if len(raw) == 0 {
 		return entries, nil
 	}
@@ -75,12 +91,38 @@ const indexWriteRetries = 32
 // when the object is tombstoned or absent. Call it after the object write
 // of every create, update, and delete.
 //
-// WriteIndex reads the index before the object. Object sequences only
-// grow, so the sequence it records is never lower than the entry it
-// read. The compare-and-set on the index then makes sure no other writer
-// recorded a newer entry in between. An entry therefore never goes
-// backwards and never passes the object register.
-func WriteIndex(ctx context.Context, kv *mvcc.KV, resource, name string) error {
+// It returns the entry that the index holds for name after the call, and
+// whether the index names it. When the index does not name it, the
+// entry's Idx is the index sequence of the removal, or the index sequence
+// that WriteIndex read when there was nothing to remove.
+func WriteIndex(ctx context.Context, kv *mvcc.KV, resource, name string) (Entry, bool, error) {
+	w, err := writeIndex(ctx, kv, resource, name)
+	return w.entry, w.live, err
+}
+
+// indexWrite is the result of one index write for a name.
+type indexWrite struct {
+	// entry is the entry that the index holds for the name after the
+	// write. When the index does not name it, only entry.Idx is set: the
+	// index sequence of the removal, or the index sequence the write read.
+	entry Entry
+	// live is true when the index names the object.
+	live bool
+	// wrote is true when this write changed the index.
+	wrote bool
+	// removed is the entry that this write removed. It is set only when
+	// wrote is true and live is false.
+	removed Entry
+}
+
+// writeIndex is WriteIndex. It also reports whether it changed the index.
+//
+// It reads the index before the object. Object sequences only grow, so
+// the sequence it records is never lower than the entry it read. The
+// compare-and-set on the index sequence then makes sure no other writer
+// changed the index in between. An entry therefore never goes backwards
+// and never passes the object register.
+func writeIndex(ctx context.Context, kv *mvcc.KV, resource, name string) (indexWrite, error) {
 	//= docs/spec/fleet.md#3-storage-model
 	//# Each resource type MUST have one index register that maps every object name to that object's latest sequence.
 	//= docs/spec/fleet.md#3-storage-model
@@ -88,47 +130,184 @@ func WriteIndex(ctx context.Context, kv *mvcc.KV, resource, name string) error {
 	//= docs/spec/fleet.md#3-storage-model
 	//# When the index write of a mutation did not complete, the next index write for that object MUST record the object register's current sequence.
 	for range indexWriteRetries {
-		cur, found, err := kv.Get(ctx, IndexKey(resource))
+		chain, err := kv.History(ctx, IndexKey(resource))
 		if err != nil {
-			return err
+			return indexWrite{}, err
 		}
-		entries, err := decodeIndex(cur)
+		idx, live, err := indexHead(chain)
 		if err != nil {
-			return fmt.Errorf("cask storage: decode %s index: %w", resource, err)
+			return indexWrite{}, fmt.Errorf("cask storage: decode %s index: %w", resource, err)
 		}
-		seq, live, err := objectHead(ctx, kv, resource, name)
+		seq, objLive, err := objectHead(ctx, kv, resource, name)
 		if err != nil {
-			return err
+			return indexWrite{}, err
 		}
-		if live {
-			entries[name] = seq
-		} else {
-			delete(entries, name)
+		cur, had := idx.Entries[name]
+		switch {
+		case objLive && had && cur.Obj == seq:
+			return indexWrite{entry: cur, live: true}, nil
+		case !objLive && !had:
+			return indexWrite{entry: Entry{Idx: idx.Seq}}, nil
+		case objLive:
+			//= docs/spec/fleet.md#3-storage-model
+			//# Each index entry MUST record both the object register sequence and the index sequence at which the index register recorded it.
+			idx.Entries[name] = Entry{Obj: seq, Idx: idx.Seq + 1}
+		default:
+			delete(idx.Entries, name)
 		}
-		// encoding/json sorts map keys, so equal entries give equal bytes.
-		next, err := json.Marshal(entries)
+		next, err := json.Marshal(idx.Entries)
 		if err != nil {
-			return err
+			return indexWrite{}, err
 		}
-		var expected []byte
-		if found {
-			expected = cur
+		// The compare-and-set is on the index sequence, not the value. An
+		// index value can repeat, for example after a create and a
+		// delete of the same name, but a sequence never does. CASSeq
+		// with 0 matches an absent or tombstoned register.
+		expect := idx.Seq
+		if !live {
+			expect = 0
 		}
-		if bytes.Equal(expected, next) || (!found && len(entries) == 0) {
-			return nil
-		}
-		_, err = kv.CAS(ctx, IndexKey(resource), expected, next)
+		v, err := kv.CASSeq(ctx, IndexKey(resource), expect, next)
 		if err == nil {
-			return nil
+			if v.Seq != idx.Seq+1 {
+				return indexWrite{}, fmt.Errorf("cask storage: %s index write landed at %d, want %d",
+					resource, v.Seq, idx.Seq+1)
+			}
+			if objLive {
+				return indexWrite{entry: idx.Entries[name], live: true, wrote: true}, nil
+			}
+			return indexWrite{entry: Entry{Idx: v.Seq}, wrote: true, removed: cur}, nil
 		}
 		if !errors.Is(err, caspaxos.ErrConflict) {
-			return err
+			return indexWrite{}, err
 		}
 		if err := ctx.Err(); err != nil {
-			return err
+			return indexWrite{}, err
 		}
 	}
-	return fmt.Errorf("cask storage: %s index write for %q lost %d races", resource, name, indexWriteRetries)
+	return indexWrite{}, fmt.Errorf("cask storage: %s index write for %q lost %d races", resource, name, indexWriteRetries)
+}
+
+// ErrNotRecorded means that the retained index history holds no entry for
+// a write that committed. It happens only when the index history was
+// compacted past the write. The write landed; the caller must re-read.
+var ErrNotRecorded = errors.New("cask storage: the index history no longer holds the write")
+
+// RecordedAt returns the index sequence at which the index of resource
+// recorded object sequence objSeq for name. It returns ErrNotRecorded when
+// the retained index history holds no such entry.
+//
+// A write at objSeq can be overwritten before its own index write runs.
+// The overwrite compared and set on objSeq, and a writer compares and
+// sets only on a sequence that the index recorded. So the index recorded
+// objSeq before the overwrite, and RecordedAt finds it.
+func RecordedAt(ctx context.Context, kv *mvcc.KV, resource, name string, objSeq uint64) (uint64, error) {
+	chain, err := kv.History(ctx, IndexKey(resource))
+	if err != nil {
+		return 0, err
+	}
+	// Walk back from the head. Entries never go backwards, so stop at the
+	// first entry below objSeq.
+	for i := len(chain.Versions) - 1; i >= 0; i-- {
+		entries, err := versionEntries(chain.Versions[i])
+		if err != nil {
+			return 0, fmt.Errorf("cask storage: decode %s index at %d: %w", resource, chain.Versions[i].Seq, err)
+		}
+		e, ok := entries[name]
+		switch {
+		case ok && e.Obj == objSeq:
+			return e.Idx, nil
+		case ok && e.Obj < objSeq:
+			return 0, ErrNotRecorded
+		}
+	}
+	return 0, ErrNotRecorded
+}
+
+// RemovedAt returns the index sequence at which the index of resource
+// removed name after it recorded object sequence objSeq. A delete that
+// tombstoned objSeq uses it to report its own removal step when another
+// index write removed the name. It returns ErrNotRecorded when the
+// retained index history holds no such step.
+func RemovedAt(ctx context.Context, kv *mvcc.KV, resource, name string, objSeq uint64) (uint64, error) {
+	chain, err := kv.History(ctx, IndexKey(resource))
+	if err != nil {
+		return 0, err
+	}
+	// Walk back from the head. removed is the sequence of the newest
+	// version after i that does not name the object, while no later
+	// version names it.
+	var removed uint64
+	for i := len(chain.Versions) - 1; i >= 0; i-- {
+		v := chain.Versions[i]
+		entries, err := versionEntries(v)
+		if err != nil {
+			return 0, fmt.Errorf("cask storage: decode %s index at %d: %w", resource, v.Seq, err)
+		}
+		e, ok := entries[name]
+		switch {
+		case !ok:
+			removed = v.Seq
+		case e.Obj == objSeq && removed != 0:
+			return removed, nil
+		case e.Obj <= objSeq:
+			return 0, ErrNotRecorded
+		default:
+			removed = 0
+		}
+	}
+	return 0, ErrNotRecorded
+}
+
+// versionEntries decodes the entries of one index version.
+func versionEntries(v mvcc.Version) (map[string]Entry, error) {
+	if v.Tombstone {
+		return map[string]Entry{}, nil
+	}
+	return decodeIndex(v.Value)
+}
+
+// PrepareCreate readies a create of name in resource. It returns the head
+// sequence of the object register that the create must pass to
+// mvcc.CreateAt: 0 for an absent register, or the sequence of the
+// tombstone at the head. exists is true when the head is live, and the
+// create must fail.
+//
+// A create over a tombstone must not run while the index still names the
+// deleted object. Its index write would change the entry from the old
+// object to the new one in one step, and a watch would report one
+// MODIFIED event with a new UID in place of a DELETED and an ADDED event.
+// So when the index still names the object, PrepareCreate first writes the
+// index, which records the removal, and then reads again.
+//
+// PrepareCreate reads the head before the index. CreateAt then succeeds
+// only if the head is still that tombstone. Until the create lands the
+// head stays a tombstone, so no index write can name the object again.
+func PrepareCreate(ctx context.Context, kv *mvcc.KV, resource, name string) (seq uint64, exists bool, err error) {
+	//= docs/spec/fleet.md#3-storage-model
+	//# A create MUST NOT write over a tombstone while the index register still names the deleted object.
+	//= docs/spec/fleet.md#4-list-and-watch
+	//# A watch MUST report the deletion of an object and the creation of a new object with the same name as separate events.
+	for range indexWriteRetries {
+		seq, live, err := objectHead(ctx, kv, resource, name)
+		if err != nil {
+			return 0, false, err
+		}
+		if live {
+			return seq, true, nil
+		}
+		idx, err := ReadIndex(ctx, kv, resource)
+		if err != nil {
+			return 0, false, err
+		}
+		if _, named := idx.Entries[name]; !named {
+			return seq, false, nil
+		}
+		if _, err := writeIndex(ctx, kv, resource, name); err != nil {
+			return 0, false, err
+		}
+	}
+	return 0, false, fmt.Errorf("cask storage: %s create of %q lost %d races", resource, name, indexWriteRetries)
 }
 
 // objectHead returns the sequence of the object's head version and

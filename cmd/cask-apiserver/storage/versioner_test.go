@@ -35,23 +35,26 @@ func TestVersionerParse(t *testing.T) {
 	}
 }
 
-func TestVersionerUpdateObjectMatchesRegisterSequence(t *testing.T) {
+func TestVersionerUpdateObjectMatchesIndexSequence(t *testing.T) {
 	//= docs/spec/fleet.md#3-storage-model
 	//= type=test
-	//# An object's resourceVersion MUST be the sequence of its object register.
+	//# An object's resourceVersion MUST be the index sequence at which the index register recorded that object version.
 	ctx := context.Background()
 	s := newTestStore(t)
 	v := s.Versioner()
 
+	// gpu-1 takes index sequence 1, so gpu-0's index sequences are one
+	// above its object sequences.
+	mustCreate(t, s, device("gpu-1", "a100"))
 	created := mustCreate(t, s, device("gpu-0", "a100"))
 	updated := &v1alpha1.Device{}
 	if err := s.GuaranteedUpdate(ctx, keyPrefix+"gpu-0", updated, false, nil,
 		mutate(func(d *v1alpha1.Device) { d.Spec.Model = "h100" }), nil); err != nil {
 		t.Fatal(err)
 	}
-	head, ok, err := s.head(ctx, ObjectKey("devices", "gpu-0"))
-	if err != nil || !ok {
-		t.Fatalf("head: ok=%v err=%v", ok, err)
+	e, ok := indexEntry(t, s, "gpu-0")
+	if !ok || e.Obj != 2 {
+		t.Fatalf("index entry = %+v (named %v), want object sequence 2", e, ok)
 	}
 	cRV, err := v.ObjectResourceVersion(created)
 	if err != nil {
@@ -61,8 +64,8 @@ func TestVersionerUpdateObjectMatchesRegisterSequence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cRV != 1 || uRV != 2 || uRV != head.Seq {
-		t.Fatalf("resourceVersions = %d, %d; register head = %d; want 1, 2, 2", cRV, uRV, head.Seq)
+	if cRV != 2 || uRV != 3 || uRV != e.Idx {
+		t.Fatalf("resourceVersions = %d, %d; index entry = %+v; want 2, 3, 3", cRV, uRV, e)
 	}
 
 	// UpdateObject writes the sequence as a decimal string, and 0 clears it.

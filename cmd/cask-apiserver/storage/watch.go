@@ -27,6 +27,13 @@ const watchExpired = "The resourceVersion for the provided watch is too old."
 // carries the object at the sequence the index recorded. A DELETED event
 // carries the last version that the index recorded before the removal.
 //
+// The resourceVersion of every event is the index sequence of its step.
+// An ADDED or MODIFIED event carries the entry's index sequence, which is
+// the step that wrote the entry. A DELETED event carries the step that
+// removed the name. A client that resumes a watch from the
+// resourceVersion of any event therefore neither replays nor skips a
+// step.
+//
 // With resourceVersion "" or "0", or with SendInitialEvents, the watch
 // first sends an ADDED event for each object in the current index. When
 // the start version is compacted, the watch sends one 410 Gone error
@@ -36,10 +43,6 @@ const watchExpired = "The resourceVersion for the provided watch is too old."
 // When the predicate allows bookmarks, the watch sends a bookmark with
 // the index sequence it has reached after each idle bookmark interval,
 // and after the initial events when SendInitialEvents is set.
-//
-// An event object carries its object sequence as resourceVersion, not the
-// index sequence. A client that resumes from an event, not a bookmark,
-// can replay or skip index steps. Issue #150 settles the rule in the spec.
 func (s *Store) Watch(ctx context.Context, key string, opts apistorage.ListOptions) (watch.Interface, error) {
 	rv, err := s.versioner.ParseResourceVersion(opts.ResourceVersion)
 	if err != nil {
@@ -152,7 +155,7 @@ func (w *indexWatch) bookmark(seq uint64, initialEnd bool) bool {
 
 // run sends the initial events, if asked, and then every index step after
 // cursor. base is the index at cursor.
-func (w *indexWatch) run(base map[string]uint64, cursor uint64, initial, endMark bool) {
+func (w *indexWatch) run(base map[string]Entry, cursor uint64, initial, endMark bool) {
 	if initial {
 		for _, name := range sortedNames(w, base) {
 			obj, err := w.s.objectAt(w.ctx, name, base[name], w.s.newFunc())
@@ -202,14 +205,14 @@ func (w *indexWatch) run(base map[string]uint64, cursor uint64, initial, endMark
 				w.fail(apierrors.NewResourceExpired(watchExpired))
 				return
 			}
-			next := map[string]uint64{}
+			next := map[string]Entry{}
 			if !step.Version.Tombstone {
 				if next, err = decodeIndex(step.Version.Value); err != nil {
 					w.fail(fmt.Errorf("cask storage: decode %s index at %d: %w", w.s.resource, step.Version.Seq, err))
 					return
 				}
 			}
-			sent, err := w.step(prev, next)
+			sent, err := w.step(prev, next, step.Version.Seq)
 			if err != nil {
 				w.fail(err)
 				return
@@ -237,11 +240,12 @@ func (w *indexWatch) run(base map[string]uint64, cursor uint64, initial, endMark
 }
 
 // step sends the events for one index step from prev to next, in name
-// order. It reports whether it sent any event.
-func (w *indexWatch) step(prev, next map[string]uint64) (bool, error) {
+// order. seq is the index sequence of the step. It reports whether it
+// sent any event.
+func (w *indexWatch) step(prev, next map[string]Entry, seq uint64) (bool, error) {
 	changed := map[string]bool{}
-	for name, seq := range next {
-		if prev[name] != seq {
+	for name, e := range next {
+		if old, ok := prev[name]; !ok || old != e {
 			changed[name] = true
 		}
 	}
@@ -252,7 +256,7 @@ func (w *indexWatch) step(prev, next map[string]uint64) (bool, error) {
 	}
 	sent := false
 	for _, name := range sortedNames(w, changed) {
-		ev, ok, err := w.event(name, prev, next)
+		ev, ok, err := w.event(name, prev, next, seq)
 		if err != nil {
 			return sent, err
 		}
@@ -269,15 +273,19 @@ func (w *indexWatch) step(prev, next map[string]uint64) (bool, error) {
 
 // event builds the event for name, which changed from prev to next. ok is
 // false when the predicate filters the change out.
-func (w *indexWatch) event(name string, prev, next map[string]uint64) (ev watch.Event, ok bool, err error) {
+func (w *indexWatch) event(name string, prev, next map[string]Entry, seq uint64) (ev watch.Event, ok bool, err error) {
 	//= docs/spec/fleet.md#4-list-and-watch
 	//# Each watch event MUST carry the object at the sequence the index recorded.
-	oldSeq, hadOld := prev[name]
-	newSeq, hasNew := next[name]
+	//= docs/spec/fleet.md#4-list-and-watch
+	//# Every resourceVersion that a get, a list, or a watch event reports MUST be an index sequence.
+	// An entry that this step wrote carries Idx == seq, so an ADDED or
+	// MODIFIED event carries the step's index sequence.
+	oldEntry, hadOld := prev[name]
+	newEntry, hasNew := next[name]
 	var oldObj, newObj runtime.Object
 	oldMatch, newMatch := false, false
 	if hasNew {
-		if newObj, err = w.s.objectAt(w.ctx, name, newSeq, w.s.newFunc()); err != nil {
+		if newObj, err = w.s.objectAt(w.ctx, name, newEntry, w.s.newFunc()); err != nil {
 			return ev, false, err
 		}
 		if newMatch, err = w.pred.Matches(newObj); err != nil {
@@ -287,7 +295,7 @@ func (w *indexWatch) event(name string, prev, next map[string]uint64) (ev watch.
 	// The old object decides a DELETED event, and whether a change moved
 	// the object into or out of the predicate.
 	if hadOld && (!hasNew || !w.pred.Empty()) {
-		if oldObj, err = w.s.objectAt(w.ctx, name, oldSeq, w.s.newFunc()); err != nil {
+		if oldObj, err = w.s.objectAt(w.ctx, name, oldEntry, w.s.newFunc()); err != nil {
 			return ev, false, err
 		}
 		if oldMatch, err = w.pred.Matches(oldObj); err != nil {
@@ -302,6 +310,14 @@ func (w *indexWatch) event(name string, prev, next map[string]uint64) (ev watch.
 	case newMatch:
 		return watch.Event{Type: watch.Added, Object: newObj}, true, nil
 	case oldMatch:
+		// The old object carries the index sequence of the step that
+		// removed it, or that moved it out of the predicate, as the etcd
+		// store does. A resume from it does not replay the step.
+		//= docs/spec/fleet.md#4-list-and-watch
+		//# A watch that resumes from the resourceVersion of any event MUST NOT skip or replay a change.
+		if err := w.s.versioner.UpdateObject(oldObj, seq); err != nil {
+			return ev, false, err
+		}
 		return watch.Event{Type: watch.Deleted, Object: oldObj}, true, nil
 	}
 	return ev, false, nil

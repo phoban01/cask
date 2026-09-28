@@ -84,11 +84,12 @@ func TestGuaranteedUpdateConcurrentUpdatersBothApply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rvOf(t, got) != seq || seq != 1+2*rounds {
-		t.Fatalf("resourceVersion = %s, object sequence = %d, want both %d", got.ResourceVersion, seq, 1+2*rounds)
+	if seq != 1+2*rounds {
+		t.Fatalf("object sequence = %d, want %d", seq, 1+2*rounds)
 	}
-	if entry, _ := indexEntry(t, east, "gpu-0"); entry != seq {
-		t.Fatalf("index entry = %d, want %d", entry, seq)
+	if e, _ := indexEntry(t, east, "gpu-0"); e.Obj != seq || rvOf(t, got) != e.Idx {
+		t.Fatalf("index entry = %+v, resourceVersion = %s, want the entry to record %d at the resourceVersion",
+			e, got.ResourceVersion, seq)
 	}
 }
 
@@ -202,8 +203,8 @@ func TestGuaranteedUpdateNotFound(t *testing.T) {
 	if dest.Spec.Model != "a100" || rvOf(t, dest) != 1 {
 		t.Fatalf("destination = %s rv %s, want a100 rv 1", dest.Spec.Model, dest.ResourceVersion)
 	}
-	if seq, _ := indexEntry(t, s, "gpu-0"); seq != 1 {
-		t.Fatalf("index entry = %d, want 1", seq)
+	if e, _ := indexEntry(t, s, "gpu-0"); e != (Entry{Obj: 1, Idx: 1}) {
+		t.Fatalf("index entry = %+v, want {1 1}", e)
 	}
 }
 
@@ -224,5 +225,148 @@ func TestGuaranteedUpdateNoChangeSkipsWrite(t *testing.T) {
 	}
 	if seq, _, _ := objectHead(ctx, s.kv, "devices", "gpu-0"); seq != 1 {
 		t.Fatalf("object sequence = %d after a no-op update, want 1", seq)
+	}
+}
+
+func TestPreconditionUsesIndexSequence(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A resourceVersion precondition MUST be checked against the index sequence of the object's index entry.
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# When the index write of a mutation did not complete, the next index write for that object MUST record the object register's current sequence.
+	ctx := context.Background()
+	s := newTestStore(t)
+	// gpu-1 takes index sequence 1. gpu-0 is at object sequence 1 and
+	// index sequence 2.
+	mustCreate(t, s, device("gpu-1", "a100"))
+	mustCreate(t, s, device("gpu-0", "a100"))
+	setModel := mutate(func(d *v1alpha1.Device) { d.Spec.Model = "h100" })
+
+	// The object sequence is not a resourceVersion.
+	objSeq := "1"
+	err := s.GuaranteedUpdate(ctx, keyPrefix+"gpu-0", &v1alpha1.Device{}, false,
+		&apistorage.Preconditions{ResourceVersion: &objSeq}, setModel, nil)
+	if !apistorage.IsInvalidObj(err) {
+		t.Fatalf("precondition on the object sequence: err = %v, want invalid object", err)
+	}
+	err = s.Delete(ctx, keyPrefix+"gpu-0", &v1alpha1.Device{}, &apistorage.Preconditions{ResourceVersion: &objSeq},
+		nil, nil, apistorage.DeleteOptions{})
+	if !apistorage.IsInvalidObj(err) {
+		t.Fatalf("delete precondition on the object sequence: err = %v, want invalid object", err)
+	}
+	idxSeq := "2"
+	dest := &v1alpha1.Device{}
+	if err := s.GuaranteedUpdate(ctx, keyPrefix+"gpu-0", dest, false,
+		&apistorage.Preconditions{ResourceVersion: &idxSeq}, setModel, nil); err != nil {
+		t.Fatalf("precondition on the index sequence: %v", err)
+	}
+	if rvOf(t, dest) != 3 {
+		t.Fatalf("destination rv %s, want index sequence 3", dest.ResourceVersion)
+	}
+
+	// An object write whose index write did not complete. The update
+	// first sees the indexed version, fails its compare-and-set, catches
+	// the index up, and then runs on the fresh copy.
+	putRaw(t, s, device("gpu-0", "b200"))
+	var seen []uint64
+	dest = &v1alpha1.Device{}
+	err = s.GuaranteedUpdate(ctx, keyPrefix+"gpu-0", dest, false, nil,
+		func(in runtime.Object, res apistorage.ResponseMeta) (runtime.Object, *uint64, error) {
+			seen = append(seen, res.ResourceVersion)
+			d := in.(*v1alpha1.Device)
+			d.Spec.Zone = d.Spec.Model
+			return d, nil, nil
+		}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 2 || seen[0] != 3 || seen[1] != 4 {
+		t.Fatalf("tryUpdate saw resourceVersions %v, want [3 4]", seen)
+	}
+	if dest.Spec.Zone != "b200" || rvOf(t, dest) != 5 {
+		t.Fatalf("destination = zone %s rv %s, want b200 at 5", dest.Spec.Zone, dest.ResourceVersion)
+	}
+
+	// A tombstone whose index write did not complete. Get still serves
+	// the indexed version. Delete fails its compare-and-set, catches the
+	// index up, and then finds nothing to delete.
+	if _, err := s.kv.Delete(ctx, ObjectKey("devices", "gpu-0")); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustGet(t, s, "gpu-0"); rvOf(t, got) != 5 {
+		t.Fatalf("get before repair: rv %s, want the indexed version at 5", got.ResourceVersion)
+	}
+	err = s.Delete(ctx, keyPrefix+"gpu-0", &v1alpha1.Device{}, nil, nil, nil, apistorage.DeleteOptions{})
+	if !apistorage.IsNotFound(err) {
+		t.Fatalf("delete over an unindexed tombstone: err = %v, want not found", err)
+	}
+	if _, ok := indexEntry(t, s, "gpu-0"); ok {
+		t.Fatal("index still names the tombstoned object")
+	}
+}
+
+// An update lands at object sequence 2. Before its index write runs, a
+// repair records 2 and a second writer overwrites it at 3 and deletes it
+// at 4. The first update must still answer with its own version at the
+// index sequence that recorded 2, and a delete of 3 must answer with the
+// step that removed it.
+func TestWriteResponseIsOwnVersionAfterOverwrite(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A create or an update MUST return the object version that it wrote, with the index sequence at which the index register recorded that version.
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A delete MUST return the index sequence at which the index register removed the name.
+	ctx := context.Background()
+	s := newTestStore(t)
+	mustCreate(t, s, device("gpu-0", "a100")) // object 1, index 1
+	reg := ObjectKey("devices", "gpu-0")
+	put := func(seq uint64, model string) []byte {
+		t.Helper()
+		raw, err := s.encode(device("gpu-0", model))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.kv.CASSeq(ctx, reg, seq, raw); err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	mine := put(1, "mine")                              // object 2
+	if err := s.repairIndex(ctx, "gpu-0"); err != nil { // index 2 records object 2
+		t.Fatal(err)
+	}
+	put(2, "theirs")                     // object 3
+	w, err := s.writeIndex(ctx, "gpu-0") // index 3 records object 3
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := &v1alpha1.Device{}
+	if err := s.written(ctx, keyPrefix+"gpu-0", "gpu-0", 2, mine, w, out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Spec.Model != "mine" || rvOf(t, out) != 2 {
+		t.Fatalf("response = %s@%s, want the update's own version mine@2", out.Spec.Model, out.ResourceVersion)
+	}
+
+	// A delete of object 3 whose own index write comes after another
+	// index write removed the name, and after a new object was created.
+	if _, err := s.kv.DeleteSeq(ctx, reg, 3); err != nil { // object 4
+		t.Fatal(err)
+	}
+	if err := s.repairIndex(ctx, "gpu-0"); err != nil { // index 4 removes it
+		t.Fatal(err)
+	}
+	mustCreate(t, s, device("gpu-0", "next")) // object 5, index 5
+	rv, err := RemovedAt(ctx, s.kv, s.resource, "gpu-0", 3)
+	if err != nil || rv != 4 {
+		t.Fatalf("RemovedAt(3) = %d, %v, want 4", rv, err)
+	}
+	if rv, err := RecordedAt(ctx, s.kv, s.resource, "gpu-0", 3); err != nil || rv != 3 {
+		t.Fatalf("RecordedAt(3) = %d, %v, want 3", rv, err)
+	}
+	if _, err := RecordedAt(ctx, s.kv, s.resource, "gpu-0", 4); err == nil {
+		t.Fatal("RecordedAt(4) found a tombstone")
 	}
 }

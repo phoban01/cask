@@ -232,6 +232,26 @@ func (kv *KV) CASSeq(ctx context.Context, key []byte, seq uint64, value []byte) 
 	}))
 }
 
+// CreateAt sets the key to value only if the key is not live and its head
+// has sequence seq: 0 for an absent key, or the sequence of the tombstone
+// at the head. It returns caspaxos.ErrConflict if the precondition fails.
+//
+// CASSeq with 0 matches any tombstone. CreateAt matches one tombstone, so
+// a caller that checked state against that tombstone knows no delete and
+// create landed in between.
+func (kv *KV) CreateAt(ctx context.Context, key []byte, seq uint64, value []byte) (Version, error) {
+	op := kv.nextOp()
+	return kv.commit(ctx, key, op, kv.appendOp(op, func(head Version, present bool) ([]byte, bool, error) {
+		switch {
+		case !present && seq == 0:
+		case present && head.Tombstone && head.Seq == seq:
+		default:
+			return nil, false, caspaxos.ErrConflict
+		}
+		return value, false, nil
+	}))
+}
+
 // DeleteSeq writes a tombstone only if the key's head version has
 // sequence seq and is live. It returns caspaxos.ErrConflict if the
 // precondition fails. seq must be nonzero: an absent key has nothing to

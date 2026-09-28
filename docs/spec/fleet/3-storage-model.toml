@@ -6,7 +6,15 @@ target = "docs/spec/fleet.md#3-storage-model"
 # 
 # Each resource type MUST have one index register that maps every object name to that object's latest sequence.
 # 
-# An object's resourceVersion MUST be the sequence of its object register.
+# An object's resourceVersion MUST be the index sequence at which the index register recorded that object version.
+# 
+# Each index entry MUST record both the object register sequence and the index sequence at which the index register recorded it.
+# 
+# A get MUST serve an object only once the index register records it.
+# 
+# A get MUST read the object at the object register sequence that the index entry records.
+# 
+# A resourceVersion precondition MUST be checked against the index sequence of the object's index entry.
 # 
 # A list's resourceVersion MUST be the sequence of the index register.
 # 
@@ -21,6 +29,12 @@ target = "docs/spec/fleet.md#3-storage-model"
 # The extension server MUST reconcile the index register against the object registers at a fixed interval.
 # 
 # A create MUST use a compare-and-set that requires the object register to be absent.
+# 
+# A create MUST NOT write over a tombstone while the index register still names the deleted object.
+# 
+# A create or an update MUST return the object version that it wrote, with the index sequence at which the index register recorded that version.
+# 
+# A delete MUST return the index sequence at which the index register removed the name.
 # 
 # An update MUST use a compare-and-set on the resourceVersion the client supplied.
 # 
@@ -51,7 +65,31 @@ Each resource type MUST have one index register that maps every object name to t
 [[spec]]
 level = "MUST"
 quote = '''
-An object's resourceVersion MUST be the sequence of its object register.
+An object's resourceVersion MUST be the index sequence at which the index register recorded that object version.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Each index entry MUST record both the object register sequence and the index sequence at which the index register recorded it.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A get MUST serve an object only once the index register records it.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A get MUST read the object at the object register sequence that the index entry records.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A resourceVersion precondition MUST be checked against the index sequence of the object's index entry.
 '''
 
 [[spec]]
@@ -94,6 +132,24 @@ The extension server MUST reconcile the index register against the object regist
 level = "MUST"
 quote = '''
 A create MUST use a compare-and-set that requires the object register to be absent.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A create MUST NOT write over a tombstone while the index register still names the deleted object.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A create or an update MUST return the object version that it wrote, with the index sequence at which the index register recorded that version.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A delete MUST return the index sequence at which the index register removed the name.
 '''
 
 [[spec]]

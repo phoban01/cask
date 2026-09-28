@@ -62,22 +62,22 @@ func TestWriteIndexRecordsObjectSequence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := WriteIndex(ctx, kv, "devices", "gpu-0"); err != nil {
+		if _, _, err := WriteIndex(ctx, kv, "devices", "gpu-0"); err != nil {
 			t.Fatal(err)
 		}
-		if got := mustIndex(t, kv, "devices").Entries["gpu-0"]; got != v.Seq {
+		if got := mustIndex(t, kv, "devices").Entries["gpu-0"].Obj; got != v.Seq {
 			t.Fatalf("write %d: index records %d, object sequence is %d", i, got, v.Seq)
 		}
 	}
 	if _, err := kv.Put(ctx, ObjectKey("devices", "gpu-1"), []byte("x")); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteIndex(ctx, kv, "devices", "gpu-1"); err != nil {
+	if _, _, err := WriteIndex(ctx, kv, "devices", "gpu-1"); err != nil {
 		t.Fatal(err)
 	}
 	idx := mustIndex(t, kv, "devices")
-	if len(idx.Entries) != 2 || idx.Entries["gpu-0"] != 3 || idx.Entries["gpu-1"] != 1 {
-		t.Fatalf("entries = %v, want gpu-0:3 gpu-1:1", idx.Entries)
+	if len(idx.Entries) != 2 || idx.Entries["gpu-0"] != (Entry{Obj: 3, Idx: 3}) || idx.Entries["gpu-1"] != (Entry{Obj: 1, Idx: 4}) {
+		t.Fatalf("entries = %v, want gpu-0:{3 3} gpu-1:{1 4}", idx.Entries)
 	}
 	if idx.Seq != 4 {
 		t.Fatalf("index sequence = %d, want 4 (one per index change)", idx.Seq)
@@ -87,11 +87,27 @@ func TestWriteIndexRecordsObjectSequence(t *testing.T) {
 	if _, err := kv.Delete(ctx, ObjectKey("devices", "gpu-0")); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteIndex(ctx, kv, "devices", "gpu-0"); err != nil {
+	e, live, err := WriteIndex(ctx, kv, "devices", "gpu-0")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if live || e.Idx != 5 {
+		t.Fatalf("removal returned %+v live=%v, want the removal at index sequence 5", e, live)
 	}
 	if _, ok := mustIndex(t, kv, "devices").Entries["gpu-0"]; ok {
 		t.Fatal("index still names a tombstoned object")
+	}
+
+	// A second index write for the same state changes nothing and
+	// reports the index sequence it read.
+	if e, live, err := WriteIndex(ctx, kv, "devices", "gpu-0"); err != nil || live || e.Idx != 5 {
+		t.Fatalf("repeat = %+v live=%v err=%v, want no change at 5", e, live, err)
+	}
+	if e, live, err := WriteIndex(ctx, kv, "devices", "gpu-1"); err != nil || !live || e != (Entry{Obj: 1, Idx: 4}) {
+		t.Fatalf("repeat = %+v live=%v err=%v, want the entry {1 4}", e, live, err)
+	}
+	if seq := mustIndex(t, kv, "devices").Seq; seq != 5 {
+		t.Fatalf("index sequence = %d after no-op writes, want 5", seq)
 	}
 }
 
@@ -106,7 +122,7 @@ func TestWriteIndexCatchesUpAfterLostWrite(t *testing.T) {
 	if _, err := kv.Put(ctx, key, []byte("v1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteIndex(ctx, kv, "devices", "gpu-0"); err != nil {
+	if _, _, err := WriteIndex(ctx, kv, "devices", "gpu-0"); err != nil {
 		t.Fatal(err)
 	}
 	// The second mutation writes the object and then crashes before its
@@ -114,7 +130,7 @@ func TestWriteIndexCatchesUpAfterLostWrite(t *testing.T) {
 	if _, err := kv.Put(ctx, key, []byte("v2")); err != nil {
 		t.Fatal(err)
 	}
-	if got := mustIndex(t, kv, "devices").Entries["gpu-0"]; got != 1 {
+	if got := mustIndex(t, kv, "devices").Entries["gpu-0"].Obj; got != 1 {
 		t.Fatalf("index records %d before catch-up, want 1", got)
 	}
 	// The third mutation's index write records the current sequence.
@@ -122,10 +138,10 @@ func TestWriteIndexCatchesUpAfterLostWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteIndex(ctx, kv, "devices", "gpu-0"); err != nil {
+	if _, _, err := WriteIndex(ctx, kv, "devices", "gpu-0"); err != nil {
 		t.Fatal(err)
 	}
-	if got := mustIndex(t, kv, "devices").Entries["gpu-0"]; got != v3.Seq {
+	if got := mustIndex(t, kv, "devices").Entries["gpu-0"].Obj; got != v3.Seq {
 		t.Fatalf("index records %d, want the current sequence %d", got, v3.Seq)
 	}
 }
@@ -150,7 +166,7 @@ func TestWriteIndexNeverAheadUnderConcurrentWriters(t *testing.T) {
 					errs <- err
 					return
 				}
-				if err := WriteIndex(ctx, kv, "devices", name); err != nil {
+				if _, _, err := WriteIndex(ctx, kv, "devices", name); err != nil {
 					errs <- err
 					return
 				}
@@ -166,8 +182,8 @@ func TestWriteIndexNeverAheadUnderConcurrentWriters(t *testing.T) {
 					errs <- err
 					return
 				}
-				if idx.Entries[name] > seq {
-					errs <- fmt.Errorf("index records %d for %s, object holds %d", idx.Entries[name], name, seq)
+				if idx.Entries[name].Obj > seq {
+					errs <- fmt.Errorf("index records %d for %s, object holds %d", idx.Entries[name].Obj, name, seq)
 					return
 				}
 			}
@@ -186,8 +202,8 @@ func TestWriteIndexNeverAheadUnderConcurrentWriters(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if idx.Entries[name] != seq {
-			t.Fatalf("%s: index records %d, object holds %d", name, idx.Entries[name], seq)
+		if idx.Entries[name].Obj != seq {
+			t.Fatalf("%s: index records %d, object holds %d", name, idx.Entries[name].Obj, seq)
 		}
 	}
 }

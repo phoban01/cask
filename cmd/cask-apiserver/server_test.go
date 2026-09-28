@@ -434,7 +434,7 @@ func TestUpdateDetectsABA(t *testing.T) {
 
 	a := []byte(`{"metadata":{"name":"cam-aba"},"spec":{"zone":"eu-west"}}`)
 	b := []byte(`{"metadata":{"name":"cam-aba"},"spec":{"zone":"us-east"}}`)
-	rv, err := fs.create(ctx, "devices", "cam-aba", a)
+	_, rv, err := fs.create(ctx, "devices", "cam-aba", a)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,16 +443,16 @@ func TestUpdateDetectsABA(t *testing.T) {
 	// B and back to A.
 	fs.afterRead = func() {
 		fs.afterRead = nil
-		rvB, err := fs.update(ctx, "devices", "cam-aba", b, rv)
+		_, rvB, err := fs.update(ctx, "devices", "cam-aba", b, rv)
 		if err != nil {
 			t.Fatalf("A to B: %v", err)
 		}
-		if _, err := fs.update(ctx, "devices", "cam-aba", a, rvB); err != nil {
+		if _, _, err := fs.update(ctx, "devices", "cam-aba", a, rvB); err != nil {
 			t.Fatalf("B to A: %v", err)
 		}
 	}
 	c := []byte(`{"metadata":{"name":"cam-aba"},"spec":{"zone":"ap-south"}}`)
-	if _, err := fs.update(ctx, "devices", "cam-aba", c, rv); !errors.Is(err, errConflict) {
+	if _, _, err := fs.update(ctx, "devices", "cam-aba", c, rv); !errors.Is(err, errConflict) {
 		t.Fatalf("update at the first resourceVersion after A-B-A = %v, want conflict", err)
 	}
 	if got := getDevice(t, f.a, "cam-aba"); got.Spec.Zone != "eu-west" {
@@ -474,14 +474,14 @@ func TestDeleteConflictsWithConcurrentUpdate(t *testing.T) {
 	fs := f.a.api.store
 	ctx := context.Background()
 
-	rv, err := fs.create(ctx, "devices", "cam-del", []byte(`{"metadata":{"name":"cam-del"},"spec":{"zone":"eu-west"}}`))
+	_, rv, err := fs.create(ctx, "devices", "cam-del", []byte(`{"metadata":{"name":"cam-del"},"spec":{"zone":"eu-west"}}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	fs.afterRead = func() {
 		fs.afterRead = nil
 		next := []byte(`{"metadata":{"name":"cam-del"},"spec":{"zone":"us-east"}}`)
-		if _, err := fs.update(ctx, "devices", "cam-del", next, rv); err != nil {
+		if _, _, err := fs.update(ctx, "devices", "cam-del", next, rv); err != nil {
 			t.Fatalf("concurrent update: %v", err)
 		}
 	}

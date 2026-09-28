@@ -1511,3 +1511,26 @@ Files: `cmd/cask-apiserver/store.go`, `cmd/cask-apiserver/server_test.go`
 Done when: `go -C cmd/cask-apiserver test -race ./...` passes with both new tests.
 
 
+
+## apiserver: read the index entry without a round on the index register
+
+labels: fleet, apiserver, agent-5m
+
+Spec: docs/spec/fleet.md#3-storage-model
+> A get MUST serve an object only once the index register records it.
+
+Since #150, `Store.Get`, `GuaranteedUpdate`, and `Delete` read the index
+entry first. Each read is an identity round on the index register of the
+resource type. The watches and the index writes use the same register, so
+the extra rounds make an index round lose more often. The watch test now
+runs a mutation again when it loses before its object write commits.
+
+Task: serve the index entry read from the owner cache (`mvcc.WithLocalReader`)
+when it vouches for itself, or from the one index reader of #149. Count
+the identity rounds on the index register in a test.
+
+Files: `cmd/cask-apiserver/storage/cask.go`, `cmd/cask-apiserver/storage/index.go`
+
+Done when: a get costs no identity round on the index register when the
+owner cache serves it, and `go -C cmd/cask-apiserver test -race -count=300
+-run TestWatch ./storage/` passes.

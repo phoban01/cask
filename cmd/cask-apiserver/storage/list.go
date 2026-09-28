@@ -29,19 +29,19 @@ const (
 // indexAt returns the entries of the index version seq in chain. ok is
 // false when chain no longer holds that version. Sequence 0 is the empty
 // index before the first index write.
-func indexAt(chain mvcc.Chain, seq uint64) (entries map[string]uint64, ok bool, err error) {
+func indexAt(chain mvcc.Chain, seq uint64) (entries map[string]Entry, ok bool, err error) {
 	if seq == 0 {
 		if chain.CompactedBelow > 1 {
 			return nil, false, nil
 		}
-		return map[string]uint64{}, true, nil
+		return map[string]Entry{}, true, nil
 	}
 	for _, v := range chain.Versions {
 		if v.Seq != seq {
 			continue
 		}
 		if v.Tombstone {
-			return map[string]uint64{}, true, nil
+			return map[string]Entry{}, true, nil
 		}
 		entries, err := decodeIndex(v.Value)
 		return entries, err == nil, err
@@ -57,21 +57,15 @@ func headSeq(chain mvcc.Chain) uint64 {
 	return 0
 }
 
-// objectAt decodes the object name at sequence seq into a new object like
-// proto. The resourceVersion of the result is seq.
-func (s *Store) objectAt(ctx context.Context, name string, seq uint64, proto runtime.Object) (runtime.Object, error) {
-	v, found, err := s.kv.GetAt(ctx, ObjectKey(s.resource, name), seq)
+// objectAt decodes the object version that entry e records into a new
+// object like proto. The resourceVersion of the result is e.Idx.
+func (s *Store) objectAt(ctx context.Context, name string, e Entry, proto runtime.Object) (runtime.Object, error) {
+	raw, err := s.indexed(ctx, name, e)
 	if err != nil {
 		return nil, err
 	}
-	if !found || v.Tombstone {
-		// The index never records a sequence the object register does
-		// not hold. A missing version was compacted away.
-		return nil, apistorage.NewInternalError(fmt.Errorf(
-			"cask storage: %s %q has no live version at index sequence %d", s.resource, name, seq))
-	}
 	obj := newLike(proto)
-	if err := s.decode(string(ObjectKey(s.resource, name)), v.Value, seq, obj); err != nil {
+	if err := s.decode(string(ObjectKey(s.resource, name)), raw, e.Idx, obj); err != nil {
 		return nil, err
 	}
 	return obj, nil
@@ -169,6 +163,10 @@ func (s *Store) GetList(ctx context.Context, key string, opts apistorage.ListOpt
 	var next string
 	var remaining *int64
 	for i, name := range names {
+		// Each item carries the index sequence of its entry, which is at
+		// or below the list resourceVersion.
+		//= docs/spec/fleet.md#4-list-and-watch
+		//# Every resourceVersion that a get, a list, or a watch event reports MUST be an index sequence.
 		obj, err := s.objectAt(ctx, name, entries[name], proto)
 		if err != nil {
 			return err

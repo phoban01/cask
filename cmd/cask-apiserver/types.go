@@ -27,8 +27,9 @@ const (
 )
 
 // ObjectMeta is the subset of Kubernetes object metadata the prototype
-// serves. ResourceVersion is cask's per-key MVCC sequence number — per-object
-// optimistic concurrency IS per-key CAS (docs/k8s-aggregation.md).
+// serves. ResourceVersion is the index sequence at which the type index
+// recorded the object version. An update checks it against the index entry
+// and then compares and sets on the object sequence the entry records.
 type ObjectMeta struct {
 	Name            string            `json:"name"`
 	ResourceVersion string            `json:"resourceVersion,omitempty"`

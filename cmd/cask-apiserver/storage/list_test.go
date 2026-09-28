@@ -94,8 +94,8 @@ func TestGetListReturnsIndexAtIndexSequence(t *testing.T) {
 	}
 	for i := range list.Items {
 		d := &list.Items[i]
-		if rvOf(t, d) != idx.Entries[d.Name] {
-			t.Errorf("%s resourceVersion = %s, index records %d", d.Name, d.ResourceVersion, idx.Entries[d.Name])
+		if rvOf(t, d) != idx.Entries[d.Name].Idx {
+			t.Errorf("%s resourceVersion = %s, index entry %+v", d.Name, d.ResourceVersion, idx.Entries[d.Name])
 		}
 	}
 	if m := list.Items[0].Spec.Model; m != "a100" {

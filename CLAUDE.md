@@ -76,10 +76,20 @@ by hand. `devbox.json` lists the packages and the scripts above.
 ## Architecture decisions already made
 
 - Storage: one cask register per object, one index register per resource
-  type mapping name to sequence. The object register is written before the
-  index register. The index sequence is the list resourceVersion and the
-  gap-free watch cursor. A sweep at startup and on an interval repairs an
-  index write lost to a crash.
+  type. Each index entry records the object sequence and the index
+  sequence at which the index recorded it. The object register is written
+  before the index register. A sweep at startup and on an interval
+  repairs an index write lost to a crash. Every resourceVersion a client
+  sees is an index sequence. An object's resourceVersion is its entry's index sequence, a
+  list's is the index register sequence, and a watch event's is the index
+  step that made the change. Get reads the entry, then the object at the
+  entry's object sequence, so an unindexed write is not visible. An
+  update or delete checks the client's resourceVersion against the entry,
+  then compares and sets on the entry's object sequence. A write returns
+  its own version at the index sequence that recorded it, found in the
+  index history when a newer write was indexed first. A create over a
+  tombstone first makes the index record the removal, so a delete and a
+  create are two watch events.
 - Claims: binding a claim is acquiring the object's cask lock. The fence
   travels in status and in every downstream effect. A receiver rejects a
   lower fence. A status write never lowers an advertised fence.

@@ -84,7 +84,7 @@ func TestSweepRecordsObjectWithLostIndexWrite(t *testing.T) {
 	if _, err := kv.Put(ctx, ObjectKey("devices", "gpu-0"), []byte("v1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteIndex(ctx, kv, "devices", "gpu-0"); err != nil {
+	if _, _, err := WriteIndex(ctx, kv, "devices", "gpu-0"); err != nil {
 		t.Fatal(err)
 	}
 	v2, err := kv.Put(ctx, ObjectKey("devices", "gpu-0"), []byte("v2"))
@@ -104,7 +104,7 @@ func TestSweepRecordsObjectWithLostIndexWrite(t *testing.T) {
 	}
 	idx := mustIndex(t, kv, "devices")
 	want := map[string]uint64{"gpu-0": v2.Seq, "gpu-1": v1.Seq}
-	if len(idx.Entries) != len(want) || idx.Entries["gpu-0"] != want["gpu-0"] || idx.Entries["gpu-1"] != want["gpu-1"] {
+	if len(idx.Entries) != len(want) || idx.Entries["gpu-0"].Obj != want["gpu-0"] || idx.Entries["gpu-1"].Obj != want["gpu-1"] {
 		t.Fatalf("entries = %v, want %v", idx.Entries, want)
 	}
 	// A second sweep finds nothing to repair and leaves the index alone.
@@ -128,7 +128,7 @@ func TestSweepRemovesTombstonedEntry(t *testing.T) {
 		if _, err := kv.Put(ctx, ObjectKey("devices", name), []byte("v1")); err != nil {
 			t.Fatal(err)
 		}
-		if err := WriteIndex(ctx, kv, "devices", name); err != nil {
+		if _, _, err := WriteIndex(ctx, kv, "devices", name); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -146,7 +146,7 @@ func TestSweepRemovesTombstonedEntry(t *testing.T) {
 	if _, ok := idx.Entries["gpu-0"]; ok {
 		t.Fatal("index still names the tombstoned gpu-0")
 	}
-	if idx.Entries["gpu-1"] != 1 {
+	if idx.Entries["gpu-1"].Obj != 1 {
 		t.Fatalf("entries = %v, want gpu-1:1 only", idx.Entries)
 	}
 }
@@ -169,7 +169,7 @@ func TestSweepNeedsMajorityListing(t *testing.T) {
 	if n := mustSweep(t, kv, c.lister(1, 2)); n != 1 {
 		t.Fatalf("sweep over a majority wrote %d names, want 1", n)
 	}
-	if got := mustIndex(t, kv, "devices").Entries["gpu-0"]; got != 1 {
+	if got := mustIndex(t, kv, "devices").Entries["gpu-0"].Obj; got != 1 {
 		t.Fatalf("index records %d for gpu-0, want 1", got)
 	}
 }
@@ -216,7 +216,7 @@ func TestSweepNeverAheadUnderConcurrentWritersAndSweeps(t *testing.T) {
 				if r%2 == 1 {
 					continue // a crash before the index write
 				}
-				if err := untilNotPreempted(func() error { return WriteIndex(ctx, kv, "devices", name) }); err != nil {
+				if err := untilNotPreempted(func() error { _, _, err := WriteIndex(ctx, kv, "devices", name); return err }); err != nil {
 					report(err)
 					return
 				}
@@ -259,8 +259,8 @@ func TestSweepNeverAheadUnderConcurrentWritersAndSweeps(t *testing.T) {
 						report(err)
 						return
 					}
-					if entry > seq {
-						report(fmt.Errorf("index records %d for %s, object holds %d", entry, name, seq))
+					if entry.Obj > seq {
+						report(fmt.Errorf("index records %d for %s, object holds %d", entry.Obj, name, seq))
 						return
 					}
 				}
@@ -285,8 +285,8 @@ func TestSweepNeverAheadUnderConcurrentWritersAndSweeps(t *testing.T) {
 			t.Fatal(err)
 		}
 		entry, ok := idx.Entries[name]
-		if live != ok || (live && entry != seq) {
-			t.Fatalf("%s: index entry %d (present %v), object head %d (live %v)", name, entry, ok, seq, live)
+		if live != ok || (live && entry.Obj != seq) {
+			t.Fatalf("%s: index entry %+v (present %v), object head %d (live %v)", name, entry, ok, seq, live)
 		}
 		if ok {
 			got = append(got, name)
