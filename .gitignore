@@ -36,7 +36,7 @@ go.work.sum
 /demo/credentials.yaml
 /demo/secrets/
 
-# --- TLA+ / TLC (tla/) ---
+# --- TLC (parity reruns, see quint/PARITY.md) ---
 # TLC model-checker output and toolbox state
 *.toolbox/
 states/

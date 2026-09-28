@@ -4,7 +4,7 @@
 // committed value is carried into the new set (catch-up-before-release). Because
 // a joint quorum overlaps every old and every new quorum, and the latest value
 // is present in the new set before release, no committed value is ever lost —
-// the property model-checked in tla/Reconfig.tla.
+// the property model-checked in quint/reconfig.qnt.
 //
 // The orchestration order a coordinator must follow:
 //  1. Publish the range as JOINT {old, new} (so all writers use a joint quorum).

@@ -25,10 +25,10 @@ descriptors that make data migration and range splitting safe without any
 global ordering. We show that the subtle costs of composing a skip-phase-1
 fast path with plain Paxos are real (a ballot-space collision our own model
 checker caught as a silent lost update) and give the discipline that makes
-the composition sound. The system is validated by machine-checked TLA+
-specifications with negative controls, a deterministic fault-injecting
-simulation gate run on every change, and wire-level tests of every latency
-claim.
+the composition sound. The system is validated by machine-checked Quint
+specifications, checked with TLC and Apalache, with negative controls, a
+deterministic fault-injecting simulation gate run on every change, and
+wire-level tests of every latency claim.
 
 ## 1. Introduction
 
@@ -108,10 +108,10 @@ We make five contributions:
    routing-lease settle → majority-union carry-forward → release), and range
    splits are four register commits that move no data.
 
-5. **A correctness methodology for a system with no log to replay.** TLA+
-   specifications with *negative controls* — configurations that must fail, so
-   that a spec which can no longer find its seeded bug is known to have lost its
-   teeth — a seed-deterministic, fault-injecting simulation gate with
+5. **A correctness methodology for a system with no log to replay.** Quint
+   specifications checked with TLC and Apalache, with *negative controls* —
+   steps that must fail, so that a spec which can no longer find its seeded
+   bug is known to have lost its teeth — a seed-deterministic, fault-injecting simulation gate with
    invariants checked as code, and the FoundationDB-style rule that every bug
    found becomes a permanent fault in the catalog.
 
@@ -123,7 +123,7 @@ value, and the register's committed value evolves by applying that function to
 the previously chosen value. Each key is its own CASPaxos register with its own
 ballot space. Cask keeps an MVCC version chain and a hybrid-logical clock
 *inside* the agreed value, so a single register commit both advances the value
-and stamps its order; agreement over that value is what `CasPaxosMvcc.tla`
+and stamps its order; agreement over that value is what `caspaxos.qnt`
 establishes (invariant `Consistency`: once a value is chosen, no different value
 is ever chosen).
 
@@ -204,7 +204,7 @@ Two properties make this safe under the retries and hand-offs a real system
 performs. First, every mutation carries an **operation id**, and the change
 function is a no-op if that id already appears in the chain; this makes writes
 exactly-once even when a proposal is retried by another proposer or carried
-forward during reconfiguration (`CasPaxosMvcc.tla` proves per-register
+forward during reconfiguration (`caspaxos.qnt` proves per-register
 agreement; the simulation gate's invariants **S2** and **S3** check that the MVCC
 sequence is monotone with exactly-once operations and that each key's HLC is
 monotone). Second, each key carries its own hybrid-logical clock, stamped inside
@@ -246,7 +246,7 @@ Expiry` — it gives up the lease early by a full clock-uncertainty margin — a
 would-be successor treats a lapsed owner as takeable only once `now ≥ Expiry +
 MaxOffset`, waiting a full margin past expiry. Under any real clock skew bounded
 by MaxOffset, the old owner has provably stopped serving before the new owner
-can start, so no stale value is ever served; `OwnerReads.tla` proves this
+can start, so no stale value is ever served; `owner_reads.qnt` proves this
 (`NoStaleRead`), and — crucially — its negative-control configuration, which
 uses the naive single-sided lapsed check, is *required to fail*, exhibiting the
 fast-clocked-successor / slow-clocked-incumbent stale read. Beyond the MaxOffset
@@ -288,7 +288,7 @@ The reason this matters methodologically is that an abstract CASPaxos agreement
 spec written in the Lamport voting style is *safe by construction* — it never
 represents the ballot encoding, so it cannot represent two proposers minting the
 same counter, and it certifies the buggy system as correct. We therefore model
-the ballot encoding explicitly (`OwnedRegister.tla`). Its invariant
+the ballot encoding explicitly (`owned_register.qnt`). Its invariant
 `NoLostUpdate` states that a committed value must contain its predecessor;
 under the pre-fix `+1` bump rule the model reports a violation as a short
 concrete trace (owner and full proposer tie at counter `(epoch, seq) = (2, 1)`,
@@ -328,7 +328,7 @@ three highest-id members (`RegisterRF = 3`). The striking property is that the
 roster reconfigures *itself*: to move the Core from an old set to a new one, cask
 runs joint consensus **on the roster register**, advancing the membership value
 through the very transition that hands the register to a new quorum.
-`RosterReconfig.tla` proves the two invariants that make this sound
+`roster_reconfig.qnt` proves the two invariants that make this sound
 (`NoLostMembership`: once handed to the new Core, the latest committed
 membership is present there; `AlwaysAvailable`: the latest membership is always
 present on some active configuration). Three orthogonal counters keep the
@@ -342,7 +342,7 @@ range at key `\x00rd/<id>`, each holding `{ID, Start, End, Replicas, Epoch}`. A
 descriptor's `Replicas` are placed by rendezvous (HRW) hashing over the full
 member set — that is where the range's *data* lives — but the descriptor
 registers themselves live uniformly on the Core, so they inherit the roster's
-reconfiguration proof (`Reconfig.tla`: `NoLostValue` and `CatchUpHeld`, that a
+reconfiguration proof (`reconfig.qnt`: `NoLostValue` and `CatchUpHeld`, that a
 joint-consensus carry-forward preserves everything chosen in the old
 configuration at release time). The roster's `RangeIDs` is the authoritative
 index of live ranges; a joining node reads the roster, reads each descriptor,
@@ -363,7 +363,7 @@ atomically swap the parent's id for the two children in the roster's `RangeIDs`
 splits of the same range without a cross-register transaction, and **no data
 moves at split time** — the children's replicas are the parent's until the
 placement driver later rebalances, and correctness never depends on that being
-prompt. `RangeDescriptors.tla` proves the split safe (`NoSplitBrain`: every
+prompt. `range_descriptors.qnt` proves the split safe (`NoSplitBrain`: every
 accepted write targets the authoritative range for its phase; `TombstoneIs
 Terminal`: a tombstoned range never accepts again) and live
 (`EventuallyCaughtUp`: every client eventually believes the authoritative range).
@@ -403,29 +403,33 @@ update of §3.3 — is invisible to the abstract agreement argument and can be
 provoked and *healed* within a single consensus round, leaving no durable trace.
 This shapes how we validate cask. We use four pillars of escalating cost and
 coverage, each of which we hold catches a strict superset of the previous one's
-bugs: **TLA+** model checking of the protocols, **deterministic simulation
+bugs: **Quint** model checking (TLC and Apalache) of the protocols,
+**deterministic simulation
 testing** of the real code under a seeded adversary, **Jepsen** against real
 clusters, and long-running **production burn-in**. Confidence is tracked as an
 explicit trust ladder from demo-grade (reached) to external-critical (12–18
 months), with each rung gated on named work rather than elapsed time.
 
-**TLA+ with negative controls.** Eight specifications cover the protocol designs:
-per-register agreement (`CasPaxosMvcc`), the ballot-space discipline
-(`OwnedRegister`), lease-guarded reads (`OwnerReads`), locks and fencing
-(`Lease`: `SingleHolder`, `FenceMonotone`), per-range reconfiguration
-(`Reconfig`), the reflexive roster (`RosterReconfig`), the four-step split
-(`RangeDescriptors`), and the cross-range snapshot contract (`CrossRange`). The
-methodological commitment is the **negative control**: two of the specs ship a
-configuration that TLC is *required to fail*. `OwnedRegister`'s bug config
-(the pre-fix `+1` bump) must report a `NoLostUpdate` violation, and
-`OwnerReads`'s bug config (the naive single-sided lease check) must report a
+**Quint specifications with negative controls.** Eight Quint specifications,
+checked with TLC and Apalache, cover the protocol designs (`quint/`):
+per-register agreement (`caspaxos.qnt`), the ballot-space discipline
+(`owned_register.qnt`), lease-guarded reads (`owner_reads.qnt`), locks and
+fencing (`lease.qnt`: `SingleHolder`, `FenceMonotone`), per-range
+reconfiguration (`reconfig.qnt`), the reflexive roster (`roster_reconfig.qnt`),
+the four-step split (`range_descriptors.qnt`), and the cross-range snapshot
+contract (`cross_range.qnt`). They began as TLA+ specifications; each Quint
+port reproduces its original's TLC state count (`quint/PARITY.md`). The
+methodological commitment is the **negative control**: every module ships a
+step that the checkers are *required to fail*. In `owned_register.qnt` the
+pre-fix `+1` bump must report a `ChosenChain` (lost update) violation, and in
+`owner_reads.qnt` the naive single-sided lease check must report a
 `NoStaleRead` violation. A spec that can no longer find its own seeded bug has
 silently lost its teeth, and the negative control is what detects that
 regression. The first full-suite TLC run was itself informative: it surfaced four
 latent defects in previously-unchecked specs and one genuine design rule —
 snapshot reads must use a timestamp at or below the range's applied HLC (the
-`SnapshotRead` guard in `CrossRange`, generalized in the implementation as the
-GetReadVersion rule).
+`SnapshotRead` guard in `cross_range.qnt`, generalized in the implementation as
+the GetReadVersion rule).
 
 **Deterministic simulation as a release gate.** The second pillar runs the real
 cask code — the same proposer, acceptor, and store used in production — under a
@@ -465,7 +469,7 @@ Jepsen, or reported by a user — is reproduced as a named fault at the code
 location that would have surfaced it, and that fault then runs on every
 subsequent pull request. The catalog only grows; a class of bug, once seen, is
 caught forever. This is why the simulation gate, not any single spec, is the
-center of gravity: the TLA+ specs prove the designs, but the gate is where the
+center of gravity: the Quint specs prove the designs, but the gate is where the
 running code is made to keep earning the proofs' assumptions.
 
 ## 5. Evaluation
@@ -475,8 +479,8 @@ running code is made to keep earning the proofs' assumptions.
 | Owned write = 1 accept round (3 accepts, 0 prepares) | **Measured** | owner wire-shape tests |
 | Owned read = 0 rounds; degraded = 1 round | **Measured** | owner read tests |
 | Slow/dead replica off the critical path | **Measured** | 300ms-replica and blocked-peer tests |
-| Lost-update discipline necessary & sufficient | **Machine-checked** | OwnedRegister.tla + negative control; unit + fault + gate reproduce pre-fix |
-| Read lease sound under skew ≤ MaxOffset | **Machine-checked** | OwnerReads.tla + negative control |
+| Lost-update discipline necessary & sufficient | **Machine-checked** | owned_register.qnt + negative control; unit + fault + gate reproduce pre-fix |
+| Read lease sound under skew ≤ MaxOffset | **Machine-checked** | owner_reads.qnt + negative control |
 | Migration loses nothing (disjoint sets, mid-migration writes) | **Tested** | orchestrator + cmd driver tests |
 | Group-commit durability | **Measured** (with honest fsync-cost caveat on dev VM) | Pebble bench |
 | Throughput/latency vs etcd, same hardware | **Measured** | `bench/` harness — see §5.1 |

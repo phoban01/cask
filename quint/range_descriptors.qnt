@@ -12,7 +12,8 @@
 // under the controls have 1 to 4 steps. Each control found its violation
 // in 20 of 20 runs with different seeds at 30 steps and 2000 samples.
 //
-// range_descriptors.qnt — Quint port of tla/RangeDescriptors.tla.
+// range_descriptors.qnt — Quint port of RangeDescriptors.tla. The TLA+ source is
+// retired. quint/PARITY.md names the commit that still holds it.
 //
 // Scope: ranges and splits stay off the fleet path. The fleet uses
 // per-object registers and index registers. This module covers the split
@@ -52,7 +53,7 @@
 // temporal property here. quint run and quint verify do not check it.
 // TLC checks it on the compiled module (quint/PARITY.md).
 //
-// Constants are the values from tla/RangeDescriptors.cfg: two clients.
+// Constants are the values from RangeDescriptors.cfg: two clients.
 //
 // Differences from the TLA+ source:
 //   - Client is a pure val, not a CONSTANT, so the model is fixed.

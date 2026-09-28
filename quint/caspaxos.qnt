@@ -1,4 +1,5 @@
-// caspaxos.qnt — Quint port of tla/CasPaxosMvcc.tla.
+// caspaxos.qnt — Quint port of CasPaxosMvcc.tla. The TLA+ source is
+// retired. quint/PARITY.md names the commit that still holds it.
 //
 // Every cask key is an independent CASPaxos register. A write runs one
 // Paxos round that agrees on the register's next value. This module models
@@ -11,7 +12,12 @@
 //   Consistency        at most one value is ever chosen
 //   Inv                TypeOK and all four above, as in the TLA+ source
 //
-// Constants are the values from tla/CasPaxosMvcc.cfg: three acceptors, two
+// Scope: the model checks agreement only. The MVCC version chain and the
+// HLC stamp ride inside the agreed value. internal/mvcc enforces per-key
+// version and HLC order, and the Go property tests exercise it. A
+// refinement from this model to register linearizability is future work.
+//
+// Constants are the values from CasPaxosMvcc.cfg: three acceptors, two
 // values, ballots 0 to 2.
 //
 // Differences from the TLA+ source:

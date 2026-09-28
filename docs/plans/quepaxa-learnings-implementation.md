@@ -75,7 +75,7 @@ seq-bump into. Two coordinated changes in `internal/caspaxos`:
    fence upward for the *existing holder* (today `Acquire` returns the existing token
    unchanged when re-acquiring your own lock, `lock.go:50-52`, so a holder cannot
    raise its fence). Also extend the takeover path: `newFence = max(observed+1,
-   minFence)`. Fence stays strictly monotonic — S7/`tla/Lease.tla` FenceMonotone
+   minFence)`. Fence stays strictly monotonic — S7/`quint/lease.qnt` FenceMonotone
    unaffected (verify with TLC; the change only widens the increment).
 
 **Sim.** New fault `owner_vs_full_proposer` in `testutil/sim/faults/protocol.go`,
@@ -88,7 +88,7 @@ constant to `testutil/sim/profile.go` and to the `consensus` + `contention` prof
 
 **Files.** `internal/caspaxos/proposer.go`, `owned.go`, `errors.go`;
 `internal/lease/lock.go`; `testutil/sim/faults/protocol.go`, `testutil/sim/profile.go`;
-`tla/OwnedRegister.tla` (new), `tla/Lease.tla` (Bump action).
+`quint/owned_register.qnt` (new), `quint/lease.qnt` (Bump action).
 
 **Done when.** The new fault run *without* the nextBallot fix reproduces the lost
 update (keep as a commented regression note or a unit test asserting the old behavior
@@ -111,15 +111,15 @@ things discovered while landing it:
 - Validation was run in both directions: with the jump rule temporarily
   disabled, the unit test, the fault test, and the gate (seed 1, round 5,
   FAULT-ASSERT) all reproduce the lost update; with it enabled, everything is
-  green. `tla/OwnedRegisterBug.cfg` is the permanent negative control
+  green. `stepBumpRule` in `quint/owned_register.qnt` is the permanent negative control
   (JumpRule = FALSE must violate NoLostUpdate).
 - TLC was actually run for the first time in this repo's history (JDK via
-  nix-shell; see tla/README.md). `OwnedRegister.cfg` passes (~1M distinct
+  nix-shell; see quint/PARITY.md). `OwnedRegister.cfg` passes (~1M distinct
   states); the negative control finds the exact predicted trace (owner and
   full proposer tie at counter (epoch,seq) = (2,1), owner wins the NodeID
   tiebreak, full proposer's committed value vanishes). The first-ever full
   suite run also surfaced four latent defects in pre-existing specs (fixed —
-  see tla/README.md) and one genuine design constraint: the §4.4 snapshot
+  see quint/PARITY.md) and one genuine design constraint: the §4.4 snapshot
   contract requires read timestamps at or below the range's applied HLC.
   **W4 must carry this rule** (it is the same MaxOffset/read-freshness
   reasoning as the owner-cache guard), and §4.6 GetReadVersion is its
@@ -423,7 +423,7 @@ never lost writes (writes stay epoch-fenced).
    local data"): requires a read RPC on the transport (`/v1/read` returning the local
    accepted register). Stretch goal — separate PR, documented as
    possibly-stale-by-design.
-5. `tla/Lease.tla`: add the `LocalRead(owner, key)` action per §3.1 and re-run TLC
+5. `quint/lease.qnt`: add the `LocalRead(owner, key)` action per §3.1 and re-run TLC
    with the double-sided guard modeled.
 
 **Sim.** `hlc_skew_forward` buggify site plus a new `clock_skew_owner_read` fault:
@@ -434,7 +434,7 @@ owner's first write (a read-after-write flip test — the Jepsen fencing scenari
 
 **Files.** `internal/caspaxos/owned.go`, `internal/owner/manager.go`,
 `internal/mvcc/mvcc.go`, `internal/lease/session.go` (expose confirmed Expiry),
-`tla/Lease.tla`, `testutil/sim/faults/` (+ profile).
+`quint/lease.qnt`, `testutil/sim/faults/` (+ profile).
 
 **Done when.** Owned-key `Get` issues zero RPCs (counting-decorator assertion); the
 skew fault passes within MaxOffset and the violation beyond MaxOffset is *observed and
@@ -588,7 +588,7 @@ replica sets. §4.3 is complete; remaining §4.3-adjacent polish: tombstone GC
 (TTL, deferred sub-decision) and split-point selection heuristics.
 - A degraded read (guard refusal) lands on the owner's 1-RTT identity round,
   not the 2-RTT full path — reads never get slower than pre-W4.
-- `tla/OwnerReads.tla` proves the guard under adversarial skew
+- `quint/owner_reads.qnt` proves the guard under adversarial skew
   (`NoStaleRead`, both clients' offsets universally quantified), with
   `OwnerReadsBug.cfg` as the negative control (naive lapsed-checks: TLC
   finds the fast-clock successor / slow-clock reader overlap). Both verified

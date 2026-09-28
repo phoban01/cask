@@ -8,7 +8,8 @@
 // init. `quint verify` at 18 steps reaches every state and finishes in
 // about 4 minutes (quint/PARITY.md).
 //
-// owner_reads.qnt — Quint port of tla/OwnerReads.tla.
+// owner_reads.qnt — Quint port of OwnerReads.tla. The TLA+ source is
+// retired. quint/PARITY.md names the commit that still holds it.
 //
 // An owner serves reads from its local cache with no consensus round. A
 // write finds out that its owner lost the lock when the accept fails. A
@@ -34,7 +35,7 @@
 //   TypeOK       the variables stay in their ranges
 //   Inv          TypeOK and NoStaleRead, as in the TLA+
 //
-// Constants are the values from tla/OwnerReads.cfg: two clients, Skew 2,
+// Constants are the values from OwnerReads.cfg: two clients, Skew 2,
 // TTL 5, MaxTime 14, MaxWrites 2.
 //
 // Differences from the TLA+ source:
@@ -43,7 +44,7 @@
 //   - Guarded is not a constant. TakeableBy, CanServe, Acquire and
 //     LocalRead take a `guarded` flag. `step` passes true. The negative
 //     control `stepNaive` passes false. It stands for
-//     tla/OwnerReadsBug.cfg and MUST violate NoStaleRead.
+//     OwnerReadsBug.cfg and MUST violate NoStaleRead.
 //   - init picks the clock offsets with nondet. initWith sets them, so
 //     the witness runs can fix a slow and a fast clock.
 module owner_reads {
@@ -166,7 +167,7 @@ module owner_reads {
       LocalRead(guarded, c) },
   }
 
-  // The W4 double-sided MaxOffset guard (tla/OwnerReads.cfg).
+  // The W4 double-sided MaxOffset guard (OwnerReads.cfg).
   action step = stepWith(true)
 
   // ---- invariants -------------------------------------------------------------
@@ -184,7 +185,7 @@ module owner_reads {
 
   // ---- negative control: naive lease checks ---------------------------------
 
-  // The naive lapsed check on both sides (tla/OwnerReadsBug.cfg). It MUST
+  // The naive lapsed check on both sides (OwnerReadsBug.cfg). It MUST
   // violate NoStaleRead.
   action stepNaive = stepWith(false)
 

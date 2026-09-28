@@ -10,7 +10,8 @@
 // violation in 20 of 20 runs with random seeds at 30 steps and 2000
 // samples.
 //
-// reconfig.qnt — Quint port of tla/Reconfig.tla.
+// reconfig.qnt — Quint port of Reconfig.tla. The TLA+ source is
+// retired. quint/PARITY.md names the commit that still holds it.
 //
 // One register moves from the replica set Cold to Cnew through a joint
 // configuration. While joint, a value is chosen only with a quorum in both
@@ -40,7 +41,7 @@
 //   TypeOK       the variables stay in their ranges
 //   Inv          TypeOK, NoLostValue and CatchUpHeld, as in the TLA+
 //
-// Constants are the values from tla/Reconfig.cfg: five acceptors, two
+// Constants are the values from Reconfig.cfg: five acceptors, two
 // values, Cold = {a1, a2, a3}, Cnew = {a3, a4, a5}.
 //
 // Differences from the TLA+ source:

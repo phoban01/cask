@@ -122,6 +122,6 @@ resources with fencing-token controllers — the design is in the repo. And
 benchmarks against etcd on identical hardware, which we will publish with
 the harness, not as a bar chart.
 
-The code, the TLA+ models (negative controls included), and the
+The code, the Quint models (negative controls included), and the
 deterministic fault-injection gate that runs on every pull request are all
 in the repository.

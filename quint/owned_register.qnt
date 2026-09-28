@@ -8,7 +8,8 @@
 // in about 3 minutes but cannot reach it; at 9 steps it does not finish in
 // 15 minutes. `quint run` and TLC find the violation.
 //
-// owned_register.qnt — Quint port of tla/OwnedRegister.tla.
+// owned_register.qnt — Quint port of OwnedRegister.tla. The TLA+ source is
+// retired. quint/PARITY.md names the commit that still holds it.
 //
 // The owner fast path (OwnedProposer) and a full CASPaxos proposer write
 // one register. Ballots are (epoch, seq, node) and compare in that order.
@@ -23,12 +24,12 @@
 // Invariants:
 //
 //   ChosenChain        each newly committed value contains the last one
-//                      (the name in tla/README.md and issue #10)
+//                      (the name in the retired TLA+ README and #10)
 //   NoLostUpdate       the TLA+ name for ChosenChain
 //   OneValuePerBallot  two acceptors at one ballot hold one value
 //   Inv                NoLostUpdate and OneValuePerBallot, as in the TLA+
 //
-// Constants are the values from tla/OwnedRegister.cfg: three acceptors,
+// Constants are the values from OwnedRegister.cfg: three acceptors,
 // owner node 2, full node 1, owner ops x and y, full op z, epochs and seqs
 // up to 2.
 //
@@ -36,7 +37,7 @@
 //   - Constants are pure vals, not CONSTANTS, so the model is fixed.
 //   - JumpRule is not a constant. The actions that depend on it take a
 //     `jump` flag. `step` passes true. The negative control `stepBumpRule`
-//     passes false. It stands for tla/OwnedRegisterBug.cfg and MUST
+//     passes false. It stands for OwnedRegisterBug.cfg and MUST
 //     violate ChosenChain.
 //   - The TLA+ uses CHOOSE in ReadFrom and RecordCommit. Quint has no
 //     CHOOSE. ReadFrom takes the union of the candidate values. The
@@ -319,7 +320,7 @@ module owned_register {
 
   // ---- negative control: the pre-W0 bump rule --------------------------------------
 
-  // tla/OwnedRegisterBug.cfg. The full proposer bumps seq inside the
+  // OwnedRegisterBug.cfg. The full proposer bumps seq inside the
   // owner's epoch and commits there. The owner's next write, built from a
   // stale cache, wins the node tiebreak and overwrites it.
   action stepBumpRule = stepWith(false)

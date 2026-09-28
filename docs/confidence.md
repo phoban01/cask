@@ -15,7 +15,7 @@ sufficient on its own. Cask commits to using all of them.
 
 | Technique | What it does | What it catches | What it does NOT catch |
 |---|---|---|---|
-| **TLA+** | Model-check protocol designs | Logic bugs, bad state interleavings, composition errors between protocols | Implementation bugs in code, performance, dependency bugs, anything the spec abstracted away |
+| **Quint (TLC, Apalache)** | Model-check protocol designs | Logic bugs, bad state interleavings, composition errors between protocols | Implementation bugs in code, performance, dependency bugs, anything the spec abstracted away |
 | **Deterministic simulation testing (DST)**, FDB-style | Run the actual code under a single-threaded simulator with seeded RNG, virtualized I/O, and fault injection | The implementation-vs-spec gap, state interleavings the spec didn't model, regressions (captured seeds) | Bugs in code paths the simulator doesn't exercise, real OS/disk/network quirks, dependency bugs |
 | **Jepsen** | Drive *real* clusters under partition, kill, clock-skew nemeses; check histories for linearizability / fencing / SI | Reality-gap bugs: real network reordering, real fsync lies, real GC pauses, real BGP flaps | Bugs that only manifest at scale, operational mistakes, customer-specific config issues |
 | **Production burn-in** | Long-running clusters under synthetic + real load | Operational sharp edges, dependency surprises, scale-only behaviors | Future regressions (handled by re-running everything above) |
@@ -27,36 +27,45 @@ only the hard ones.
 
 ## The four pillars in detail
 
-### 1. TLA+ — proving the design
+### 1. Quint models — proving the design
 
-TLA+ is a logic for describing concurrent systems and a model checker
-(TLC) for asking "across every reachable state of this system, does
-property P hold?" Cask uses it for the few protocols where a logic bug
-would be catastrophic and hard to spot otherwise.
+Cask writes its protocol models in Quint. Quint compiles to TLA+, so
+the TLC model checker can ask "across every reachable state of this
+system, does property P hold?" Apalache checks the same models to a
+bounded depth. Cask uses them for the few protocols where a logic bug
+would be catastrophic and hard to spot otherwise. Every invariant has a
+negative control that must fail. `devbox run quint` runs the gate.
 
-What's already written (see `tla/README.md`):
+What's already written (see `quint/PARITY.md`):
 
-- `tla/CasPaxosMvcc.tla` — per-register Paxos agreement (S1).
-- `tla/Lease.tla` — single-holder + fencing monotonicity (S6, S7).
-- `tla/Reconfig.tla` — joint-consensus carry-forward (S4, S5).
-- `tla/RangeDescriptors.tla` — the four-step split protocol (S8, S9).
-- `tla/CrossRange.tla` — HLC uncertainty contract (S10).
+- `quint/caspaxos.qnt` — per-register Paxos agreement (S1).
+- `quint/owned_register.qnt` — the owner fast path with a full proposer.
+- `quint/lease.qnt` — single-holder + fencing monotonicity (S6, S7).
+- `quint/owner_reads.qnt` — lease-guarded owner reads under clock skew.
+- `quint/reconfig.qnt` — joint-consensus carry-forward (S4, S5).
+- `quint/roster_reconfig.qnt` — reflexive roster reconfiguration (S5.1, S5.2).
+- `quint/range_descriptors.qnt` — the four-step split protocol (S8, S9).
+- `quint/cross_range.qnt` — HLC uncertainty contract (S10).
+
+These began as TLA+ specifications. Each Quint port matches its original's
+TLC state count, and `quint/PARITY.md` records the numbers. The TLA+
+sources are retired.
 
 Each invariant has a number in `docs/etcd-little-sister.md` §6.5.
 
-**What TLA+ catches that nothing else does:** state-interleaving bugs.
+**What the models catch that nothing else does:** state-interleaving bugs.
 Paxos has decades of literature about "I thought this was safe but
 when these three messages reorder…" — TLC finds those mechanically.
-The S8 invariant in `RangeDescriptors.tla` is precisely the kind of
+The S8 invariant in `range_descriptors.qnt` is precisely the kind of
 thing humans miss: "what if a client with a stale rmap writes after
 cutover but before tombstone?" TLC enumerates the state space and
 either finds a violation or proves there isn't one.
 
-**What TLA+ does NOT catch:**
+**What the models do NOT catch:**
 
 - **Spec-vs-code drift.** The spec says "ballots are totally ordered."
   The Go code can still have an integer overflow that breaks the order
-  in practice. TLA+ doesn't know your Go code exists.
+  in practice. The model doesn't know your Go code exists.
 - **What you didn't model.** A spec models "a network." It usually
   doesn't model TCP half-closed connections, DNS resolution races,
   IPv4-mapped-IPv6 mismatches, or hostname re-resolution intervals.
@@ -66,7 +75,7 @@ either finds a violation or proves there isn't one.
   invariant; it says nothing about tail latency, GC pauses, or
   saturated network cards.
 
-The honest rule: TLA+ proves your *design* is right, conditioned on
+The honest rule: a model proves your *design* is right, conditioned on
 the abstractions you chose. The simulator's job is to close the gap
 between the design and the code; Jepsen's job is to close the gap
 between the model and reality.
@@ -115,7 +124,7 @@ What cask must add (PR #0 in the roadmap):
 - `testutil/sim/faults/` — the named fault catalog (§6.7).
 - CI workflow that runs the `smoke` + `consensus` profiles on every PR.
 
-**What DST catches that TLA+ doesn't:**
+**What DST catches that the models don't:**
 
 - **Implementation bugs.** A Promise that doesn't actually persist
   before returning. A retry that double-applies. A channel that drops
@@ -140,7 +149,7 @@ What cask must add (PR #0 in the roadmap):
   half-rolled-out config, an operator's `rm -rf`.
 
 The honest rule: DST proves the *code matches the design under the
-abstractions you simulated*. It's much stronger than TLA+ alone
+abstractions you simulated*. It's much stronger than the models alone
 because it runs the real code, but it shares one weakness — the
 abstraction gap. That's where Jepsen comes in.
 
@@ -226,7 +235,7 @@ behavior.
 
 ### 4. Production burn-in — proving the operation
 
-Even after TLA+ + DST + Jepsen, there are bugs that only show up in
+Even after the Quint models, DST, and Jepsen, there are bugs that only show up in
 operation:
 
 - A config knob nobody set in tests has a wrong default.
@@ -245,7 +254,7 @@ The only countermeasure is **time**. Specifically:
 - **Graduated rollout.** Demo → internal non-critical → internal
   critical → external non-critical → external critical. Don't skip.
 - **An incident review culture.** When the first real incident
-  happens, the post-mortem either adds a TLA+ invariant, a `BUGGIFY`
+  happens, the post-mortem either adds a Quint invariant, a `BUGGIFY`
   site, a Jepsen nemesis, or all three. **The catalog grows with each
   failure.**
 
@@ -323,9 +332,9 @@ what bought FoundationDB its reputation.
 
 For cask specifically, in time order:
 
-1. **TLA+ for the protocols where it matters** — done for the
-   existing five specs; extension to `Lease.tla` to compose with
-   `Reconfig.tla` (close S7's proof loop) is the next gap.
+1. **Quint models for the protocols where it matters** — done for the
+   eight models; extension to `lease.qnt` to compose with
+   `reconfig.qnt` (close S7's proof loop) is the next gap.
 2. **PR #0: simulator gate + fault catalog + BUGGIFY** —
    `internal/buggify`, the gate driver, the seed eleven `buggify.Maybe`
    sites, CI integration. **This is the multiplier on everything
@@ -379,7 +388,7 @@ distributed systems you didn't operate yourself:
 
 Cask uses every technique the field knows for building distributed-
 systems confidence. The plan is structurally sound: pure protocol
-cores, TLA+ specs first, FDB-style DST with the planned `BUGGIFY`
+cores, Quint models first, FDB-style DST with the planned `BUGGIFY`
 discipline (§6.6.1), Jepsen as the release gate, graduated rollout.
 
 **None of that makes cask production-ready today.** It makes cask

@@ -134,7 +134,7 @@ func (l *Locks) Acquire(ctx context.Context, name, sessionID string) (token uint
 // synthetic epoch after preempting the owner): the next TakeOwnership must run
 // at a strictly higher epoch, and only the holder can raise the fence without
 // releasing the lock. The fence stays strictly monotonic (the FenceMonotone
-// property in tla/Lease.tla), so downstream fenced resources are unaffected —
+// property in quint/lease.qnt), so downstream fenced resources are unaffected —
 // they simply see a fresher token from the same holder.
 func (l *Locks) Bump(ctx context.Context, name, sessionID string, minFence uint64) (token uint64, err error) {
 	key := LockKey(name)
