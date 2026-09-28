@@ -13,6 +13,7 @@ import (
 	"github.com/phoban01/cask/internal/caspaxos"
 	"github.com/phoban01/cask/internal/hlc"
 	"github.com/phoban01/cask/internal/lease"
+	"github.com/phoban01/cask/internal/mtls"
 	"github.com/phoban01/cask/internal/mvcc"
 	"github.com/phoban01/cask/internal/store"
 	"github.com/phoban01/cask/internal/transport"
@@ -32,6 +33,8 @@ func main() {
 		sweepIv = flag.Duration("index-sweep-interval", time.Minute, "how often to repair index entries that a crash left behind (each wait adds up to 10% jitter)")
 		selfTLS = flag.Bool("self-signed-tls", false, "serve HTTPS with an in-memory self-signed cert (required for k8s API aggregation; pair with insecureSkipTLSVerify on the APIService)")
 	)
+	var consensusFiles mtls.Files
+	consensusFiles.Register(flag.CommandLine)
 	flag.Parse()
 	// The runbook in docs/runbooks/majority-loss.md needs --force-new-fleet,
 	// which does not exist yet. Until it lands, the apiserver has no
@@ -62,6 +65,14 @@ func main() {
 	if *sweepIv <= 0 {
 		log.Error("--index-sweep-interval must be positive", "value", *sweepIv)
 		os.Exit(1)
+	}
+	consensusTLS, err := mtls.Setup(consensusFiles, log)
+	if err != nil {
+		log.Error("consensus TLS", "err", err)
+		os.Exit(1)
+	}
+	if consensusTLS != nil {
+		log.Warn("consensus TLS files are valid but not used yet; tracked in issue #48")
 	}
 
 	// The storage engine. cask is designed to be embedded: with
@@ -261,7 +272,6 @@ func main() {
 	//# The cutover MUST be rehearsed on a copy of the management cluster before it runs on the real one.
 	log.Info("cask-apiserver serving", "group", apiGroup+"/"+apiVersion, "cluster", *cluster, "listen", *listen, "tls", *selfTLS)
 	server := &http.Server{Addr: *listen, Handler: srv.routes()}
-	var err error
 	// The cert is self-signed, so the APIService needs insecureSkipTLSVerify.
 	//= docs/spec/fleet.md#8-security
 	//= type=exception

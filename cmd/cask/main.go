@@ -34,6 +34,7 @@ import (
 	"github.com/phoban01/cask/internal/discovery"
 	"github.com/phoban01/cask/internal/hlc"
 	"github.com/phoban01/cask/internal/lease"
+	"github.com/phoban01/cask/internal/mtls"
 	"github.com/phoban01/cask/internal/mvcc"
 	"github.com/phoban01/cask/internal/owner"
 	"github.com/phoban01/cask/internal/roster"
@@ -72,9 +73,19 @@ func main() {
 		role    = flag.String("role", "replica", "enrollment role: replica or client")
 		dataDir = flag.String("data-dir", "", "directory for durable consensus state (Pebble); empty = in-memory (state lost on restart)")
 	)
+	var consensusFiles mtls.Files
+	consensusFiles.Register(flag.CommandLine)
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	consensusTLS, err := mtls.Setup(consensusFiles, log)
+	if err != nil {
+		log.Error("consensus TLS", "err", err)
+		os.Exit(1)
+	}
+	if consensusTLS != nil {
+		log.Warn("consensus TLS files are valid but not used yet; tracked in issue #48")
+	}
 
 	// Local acceptor: durable consensus state for this node, served to peers
 	// over the chosen transport. With --data-dir, registers live in Pebble and
