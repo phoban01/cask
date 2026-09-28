@@ -357,6 +357,13 @@ func versionEntries(v mvcc.Version) (map[string]Entry, error) {
 // only if the head is still that tombstone. Until the create lands the
 // head stays a tombstone, so no index write can name the object again.
 func PrepareCreate(ctx context.Context, kv *mvcc.KV, resource, name string) (seq uint64, exists bool, err error) {
+	seq, exists, _, err = readyCreate(ctx, kv, resource, name)
+	return seq, exists, err
+}
+
+// readyCreate is PrepareCreate. It also reports whether it tried to
+// write the index, so the Store wakes its watches only then.
+func readyCreate(ctx context.Context, kv *mvcc.KV, resource, name string) (seq uint64, exists, wrote bool, err error) {
 	//= docs/spec/fleet.md#3-storage-model
 	//# A create MUST NOT write over a tombstone while the index register still names the deleted object.
 	//= docs/spec/fleet.md#4-list-and-watch
@@ -364,23 +371,24 @@ func PrepareCreate(ctx context.Context, kv *mvcc.KV, resource, name string) (seq
 	for range indexWriteRetries {
 		seq, live, err := objectHead(ctx, kv, resource, name)
 		if err != nil {
-			return 0, false, err
+			return 0, false, wrote, err
 		}
 		if live {
-			return seq, true, nil
+			return seq, true, wrote, nil
 		}
 		idx, err := ReadIndex(ctx, kv, resource)
 		if err != nil {
-			return 0, false, err
+			return 0, false, wrote, err
 		}
 		if _, named := idx.Entries[name]; !named {
-			return seq, false, nil
+			return seq, false, wrote, nil
 		}
+		wrote = true
 		if _, err := writeIndex(ctx, kv, resource, name); err != nil {
-			return 0, false, err
+			return 0, false, wrote, err
 		}
 	}
-	return 0, false, fmt.Errorf("cask storage: %s create of %q lost %d races", resource, name, indexWriteRetries)
+	return 0, false, wrote, fmt.Errorf("cask storage: %s create of %q lost %d races", resource, name, indexWriteRetries)
 }
 
 // objectHead returns the sequence of the object's head version and

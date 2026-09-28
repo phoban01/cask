@@ -47,8 +47,12 @@ type Store struct {
 
 	mu sync.Mutex
 	// changed is closed and replaced after each index write through this
-	// Store, to wake the watches.
+	// Store, to wake the index feed.
 	changed chan struct{}
+
+	// feed is the one reader of the index history. Every watch of the
+	// Store gets its index steps from it.
+	feed *indexFeed
 }
 
 var _ apistorage.Interface = (*Store)(nil)
@@ -57,7 +61,7 @@ var _ apistorage.Interface = (*Store)(nil)
 // them with codec. newFunc returns a new, empty object of the resource
 // type.
 func New(kv *mvcc.KV, codec runtime.Codec, resource string, newFunc func() runtime.Object) *Store {
-	return &Store{
+	s := &Store{
 		kv:            kv,
 		codec:         codec,
 		resource:      resource,
@@ -66,6 +70,8 @@ func New(kv *mvcc.KV, codec runtime.Codec, resource string, newFunc func() runti
 		bookmarkEvery: time.Minute,
 		changed:       make(chan struct{}),
 	}
+	s.feed = newIndexFeed(s)
+	return s
 }
 
 // writeIndex runs the index write for name and then wakes the watches.
@@ -98,11 +104,13 @@ func (s *Store) repairIndex(ctx context.Context, name string) error {
 	return err
 }
 
-// prepareCreate runs PrepareCreate for name and wakes the watches, since
-// it can write the index.
+// prepareCreate runs PrepareCreate for name. It wakes the watches when
+// PrepareCreate wrote the index.
 func (s *Store) prepareCreate(ctx context.Context, name string) (seq uint64, exists bool, err error) {
-	seq, exists, err = PrepareCreate(ctx, s.kv, s.resource, name)
-	s.wake()
+	seq, exists, wrote, err := readyCreate(ctx, s.kv, s.resource, name)
+	if wrote {
+		s.wake()
+	}
 	return seq, exists, err
 }
 
