@@ -19,6 +19,8 @@ import (
 	"github.com/phoban01/cask/internal/mvcc"
 	"github.com/phoban01/cask/internal/store"
 	"github.com/phoban01/cask/internal/transport"
+	"github.com/spf13/pflag"
+	genericapiserver "k8s.io/apiserver/pkg/server"
 )
 
 func main() {
@@ -30,7 +32,8 @@ func main() {
 		return
 	}
 	var (
-		listen   = flag.String("listen", ":9443", "address to serve the API group on")
+		legacy   = flag.Bool("legacy-http", false, "DEPRECATED, kept for one release: serve the old net/http mux on --listen instead of the generic server; it has no authentication")
+		listen   = flag.String("listen", ":9443", "address to serve the legacy mux on; with --legacy-http only (the generic server uses --bind-address and --secure-port)")
 		cluster  = flag.String("cluster", "", "this cluster's name (stamped on claims it manages); required")
 		boot     = flag.Bool("bootstrap", false, "found a new fleet as its single founding member (exactly one apiserver in a fleet; every other one joins with --seed)")
 		seed     = flag.String("seed", "", "comma-separated consensus addresses of live fleet members to join through, e.g. 10.0.0.7:9444")
@@ -42,11 +45,16 @@ func main() {
 		sweepIv  = flag.Duration("index-sweep-interval", time.Minute, "how often to repair index entries that a crash left behind (each wait adds up to 10% jitter)")
 		impFile  = flag.String("import-file", "", "cask-export/v1 file to import before serving (see cask-migrate export); safe to repeat")
 		impGrace = flag.Duration("import-grace", defaultImportGrace, "extra session time for each Bound claim that the import restores; it covers the import and the start of the claim's controller")
-		selfTLS  = flag.Bool("self-signed-tls", false, "serve HTTPS with an in-memory self-signed cert (required for k8s API aggregation; pair with insecureSkipTLSVerify on the APIService)")
+		selfTLS  = flag.Bool("self-signed-tls", false, "serve the legacy mux over HTTPS with an in-memory self-signed cert; with --legacy-http only")
 	)
 	var consensusFiles mtls.Files
 	consensusFiles.Register(flag.CommandLine)
-	flag.Parse()
+	// The generic server flags are pflags. The cask flags join them, so
+	// --help lists both.
+	serverOpts := newServerOptions()
+	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
+	serverOpts.addFlags(pflag.CommandLine)
+	pflag.Parse()
 	// The runbook in docs/runbooks/majority-loss.md needs --force-new-fleet,
 	// which does not exist yet. Until it lands, the apiserver has no
 	// supported majority-loss recovery.
@@ -188,10 +196,10 @@ func main() {
 			// With the consensus flags, the listener serves the acceptor and
 			// the roster endpoints only to a peer with a certificate that the
 			// fleet CA signed. Without them, it serves anyone who can reach
-			// --listen-consensus. The aggregated API has no delegated auth.
+			// --listen-consensus.
 			//= docs/spec/fleet.md#8-security
 			//= type=exception
-			//= reason=the control endpoints are open when the consensus TLS flags are absent, and the API has no delegated auth; tracked in issues #158 and #38
+			//= reason=the control endpoints are open when the consensus TLS flags are absent; tracked in issue #158
 			//# The cask client API and control endpoints MUST NOT be reachable outside the pod without authentication.
 			ln, err := network.Listen(ctx, *consLn)
 			if err != nil {
@@ -238,6 +246,8 @@ func main() {
 	kv := mvcc.New(prop, clock, *self)
 	sessions := lease.NewSessions(prop, func() int64 { return time.Now().UnixNano() })
 	locks := lease.NewLocks(prop, sessions)
+	// fs seeds the claim locks for an import on either path, and it is
+	// the store of the legacy mux.
 	fs := &fleetStore{kv: kv, sessions: sessions, locks: locks, importGrace: *impGrace}
 
 	// Repair the index before the server serves, so no list misses an
@@ -264,9 +274,6 @@ func main() {
 			os.Exit(1)
 		}
 	}
-
-	srv := newAPIServer(*cluster, fs, log)
-	go srv.runReconciler(ctx, 2*time.Second)
 
 	// The import writes a marker last, but no readiness gate reads it yet,
 	// so nothing checks imported owners before the server serves.
@@ -297,26 +304,66 @@ func main() {
 	//= type=exception
 	//= reason=no rehearsal test on kind; tracked in issue #54
 	//# The cutover MUST be rehearsed on a copy of the management cluster before it runs on the real one.
-	log.Info("cask-apiserver serving", "group", apiGroup+"/"+apiVersion, "cluster", *cluster, "listen", *listen, "tls", *selfTLS)
-	server := &http.Server{Addr: *listen, Handler: srv.routes()}
+	if *legacy {
+		if err := serveLegacy(ctx, *cluster, fs, *listen, *selfTLS, log); err != nil {
+			log.Error("server stopped", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// The generic server and the claim controller share one cask store
+	// per resource, so a status write wakes the watches of that store.
+	stores := fleetStores(kv)
+	claims := &claimController{
+		cluster:  *cluster,
+		store:    storageClaims{devices: stores["devices"], claims: stores["deviceclaims"]},
+		sessions: sessions,
+		locks:    locks,
+		log:      log,
+	}
+	// A claim delete releases the claim inside the delete of the store,
+	// so the device keeps the fence before the claim goes.
+	srv, err := serverOpts.newFleetServer(*cluster, stores, claims.release)
+	if err != nil {
+		log.Error("generic server", "err", err)
+		os.Exit(1)
+	}
+	// SIGTERM ends the context. The server then drains its requests.
+	runCtx := genericapiserver.SetupSignalContext()
+	go claims.run(runCtx, 2*time.Second)
+	log.Info("cask-apiserver serving", "group", apiGroup+"/"+apiVersion, "cluster", *cluster,
+		"port", serverOpts.recommended.SecureServing.BindPort, "delegated-auth", serverOpts.delegatedAuth)
+	if err := srv.PrepareRun().RunWithContext(runCtx); err != nil {
+		log.Error("server stopped", "err", err)
+		os.Exit(1)
+	}
+}
+
+// serveLegacy serves the legacy net/http mux on listen until it fails.
+// The mux has no authentication. It stays for one release behind
+// --legacy-http.
+func serveLegacy(ctx context.Context, cluster string, fs *fleetStore, listen string, selfTLS bool, log *slog.Logger) error {
+	srv := newAPIServer(cluster, fs, log)
+	go srv.runReconciler(ctx, 2*time.Second)
+	log.Warn("serving the legacy mux: no authentication, no authorization", "cluster", cluster, "listen", listen, "tls", selfTLS)
+	server := &http.Server{Addr: listen, Handler: srv.routes()}
 	// The cert is self-signed, so the APIService needs insecureSkipTLSVerify.
 	//= docs/spec/fleet.md#8-security
 	//= type=exception
 	//= reason=self-signed cert only; tracked in issue #41
 	//# The extension server MUST serve HTTPS with a certificate the kube-apiserver can verify.
-	if *selfTLS {
-		// The k8s aggregation layer requires extension apiservers to serve
-		// TLS; the demo registers the APIService with insecureSkipTLSVerify.
-		if server.TLSConfig, err = selfSignedTLS([]string{"cask-apiserver", "cask-apiserver.cask-system.svc", "localhost"}); err == nil {
-			err = server.ListenAndServeTLS("", "")
-		}
-	} else {
-		err = server.ListenAndServe()
+	if !selfTLS {
+		return server.ListenAndServe()
 	}
+	// The k8s aggregation layer requires extension apiservers to serve
+	// TLS; the demo registers the APIService with insecureSkipTLSVerify.
+	cfg, err := selfSignedTLS([]string{"cask-apiserver", "cask-apiserver.cask-system.svc", "localhost"})
 	if err != nil {
-		log.Error("server stopped", "err", err)
-		os.Exit(1)
+		return err
 	}
+	server.TLSConfig = cfg
+	return server.ListenAndServeTLS("", "")
 }
 
 // consensusNetwork returns the network for consensus traffic: mutual TLS

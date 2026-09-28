@@ -1990,3 +1990,53 @@ and why.
 Files: `internal/caspaxos/proposer.go`, `internal/roster/roster.go`, `quint/caspaxos.qnt`, `testutil/sim/faults/`
 
 Done when: the test shows the bug is impossible (with the reason) or fails before the fix and passes after, and `devbox run sim-gate` passes.
+
+## apiserver: port the claim tests to the generic server
+
+labels: apiserver
+
+Spec: docs/spec/fleet.md#5-claims-and-fencing
+> At most one claim MUST be Bound to an object at the object's current fence.
+
+Since #38, the generic server serves the group and runs the claim
+controller over the cask storage. `TestSingleGlobalLease` and
+`TestZombieHolderIsFenced` in `server_test.go` still drive the legacy mux.
+They must run against the generic server before the mux goes.
+
+Task: give `startTestServer` in `apiserver_test.go` a way to share one
+consensus group and one fake clock between two servers, as
+`newFleetFixture` does. Port the two tests to it with the dynamic client.
+Keep their Duvet test citations.
+
+Files: `cmd/cask-apiserver/apiserver_test.go`,
+`cmd/cask-apiserver/server_test.go`
+
+Done when: `go -C cmd/cask-apiserver test -race -run 'TestGenericServer' ./`
+passes with the two ported tests.
+
+
+
+## apiserver: remove the legacy mux behind --legacy-http
+
+labels: apiserver
+
+Spec: docs/spec/fleet.md#2-resources
+> The extension server MUST be built on the generic server in k8s.io/apiserver.
+
+Since #38, the generic server serves the group. The old net/http mux stays
+behind `--legacy-http` for one release. It has no authentication, and its
+list and watch do not read the index history. The Duvet exceptions in
+`server.go` name this issue.
+
+Task: after #189 moves the claim tests to the generic server, delete
+`--legacy-http`, `--listen`, and `--self-signed-tls`. Delete `server.go`,
+`store.go`, `types.go`, `tls.go`, `legacyClaims` in `claimstore.go`, and
+the tests that drive the mux or `fleetStore`. Remove the Duvet exceptions
+that name this issue and regenerate `.duvet/snapshot.txt`.
+
+Files: `cmd/cask-apiserver/main.go`, `server.go`, `store.go`, `types.go`,
+`tls.go`, `claimstore.go`, `server_test.go`, `store_test.go`
+
+Done when: `go -C cmd/cask-apiserver test -race ./...` and
+`devbox run duvet-ci` pass, and `grep -n legacy cmd/cask-apiserver/*.go`
+finds nothing.

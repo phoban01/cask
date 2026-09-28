@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/phoban01/cask/cmd/cask-apiserver/apis/fleet/v1alpha1"
 	"github.com/phoban01/cask/cmd/cask-apiserver/migrate"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -170,7 +171,7 @@ func TestZombieCannotLowerLastFence(t *testing.T) {
 
 	// The zombie's stale lease write comes in late.
 	if err := f.a.api.claims.setDeviceLease(ctx, "lidar-3",
-		&LeaseRef{Cluster: "cluster-a", Claim: "mapper", Fence: 1}); err != nil {
+		&v1alpha1.LeaseRef{Cluster: "cluster-a", Claim: "mapper", Fence: 1}); err != nil {
 		t.Fatal(err)
 	}
 	d = getDevice(t, f.a, "lidar-3")
@@ -180,7 +181,7 @@ func TestZombieCannotLowerLastFence(t *testing.T) {
 
 	// A stale re-advertise of the released fence 2 is refused too.
 	if err := f.b.api.claims.setDeviceLease(ctx, "lidar-3",
-		&LeaseRef{Cluster: "cluster-b", Claim: "surveyor", Fence: 2}); err != nil {
+		&v1alpha1.LeaseRef{Cluster: "cluster-b", Claim: "surveyor", Fence: 2}); err != nil {
 		t.Fatal(err)
 	}
 	if d = getDevice(t, f.a, "lidar-3"); d.Status.Lease != nil {

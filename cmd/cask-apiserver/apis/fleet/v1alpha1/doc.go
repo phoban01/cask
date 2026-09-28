@@ -2,6 +2,7 @@
 // DeviceClaim. Both kinds are cluster-scoped.
 //
 // +kubebuilder:object:generate=true
+// +k8s:openapi-gen=true
 // +groupName=fleet.cask.dev
 package v1alpha1
 

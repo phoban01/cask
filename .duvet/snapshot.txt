@@ -2,8 +2,8 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
   SECTION: [2. Resources](#2-resources)
     TEXT[!MUST,implementation,test]: Cask MUST serve its resources through the Kubernetes aggregation layer as an APIService.
     TEXT[!MUST,implementation,test]: Every fleet resource MUST be cluster-scoped.
-    TEXT[!MUST,exception]: The extension server MUST be built on the generic server in k8s.io/apiserver.
-    TEXT[!MUST,exception]: The extension server MUST delegate authentication and authorization to the local kube-apiserver.
+    TEXT[!MUST,implementation,test,exception]: The extension server MUST be built on the generic server in k8s.io/apiserver.
+    TEXT[!MUST,implementation,test,exception]: The extension server MUST delegate authentication and authorization to the local kube-apiserver.
     TEXT[!MUST,test,exception]: A client MUST be able to use kubectl, client-go informers, field selectors, and watch bookmarks against fleet resources without fleet-specific code.
     TEXT[!MUST,exception]: The extension server MUST report not ready until its storage is reachable.
     TEXT[!MUST,exception]: The extension server MUST report not ready until any pending migration import is complete.
@@ -115,7 +115,7 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
   SECTION: [8. Security](#8-security)
     TEXT[!MUST,implementation,test]: Consensus traffic between members MUST use mutual TLS.
     TEXT[!MUST,exception]: The extension server MUST serve HTTPS with a certificate the kube-apiserver can verify.
-    TEXT[!MUST,exception]: The cask client API and control endpoints MUST NOT be reachable outside the pod without authentication.
+    TEXT[!MUST,implementation,test,exception]: The cask client API and control endpoints MUST NOT be reachable outside the pod without authentication.
 
   SECTION: [9. Operations](#9-operations)
     TEXT[!MUST,implementation,exception]: Every voter MUST persist its acceptor state to a durable volume.
