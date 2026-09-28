@@ -24,10 +24,11 @@ type m = map[string]any
 // a config merged with overrides.
 func newNode(t *testing.T, ca cert.Certificate, caKey []byte, name string, ip netip.Addr, overrides m) *nebula.Network {
 	t.Helper()
-	before := time.Now().Add(-time.Hour)
-	after := time.Now().Add(time.Hour)
+	// Reuse the CA's validity window. A fresh time.Now() can cross a
+	// whole-second boundary, and then the node cert expires after the CA and
+	// Sign panics (#113).
 	_, _, key, certPEM := cert_test.NewTestCert(
-		cert.Version2, cert.Curve_CURVE25519, ca, caKey, name, before, after,
+		cert.Version2, cert.Curve_CURVE25519, ca, caKey, name, ca.NotBefore(), ca.NotAfter(),
 		[]netip.Prefix{netip.PrefixFrom(ip, 24)}, nil, nil,
 	)
 	caPEM, err := ca.MarshalPEM()
