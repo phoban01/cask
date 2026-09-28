@@ -2,8 +2,8 @@
 // generic API server. Each object lives in one cask register, and each
 // resource type has one index register (docs/spec/fleet.md, section 3).
 //
-// Methods that are not implemented yet return ErrNotImplemented. Issues
-// #28 to #35 fill in the methods one at a time.
+// Get, Create, GuaranteedUpdate, Delete, GetList, and Watch are
+// implemented. The other methods return ErrNotImplemented.
 package storage
 
 import (
@@ -13,11 +13,12 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/phoban01/cask/internal/caspaxos"
 	"github.com/phoban01/cask/internal/mvcc"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/watch"
 	apistorage "k8s.io/apiserver/pkg/storage"
 )
 
@@ -32,14 +33,59 @@ type Store struct {
 	resource string
 	// versioner sets and reads resourceVersion on objects and lists.
 	versioner apistorage.APIObjectVersioner
+	// newFunc returns a new, empty object of the resource type. Watch
+	// uses it for bookmark events.
+	newFunc func() runtime.Object
+
+	// watchPoll is how often a watch reads the index history when no
+	// local write wakes it. Writes from other clusters reach a watch
+	// through this read.
+	watchPoll time.Duration
+	// bookmarkEvery is how often a watch that allows bookmarks sends
+	// one when it has sent nothing else.
+	bookmarkEvery time.Duration
+
+	mu sync.Mutex
+	// changed is closed and replaced after each index write through this
+	// Store, to wake the watches.
+	changed chan struct{}
 }
 
 var _ apistorage.Interface = (*Store)(nil)
 
 // New returns a Store for resource. It keeps objects in kv and encodes
-// them with codec.
-func New(kv *mvcc.KV, codec runtime.Codec, resource string) *Store {
-	return &Store{kv: kv, codec: codec, resource: resource}
+// them with codec. newFunc returns a new, empty object of the resource
+// type.
+func New(kv *mvcc.KV, codec runtime.Codec, resource string, newFunc func() runtime.Object) *Store {
+	return &Store{
+		kv:            kv,
+		codec:         codec,
+		resource:      resource,
+		newFunc:       newFunc,
+		watchPoll:     250 * time.Millisecond,
+		bookmarkEvery: time.Minute,
+		changed:       make(chan struct{}),
+	}
+}
+
+// writeIndex runs WriteIndex for name and then wakes the watches.
+func (s *Store) writeIndex(ctx context.Context, name string) error {
+	if err := WriteIndex(ctx, s.kv, s.resource, name); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	close(s.changed)
+	s.changed = make(chan struct{})
+	s.mu.Unlock()
+	return nil
+}
+
+// indexChanged returns a channel that is closed at the next index write
+// through this Store.
+func (s *Store) indexChanged() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.changed
 }
 
 // objectKey maps a storage key to the object's register key and name. The
@@ -131,7 +177,7 @@ func (s *Store) Create(ctx context.Context, key string, obj, out runtime.Object,
 	}
 	//= docs/spec/fleet.md#3-storage-model
 	//# A mutation MUST write the object register before the index register.
-	if err := WriteIndex(ctx, s.kv, s.resource, name); err != nil {
+	if err := s.writeIndex(ctx, name); err != nil {
 		// The object is committed. The next index write for this name,
 		// or the sweep, records it.
 		return fmt.Errorf("cask storage: create %q: object written, index write failed: %w", key, err)
@@ -203,7 +249,7 @@ func (s *Store) Delete(ctx context.Context, key string, out runtime.Object, prec
 		}
 		//= docs/spec/fleet.md#3-storage-model
 		//# A mutation MUST write the object register before the index register.
-		if err := WriteIndex(ctx, s.kv, s.resource, name); err != nil {
+		if err := s.writeIndex(ctx, name); err != nil {
 			return fmt.Errorf("cask storage: delete %q: object tombstoned, index write failed: %w", key, err)
 		}
 		if !readable {
@@ -211,11 +257,6 @@ func (s *Store) Delete(ctx context.Context, key string, out runtime.Object, prec
 		}
 		return s.decode(key, v.Value, tomb.Seq, out)
 	}
-}
-
-// Watch returns ErrNotImplemented.
-func (*Store) Watch(_ context.Context, _ string, _ apistorage.ListOptions) (watch.Interface, error) {
-	return nil, ErrNotImplemented
 }
 
 // Get reads the object at key into out. Every Get is a linearizable read
@@ -319,7 +360,7 @@ func (s *Store) GuaranteedUpdate(ctx context.Context, key string, destination ru
 		}
 		//= docs/spec/fleet.md#3-storage-model
 		//# A mutation MUST write the object register before the index register.
-		if err := WriteIndex(ctx, s.kv, s.resource, name); err != nil {
+		if err := s.writeIndex(ctx, name); err != nil {
 			return fmt.Errorf("cask storage: update %q: object written, index write failed: %w", key, err)
 		}
 		return s.decode(key, raw, nv.Seq, destination)

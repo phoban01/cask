@@ -29,7 +29,7 @@ func newStoreOn(t *testing.T, kv *mvcc.KV) *Store {
 		t.Fatal(err)
 	}
 	codec := serializer.NewCodecFactory(scheme).LegacyCodec(v1alpha1.SchemeGroupVersion)
-	return New(kv, codec, "devices")
+	return New(kv, codec, "devices", func() runtime.Object { return &v1alpha1.Device{} })
 }
 
 const keyPrefix = "/fleet.cask.dev/devices/"
