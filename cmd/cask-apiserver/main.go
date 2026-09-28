@@ -277,11 +277,12 @@ func main() {
 	//= type=exception
 	//= reason=no readiness gate reads the import marker; tracked in issue #40
 	//# The APIService MUST NOT become available before the import has completed.
-	// cask-migrate export and the import exist. The cutover runbook, the
-	// export CronJob, and the rehearsal do not exist yet.
+	// cask-migrate export, the import, and the cutover runbook exist. The
+	// export CronJob and the rehearsal do not exist yet. The freeze is a
+	// manual step in docs/runbooks/cutover.md. No code enforces it.
 	//= docs/spec/fleet.md#7-migration
 	//= type=exception
-	//= reason=no cutover runbook yet; tracked in issue #52
+	//= reason=docs/runbooks/cutover.md freezes writers by hand; nothing enforces or rehearses it; tracked in issue #54
 	//# Writers MUST be frozen from the start of the export until the APIService is available.
 	//= docs/spec/fleet.md#7-migration
 	//= type=exception
