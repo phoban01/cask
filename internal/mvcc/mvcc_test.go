@@ -73,6 +73,83 @@ func TestCASSemantics(t *testing.T) {
 	}
 }
 
+func TestCASSeqSemantics(t *testing.T) {
+	ctx := context.Background()
+	acc, clock := cluster(3)
+	kv := mvcc.New(caspaxos.NewProposer(1, acc), clock, 1)
+	key := []byte("k")
+
+	// Sequence 0 matches an absent key.
+	v1, err := kv.CASSeq(ctx, key, 0, []byte("a"))
+	if err != nil || v1.Seq != 1 {
+		t.Fatalf("casseq absent->a = %+v, %v", v1, err)
+	}
+	if _, err := kv.CASSeq(ctx, key, 0, []byte("x")); !errors.Is(err, caspaxos.ErrConflict) {
+		t.Fatalf("casseq 0 on a live key = %v, want ErrConflict", err)
+	}
+	// The value changes and changes back. CAS on the value still matches,
+	// but CASSeq on the old sequence does not.
+	if _, err := kv.CASSeq(ctx, key, 1, []byte("b")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kv.CASSeq(ctx, key, 2, []byte("a")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kv.CASSeq(ctx, key, 1, []byte("c")); !errors.Is(err, caspaxos.ErrConflict) {
+		t.Fatalf("casseq on a stale sequence = %v, want ErrConflict", err)
+	}
+	if v, _, _ := mustGet(t, kv, key); string(v) != "a" {
+		t.Fatalf("value mutated by failed CASSeq: %q", v)
+	}
+	// Sequence 0 matches a tombstoned key.
+	if _, err := kv.Delete(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kv.CASSeq(ctx, key, 4, []byte("d")); !errors.Is(err, caspaxos.ErrConflict) {
+		t.Fatalf("casseq on a tombstone's sequence = %v, want ErrConflict", err)
+	}
+	v, err := kv.CASSeq(ctx, key, 0, []byte("d"))
+	if err != nil || v.Seq != 5 {
+		t.Fatalf("casseq over tombstone = %+v, %v", v, err)
+	}
+}
+
+func TestDeleteSeqSemantics(t *testing.T) {
+	ctx := context.Background()
+	acc, clock := cluster(3)
+	kv := mvcc.New(caspaxos.NewProposer(1, acc), clock, 1)
+	key := []byte("k")
+
+	if _, err := kv.DeleteSeq(ctx, key, 0); err == nil {
+		t.Fatal("DeleteSeq with sequence 0 must fail")
+	}
+	if _, err := kv.DeleteSeq(ctx, key, 1); !errors.Is(err, caspaxos.ErrConflict) {
+		t.Fatalf("DeleteSeq on an absent key = %v, want ErrConflict", err)
+	}
+	if _, err := kv.Put(ctx, key, []byte("a")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kv.Put(ctx, key, []byte("b")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kv.DeleteSeq(ctx, key, 1); !errors.Is(err, caspaxos.ErrConflict) {
+		t.Fatalf("DeleteSeq on a stale sequence = %v, want ErrConflict", err)
+	}
+	if v, found, _ := mustGet(t, kv, key); !found || string(v) != "b" {
+		t.Fatalf("failed DeleteSeq changed the key: %q, %v", v, found)
+	}
+	v, err := kv.DeleteSeq(ctx, key, 2)
+	if err != nil || v.Seq != 3 || !v.Tombstone {
+		t.Fatalf("DeleteSeq on the head = %+v, %v", v, err)
+	}
+	if _, found, _ := mustGet(t, kv, key); found {
+		t.Fatal("key still live after DeleteSeq")
+	}
+	if _, err := kv.DeleteSeq(ctx, key, 3); !errors.Is(err, caspaxos.ErrConflict) {
+		t.Fatalf("DeleteSeq on a tombstone = %v, want ErrConflict", err)
+	}
+}
+
 func TestTimeTravelAndSnapshot(t *testing.T) {
 	ctx := context.Background()
 	acc, clock := cluster(3)
