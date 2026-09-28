@@ -30,6 +30,12 @@ target = "docs/spec/fleet.md#3-storage-model"
 # 
 # A create MUST use a compare-and-set that requires the object register to be absent.
 # 
+# A create MUST NOT write over a tombstone while the index register still names the deleted object.
+# 
+# A create or an update MUST return the object version that it wrote, with the index sequence at which the index register recorded that version.
+# 
+# A delete MUST return the index sequence at which the index register removed the name.
+# 
 # An update MUST use a compare-and-set on the resourceVersion the client supplied.
 # 
 # An update whose compare-and-set fails MUST return a conflict.
@@ -126,6 +132,24 @@ The extension server MUST reconcile the index register against the object regist
 level = "MUST"
 quote = '''
 A create MUST use a compare-and-set that requires the object register to be absent.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A create MUST NOT write over a tombstone while the index register still names the deleted object.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A create or an update MUST return the object version that it wrote, with the index sequence at which the index register recorded that version.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A delete MUST return the index sequence at which the index register removed the name.
 '''
 
 [[spec]]

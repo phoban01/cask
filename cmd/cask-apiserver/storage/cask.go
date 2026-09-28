@@ -68,19 +68,22 @@ func New(kv *mvcc.KV, codec runtime.Codec, resource string, newFunc func() runti
 	}
 }
 
-// writeIndex runs WriteIndex for name and then wakes the watches. It
-// returns the entry that the index holds for name, and whether the index
-// names it.
-func (s *Store) writeIndex(ctx context.Context, name string) (Entry, bool, error) {
-	e, live, err := WriteIndex(ctx, s.kv, s.resource, name)
+// writeIndex runs the index write for name and then wakes the watches.
+func (s *Store) writeIndex(ctx context.Context, name string) (indexWrite, error) {
+	w, err := writeIndex(ctx, s.kv, s.resource, name)
 	if err != nil {
-		return Entry{}, false, err
+		return indexWrite{}, err
 	}
+	s.wake()
+	return w, nil
+}
+
+// wake wakes the watches of this Store.
+func (s *Store) wake() {
 	s.mu.Lock()
 	close(s.changed)
 	s.changed = make(chan struct{})
 	s.mu.Unlock()
-	return e, live, nil
 }
 
 // repairIndex runs after a compare-and-set on an object register failed.
@@ -91,8 +94,16 @@ func (s *Store) writeIndex(ctx context.Context, name string) (Entry, bool, error
 func (s *Store) repairIndex(ctx context.Context, name string) error {
 	//= docs/spec/fleet.md#3-storage-model
 	//# When the index write of a mutation did not complete, the next index write for that object MUST record the object register's current sequence.
-	_, _, err := s.writeIndex(ctx, name)
+	_, err := s.writeIndex(ctx, name)
 	return err
+}
+
+// prepareCreate runs PrepareCreate for name and wakes the watches, since
+// it can write the index.
+func (s *Store) prepareCreate(ctx context.Context, name string) (seq uint64, exists bool, err error) {
+	seq, exists, err = PrepareCreate(ctx, s.kv, s.resource, name)
+	s.wake()
+	return seq, exists, err
 }
 
 // indexChanged returns a channel that is closed at the next index write
@@ -176,25 +187,30 @@ func (s *Store) encode(obj runtime.Object) ([]byte, error) {
 	return runtime.Encode(s.codec, obj)
 }
 
-// written decodes into out the result of a write of raw at object
-// sequence seq. e and live are what the index write returned.
+// written decodes into out the object version raw that a create or an
+// update wrote at object sequence seq. w is what the index write
+// returned. The resourceVersion of out is the index sequence at which
+// the index recorded seq.
 //
-// Usually the index records seq, and out is raw at the entry's index
-// sequence. Another writer can land a newer version before this index
-// write runs. The index then records that version, and raw has no index
-// sequence of its own. out is then the version the index records, so the
-// object and its resourceVersion always agree. When the index no longer
-// names the object, out is raw at the index sequence of the removal. No
-// entry ever carries that index sequence, so a precondition on it fails.
-func (s *Store) written(ctx context.Context, key, name string, seq uint64, raw []byte, e Entry, live bool,
+// Usually the index write records seq itself. Another writer can land a
+// newer version, or a delete, before this index write runs. Then the
+// index write records that newer state. The newer write compared and set
+// on seq, and a writer compares and sets only on a sequence the index
+// recorded, so the index history holds seq. written looks it up there.
+// out is never another write's version: a client that updates with its
+// resourceVersion gets a conflict, as with etcd.
+func (s *Store) written(ctx context.Context, key, name string, seq uint64, raw []byte, w indexWrite,
 	out runtime.Object) error {
-	if live && e.Obj != seq {
+	//= docs/spec/fleet.md#3-storage-model
+	//# A create or an update MUST return the object version that it wrote, with the index sequence at which the index register recorded that version.
+	rv := w.entry.Idx
+	if !w.live || w.entry.Obj != seq {
 		var err error
-		if raw, err = s.indexed(ctx, name, e); err != nil {
-			return err
+		if rv, err = RecordedAt(ctx, s.kv, s.resource, name, seq); err != nil {
+			return apistorage.NewInternalError(fmt.Errorf("cask storage: %q written at object sequence %d: %w", key, seq, err))
 		}
 	}
-	return s.decode(key, raw, e.Idx, out)
+	return s.decode(key, raw, rv, out)
 }
 
 // Create stores obj at key if no live object is there, records it in the
@@ -218,23 +234,40 @@ func (s *Store) Create(ctx context.Context, key string, obj, out runtime.Object,
 	if err != nil {
 		return err
 	}
-	//= docs/spec/fleet.md#3-storage-model
-	//# A create MUST use a compare-and-set that requires the object register to be absent.
-	v, err := s.kv.CAS(ctx, reg, nil, raw)
-	if errors.Is(err, caspaxos.ErrConflict) {
-		// The live object may not be in the index yet. Record it, so a
-		// get agrees with this answer.
-		if err := s.repairIndex(ctx, name); err != nil {
+	var v mvcc.Version
+	for {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		return apistorage.NewKeyExistsError(key, 0)
-	}
-	if err != nil {
-		return err
+		// A create over a tombstone waits until the index records the
+		// removal, so a watch sees a DELETED and an ADDED event.
+		seq, exists, err := s.prepareCreate(ctx, name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			// The live object may not be in the index yet. Record it, so
+			// a get agrees with this answer.
+			if err := s.repairIndex(ctx, name); err != nil {
+				return err
+			}
+			return apistorage.NewKeyExistsError(key, 0)
+		}
+		//= docs/spec/fleet.md#3-storage-model
+		//# A create MUST use a compare-and-set that requires the object register to be absent.
+		v, err = s.kv.CreateAt(ctx, reg, seq, raw)
+		if errors.Is(err, caspaxos.ErrConflict) {
+			// Another write landed after the read. Look again.
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		break
 	}
 	//= docs/spec/fleet.md#3-storage-model
 	//# A mutation MUST write the object register before the index register.
-	e, live, err := s.writeIndex(ctx, name)
+	w, err := s.writeIndex(ctx, name)
 	if err != nil {
 		// The object is committed. The next index write for this name,
 		// or the sweep, records it.
@@ -243,7 +276,7 @@ func (s *Store) Create(ctx context.Context, key string, obj, out runtime.Object,
 	if out == nil {
 		return nil
 	}
-	return s.written(ctx, key, name, v.Seq, raw, e, live, out)
+	return s.written(ctx, key, name, v.Seq, raw, w, out)
 }
 
 // Delete removes the object at key and decodes the deleted object into
@@ -318,19 +351,25 @@ func (s *Store) Delete(ctx context.Context, key string, out runtime.Object, prec
 		}
 		//= docs/spec/fleet.md#3-storage-model
 		//# A mutation MUST write the object register before the index register.
-		after, live, err := s.writeIndex(ctx, name)
+		w, err := s.writeIndex(ctx, name)
 		if err != nil {
 			return fmt.Errorf("cask storage: delete %q: object tombstoned, index write failed: %w", key, err)
 		}
 		if !readable {
 			return runtime.SetZeroValue(out)
 		}
-		rv := after.Idx
-		if live {
-			// A create landed after the tombstone and the index records
-			// it. There is no removal step. Keep the resourceVersion of
-			// the deleted version, which no later entry carries.
-			rv = e.Idx
+		// When this index write removed the version that the delete
+		// tombstoned, its sequence is the removal step. Otherwise another
+		// index write removed it first, and a later incarnation of the
+		// name may have come and gone since. A create waits for the
+		// removal, so the step is in the history.
+		//= docs/spec/fleet.md#3-storage-model
+		//# A delete MUST return the index sequence at which the index register removed the name.
+		rv := w.entry.Idx
+		if w.live || !w.wrote || w.removed.Obj != e.Obj {
+			if rv, err = RemovedAt(ctx, s.kv, s.resource, name, e.Obj); err != nil {
+				return apistorage.NewInternalError(fmt.Errorf("cask storage: %q deleted at object sequence %d: %w", key, e.Obj, err))
+			}
 		}
 		return s.decode(key, raw, rv, out)
 	}
@@ -400,6 +439,10 @@ func (s *Store) GuaranteedUpdate(ctx context.Context, key string, destination ru
 		}
 		existing := newLike(destination)
 		var cur []byte
+		// createAt is the head sequence that a create through this update
+		// compares and sets on. It is used only when the index does not
+		// name the object.
+		var createAt uint64
 		if ok {
 			if cur, err = s.indexed(ctx, name, e); err != nil {
 				return err
@@ -409,6 +452,21 @@ func (s *Store) GuaranteedUpdate(ctx context.Context, key string, destination ru
 			}
 		} else if !ignoreNotFound {
 			return apistorage.NewKeyNotFoundError(key, 0)
+		} else {
+			// The update creates the object. Like Create, it waits until
+			// the index records the removal of a deleted object.
+			var exists bool
+			if createAt, exists, err = s.prepareCreate(ctx, name); err != nil {
+				return err
+			}
+			if exists {
+				// A live object that the index does not record yet.
+				// Record it and run tryUpdate on it.
+				if err := s.repairIndex(ctx, name); err != nil {
+					return err
+				}
+				continue
+			}
 		}
 		// A failed precondition is a storage InvalidObj error. The
 		// registry returns it to the client as 409 Conflict.
@@ -419,8 +477,6 @@ func (s *Store) GuaranteedUpdate(ctx context.Context, key string, destination ru
 		if err := preconditions.Check(key, existing); err != nil {
 			return err
 		}
-		// e is the zero Entry when the index does not name the object.
-		// Obj 0 then asks CASSeq for an absent or tombstoned register.
 		updated, ttl, err := tryUpdate(existing, apistorage.ResponseMeta{ResourceVersion: e.Idx})
 		if err != nil {
 			return err
@@ -444,7 +500,12 @@ func (s *Store) GuaranteedUpdate(ctx context.Context, key string, destination ru
 		//# An update MUST use a compare-and-set on the resourceVersion the client supplied.
 		//= docs/spec/fleet.md#3-storage-model
 		//# A retried write MUST be a compare-and-set, never a blind reapplication of a change.
-		nv, err := s.kv.CASSeq(ctx, reg, e.Obj, raw)
+		var nv mvcc.Version
+		if ok {
+			nv, err = s.kv.CASSeq(ctx, reg, e.Obj, raw)
+		} else {
+			nv, err = s.kv.CreateAt(ctx, reg, createAt, raw)
+		}
 		if errors.Is(err, caspaxos.ErrConflict) {
 			// The register holds a write that the entry does not record.
 			// Catch the index up, read again, and run tryUpdate on the
@@ -461,11 +522,11 @@ func (s *Store) GuaranteedUpdate(ctx context.Context, key string, destination ru
 		}
 		//= docs/spec/fleet.md#3-storage-model
 		//# A mutation MUST write the object register before the index register.
-		after, live, err := s.writeIndex(ctx, name)
+		w, err := s.writeIndex(ctx, name)
 		if err != nil {
 			return fmt.Errorf("cask storage: update %q: object written, index write failed: %w", key, err)
 		}
-		return s.written(ctx, key, name, nv.Seq, raw, after, live, destination)
+		return s.written(ctx, key, name, nv.Seq, raw, w, destination)
 	}
 }
 

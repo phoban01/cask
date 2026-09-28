@@ -85,7 +85,11 @@ by hand. `devbox.json` lists the packages and the scripts above.
   step that made the change. Get reads the entry, then the object at the
   entry's object sequence, so an unindexed write is not visible. An
   update or delete checks the client's resourceVersion against the entry,
-  then compares and sets on the entry's object sequence.
+  then compares and sets on the entry's object sequence. A write returns
+  its own version at the index sequence that recorded it, found in the
+  index history when a newer write was indexed first. A create over a
+  tombstone first makes the index record the removal, so a delete and a
+  create are two watch events.
 - Claims: binding a claim is acquiring the object's cask lock. The fence
   travels in status and in every downstream effect. A receiver rejects a
   lower fence. A status write never lowers an advertised fence.

@@ -99,44 +99,65 @@ func (s *fleetStore) get(ctx context.Context, resource, name string) ([]byte, ui
 }
 
 // settle writes the index after an object write of raw at object sequence
-// seq. It returns the object that the index records and its
-// resourceVersion. When a newer write landed first and the index records
-// that one, it returns the newer object, so the bytes and the
-// resourceVersion always agree.
+// seq. It returns raw and the index sequence at which the index recorded
+// seq. A newer write can land before this index write runs, and the index
+// then records that newer state. The newer write compared and set on
+// seq, which the index had recorded, so the index history holds seq.
+// settle never returns another write's version.
 func (s *fleetStore) settle(ctx context.Context, resource, name string, seq uint64, raw []byte) ([]byte, uint64, error) {
+	//= docs/spec/fleet.md#3-storage-model
+	//# A create or an update MUST return the object version that it wrote, with the index sequence at which the index register recorded that version.
 	e, live, err := storage.WriteIndex(ctx, s.kv, resource, name)
 	if err != nil {
 		return nil, 0, err
 	}
-	if live && e.Obj != seq {
-		if raw, err = s.at(ctx, resource, name, e); err != nil {
-			return nil, 0, err
-		}
+	if live && e.Obj == seq {
+		return raw, e.Idx, nil
 	}
-	return raw, e.Idx, nil
+	rv, err := storage.RecordedAt(ctx, s.kv, resource, name, seq)
+	if err != nil {
+		return nil, 0, err
+	}
+	return raw, rv, nil
 }
 
 // create commits raw as a new object (fails if one exists) and records the
 // new sequence in the type index. It returns the stored object and its
 // resourceVersion.
 func (s *fleetStore) create(ctx context.Context, resource, name string, raw []byte) ([]byte, uint64, error) {
-	//= docs/spec/fleet.md#3-storage-model
-	//# A create MUST use a compare-and-set that requires the object register to be absent.
-	//= docs/spec/fleet.md#3-storage-model
-	//# A mutation MUST write the object register before the index register.
-	v, err := s.kv.CAS(ctx, objectKey(resource, name), nil, raw)
-	if errors.Is(err, caspaxos.ErrConflict) {
-		// The live object may not be in the index yet. Record it, so a
-		// get agrees with this answer.
-		if _, _, err := storage.WriteIndex(ctx, s.kv, resource, name); err != nil {
+	for {
+		if err := ctx.Err(); err != nil {
 			return nil, 0, err
 		}
-		return nil, 0, fmt.Errorf("%w: %s %q already exists", errConflict, resource, name)
+		// A create over a tombstone waits until the index records the
+		// removal, so a watch sees a delete and a create.
+		//= docs/spec/fleet.md#3-storage-model
+		//# A create MUST NOT write over a tombstone while the index register still names the deleted object.
+		seq, exists, err := storage.PrepareCreate(ctx, s.kv, resource, name)
+		if err != nil {
+			return nil, 0, err
+		}
+		if exists {
+			// The live object may not be in the index yet. Record it, so a
+			// get agrees with this answer.
+			if _, _, err := storage.WriteIndex(ctx, s.kv, resource, name); err != nil {
+				return nil, 0, err
+			}
+			return nil, 0, fmt.Errorf("%w: %s %q already exists", errConflict, resource, name)
+		}
+		//= docs/spec/fleet.md#3-storage-model
+		//# A create MUST use a compare-and-set that requires the object register to be absent.
+		//= docs/spec/fleet.md#3-storage-model
+		//# A mutation MUST write the object register before the index register.
+		v, err := s.kv.CreateAt(ctx, objectKey(resource, name), seq, raw)
+		if errors.Is(err, caspaxos.ErrConflict) {
+			continue
+		}
+		if err != nil {
+			return nil, 0, err
+		}
+		return s.settle(ctx, resource, name, v.Seq, raw)
 	}
-	if err != nil {
-		return nil, 0, err
-	}
-	return s.settle(ctx, resource, name, v.Seq, raw)
 }
 
 // update commits raw over the version the client read, then records the

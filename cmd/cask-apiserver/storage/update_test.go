@@ -305,3 +305,68 @@ func TestPreconditionUsesIndexSequence(t *testing.T) {
 		t.Fatal("index still names the tombstoned object")
 	}
 }
+
+// An update lands at object sequence 2. Before its index write runs, a
+// repair records 2 and a second writer overwrites it at 3 and deletes it
+// at 4. The first update must still answer with its own version at the
+// index sequence that recorded 2, and a delete of 3 must answer with the
+// step that removed it.
+func TestWriteResponseIsOwnVersionAfterOverwrite(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A create or an update MUST return the object version that it wrote, with the index sequence at which the index register recorded that version.
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A delete MUST return the index sequence at which the index register removed the name.
+	ctx := context.Background()
+	s := newTestStore(t)
+	mustCreate(t, s, device("gpu-0", "a100")) // object 1, index 1
+	reg := ObjectKey("devices", "gpu-0")
+	put := func(seq uint64, model string) []byte {
+		t.Helper()
+		raw, err := s.encode(device("gpu-0", model))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.kv.CASSeq(ctx, reg, seq, raw); err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	mine := put(1, "mine")                              // object 2
+	if err := s.repairIndex(ctx, "gpu-0"); err != nil { // index 2 records object 2
+		t.Fatal(err)
+	}
+	put(2, "theirs")                     // object 3
+	w, err := s.writeIndex(ctx, "gpu-0") // index 3 records object 3
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := &v1alpha1.Device{}
+	if err := s.written(ctx, keyPrefix+"gpu-0", "gpu-0", 2, mine, w, out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Spec.Model != "mine" || rvOf(t, out) != 2 {
+		t.Fatalf("response = %s@%s, want the update's own version mine@2", out.Spec.Model, out.ResourceVersion)
+	}
+
+	// A delete of object 3 whose own index write comes after another
+	// index write removed the name, and after a new object was created.
+	if _, err := s.kv.DeleteSeq(ctx, reg, 3); err != nil { // object 4
+		t.Fatal(err)
+	}
+	if err := s.repairIndex(ctx, "gpu-0"); err != nil { // index 4 removes it
+		t.Fatal(err)
+	}
+	mustCreate(t, s, device("gpu-0", "next")) // object 5, index 5
+	rv, err := RemovedAt(ctx, s.kv, s.resource, "gpu-0", 3)
+	if err != nil || rv != 4 {
+		t.Fatalf("RemovedAt(3) = %d, %v, want 4", rv, err)
+	}
+	if rv, err := RecordedAt(ctx, s.kv, s.resource, "gpu-0", 3); err != nil || rv != 3 {
+		t.Fatalf("RecordedAt(3) = %d, %v, want 3", rv, err)
+	}
+	if _, err := RecordedAt(ctx, s.kv, s.resource, "gpu-0", 4); err == nil {
+		t.Fatal("RecordedAt(4) found a tombstone")
+	}
+}

@@ -14,6 +14,8 @@ target = "docs/spec/fleet.md#4-list-and-watch"
 # 
 # A watch that resumes from the resourceVersion of any event MUST NOT skip or replay a change.
 # 
+# A watch MUST report the deletion of an object and the creation of a new object with the same name as separate events.
+# 
 # Watch events SHOULD be pushed from the index register's change feed rather than polled.
 
 [[spec]]
@@ -50,6 +52,12 @@ Every resourceVersion that a get, a list, or a watch event reports MUST be an in
 level = "MUST"
 quote = '''
 A watch that resumes from the resourceVersion of any event MUST NOT skip or replay a change.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A watch MUST report the deletion of an object and the creation of a new object with the same name as separate events.
 '''
 
 [[spec]]

@@ -201,8 +201,8 @@ func TestCreateWritesObjectThenIndex(t *testing.T) {
 	}
 
 	// A create over a tombstone succeeds at a higher object sequence. The
-	// tombstone never reached the index, so the create is the second
-	// index write.
+	// tombstone never reached the index, so the create first records the
+	// removal at index sequence 2, and then records itself at 3.
 	if _, err := s.kv.Delete(ctx, ObjectKey("devices", "gpu-0")); err != nil {
 		t.Fatal(err)
 	}
@@ -210,11 +210,14 @@ func TestCreateWritesObjectThenIndex(t *testing.T) {
 	if err := s.Create(ctx, keyPrefix+"gpu-0", device("gpu-0", "h100"), again, 0); err != nil {
 		t.Fatalf("create over tombstone: %v", err)
 	}
-	if rvOf(t, again) != 2 {
-		t.Fatalf("resourceVersion = %s, want index sequence 2", again.ResourceVersion)
+	if rvOf(t, again) != 3 {
+		t.Fatalf("resourceVersion = %s, want index sequence 3", again.ResourceVersion)
 	}
-	if e, _ := indexEntry(t, s, "gpu-0"); e != (Entry{Obj: 3, Idx: 2}) {
-		t.Fatalf("index entry = %+v, want {Obj:3 Idx:2} (create, tombstone, create)", e)
+	if e, _ := indexEntry(t, s, "gpu-0"); e != (Entry{Obj: 3, Idx: 3}) {
+		t.Fatalf("index entry = %+v, want {Obj:3 Idx:3} (create, tombstone, create)", e)
+	}
+	if _, named := versionAt(t, s, "gpu-0", 2); named {
+		t.Fatal("index sequence 2 still names gpu-0; the create did not record the removal first")
 	}
 }
 
