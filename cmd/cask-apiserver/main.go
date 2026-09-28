@@ -58,11 +58,12 @@ func main() {
 	//= type=exception
 	//= reason=no rehearsal on kind yet; tracked in issue #97
 	//# The majority-loss recovery procedure MUST be rehearsed before phase two.
-	// The demo PodDisruptionBudget covers one cluster only. Nothing stops
-	// two clusters from upgrading at the same time.
+	// The demo PodDisruptionBudget covers one cluster only. The order across
+	// clusters is a manual step in docs/runbooks/rolling-upgrade.md. Nothing
+	// stops two clusters from upgrading at the same time.
 	//= docs/spec/fleet.md#9-operations
 	//= type=exception
-	//= reason=no fleet-wide upgrade order; tracked in issue #96
+	//= reason=docs/runbooks/rolling-upgrade.md orders the upgrade by hand; nothing enforces or runs it; tracked in issue #194
 	//# A rolling upgrade MUST keep a majority of voters available at all times.
 	//= docs/spec/fleet.md#9-operations
 	//= type=exception

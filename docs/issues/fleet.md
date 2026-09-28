@@ -1915,3 +1915,18 @@ Files: `cmd/cask-apiserver/claims.go`, `cmd/cask-apiserver/types.go`,
 Done when: `go -C cmd/cask-apiserver test -race ./...` passes, and a test
 binds a claim at fence 3, deletes it, and finds fence 3 in the Device
 status.
+
+## demo: upgrade.sh runs the rolling upgrade on kind
+
+labels: ops, e2e
+
+Spec: docs/spec/fleet.md#9-operations
+> A rolling upgrade MUST keep a majority of voters available at all times.
+
+`docs/runbooks/rolling-upgrade.md` (#96) gives the order: one cluster at a time, and a quorum check before and after each step. Nothing runs it on the kind demo yet.
+
+Task: add `demo/kind/upgrade.sh`. For each of east, west, and north in turn: build and load a new image tag, run `kubectl set image` on the StatefulSet, wait for `rollout status`, wait for the APIService to be Available, then run `kubectl get devices` from every cluster. Stop at the first failure. Use the `cask_quorum_reachable` signal from #62 once it exists.
+
+Files: `demo/kind/upgrade.sh`, `demo/kind/README.md`
+
+Done when: `demo/kind/upgrade.sh` upgrades all three clusters and `kubectl get devices` answers from every cluster during the run.
