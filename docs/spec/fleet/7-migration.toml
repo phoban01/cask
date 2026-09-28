@@ -18,6 +18,8 @@ target = "docs/spec/fleet.md#7-migration"
 # 
 # The export records fences in the status of each Device and each DeviceClaim. The highest fence that the export recorded for an object is the highest of these fences for that object.
 # 
+# The fences that the export records for a Device MUST include the lastFence in its status.
+# 
 # The import MUST NOT seed an object's lock at a fence below the highest fence that the export recorded for that object.
 # 
 # The import MUST restore a Bound claim as Bound only when that claim alone holds the highest fence that the export recorded for its object.
@@ -76,6 +78,12 @@ The APIService MUST NOT become available while any imported object that other ob
 level = "MUST"
 quote = '''
 The initial index sequence for each resource type MUST be greater than the source etcd revision at export time.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The fences that the export records for a Device MUST include the lastFence in its status.
 '''
 
 [[spec]]

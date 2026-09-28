@@ -77,8 +77,8 @@ func planFences(objects []*unstructured.Unstructured) ([]LockSeed, error) {
 	var bound []*unstructured.Unstructured
 
 	// The export keeps status as the API returned it. The Device status
-	// carries the advertised lease fence, and each claim status carries
-	// the claim's fence.
+	// carries the advertised lease fence and lastFence, and each claim
+	// status carries the claim's fence.
 	for _, o := range objects {
 		switch o.GetKind() {
 		case "Device":
@@ -86,10 +86,19 @@ func planFences(objects []*unstructured.Unstructured) ([]LockSeed, error) {
 			if err != nil {
 				return nil, err
 			}
+			// A release clears the lease but keeps its fence in lastFence.
+			// The claim may be gone, so lastFence is the only record of
+			// that fence.
+			//= docs/spec/fleet.md#7-migration
+			//# The fences that the export records for a Device MUST include the lastFence in its status.
+			kept, err := fenceOf(o, "status", "lastFence")
+			if err != nil {
+				return nil, err
+			}
 			claim, _, _ := unstructured.NestedString(o.Object, "status", "lease", "claim")
 			cluster, _, _ := unstructured.NestedString(o.Object, "status", "lease", "cluster")
 			advertised[o.GetName()] = lease{claim: claim, cluster: cluster, fence: f}
-			highest[o.GetName()] = max(highest[o.GetName()], f)
+			highest[o.GetName()] = max(highest[o.GetName()], f, kept)
 		case "DeviceClaim":
 			f, err := fenceOf(o, "status", "fence")
 			if err != nil {

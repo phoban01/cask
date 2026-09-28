@@ -44,6 +44,9 @@ type DeviceStatus struct {
 	Phase string `json:"phase,omitempty"`
 	// Lease names the current holder when Phase is Leased.
 	Lease *LeaseRef `json:"lease,omitempty"`
+	// LastFence is the highest fence the device has advertised. A release
+	// keeps it, and no write lowers it. The cutover export reads it.
+	LastFence uint64 `json:"lastFence,omitempty"`
 }
 
 // LeaseRef names a lease holder and its fencing token.

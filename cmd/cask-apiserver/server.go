@@ -203,6 +203,12 @@ func (s *apiServer) serveUpdate(w http.ResponseWriter, r *http.Request, resource
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if resource == "devices" {
+		if raw, err = s.keepLastFence(r.Context(), name, raw, expect); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 	raw, rv, err := s.store.update(r.Context(), resource, name, raw, expect)
 	if err != nil {
 		httpStoreErr(w, err)
@@ -211,13 +217,45 @@ func (s *apiServer) serveUpdate(w http.ResponseWriter, r *http.Request, resource
 	writeRaw(w, http.StatusOK, stampRV(raw, rv))
 }
 
+// keepLastFence sets the lastFence of a device update to at least the
+// fence that the stored version keeps. It reads the version at expect. If
+// the device has moved on, it leaves raw as it is, because the update
+// then fails its compare-and-set.
+func (s *apiServer) keepLastFence(ctx context.Context, name string, raw []byte, expect uint64) ([]byte, error) {
+	stored, rv, err := s.store.get(ctx, "devices", name)
+	if err != nil || rv != expect {
+		return raw, nil // the update reports the error or the conflict
+	}
+	var old, dev Device
+	if err := json.Unmarshal(stored, &old); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(raw, &dev); err != nil {
+		return nil, err
+	}
+	//= docs/spec/fleet.md#5-claims-and-fencing
+	//# A write to a Device MUST NOT lower its lastFence.
+	kept := keptFence(old.Status)
+	if dev.Status.LastFence >= kept {
+		return raw, nil
+	}
+	dev.Status.LastFence = kept
+	return json.Marshal(dev)
+}
+
 func (s *apiServer) serveDelete(w http.ResponseWriter, r *http.Request, resource, name string) {
 	// Deleting a Bound claim releases its device's global lease.
 	if resource == "deviceclaims" {
 		if raw, _, err := s.store.get(r.Context(), resource, name); err == nil {
 			var claim DeviceClaim
 			if json.Unmarshal(raw, &claim) == nil {
-				s.claims.release(r.Context(), claim)
+				// The device must keep the claim's fence before the
+				// claim goes. If it does not, the delete fails and the
+				// client retries.
+				if err := s.claims.release(r.Context(), claim); err != nil {
+					httpStoreErr(w, err)
+					return
+				}
 			}
 		}
 	}

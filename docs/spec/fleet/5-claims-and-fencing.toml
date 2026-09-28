@@ -18,6 +18,12 @@ target = "docs/spec/fleet.md#5-claims-and-fencing"
 # 
 # A status write MUST NOT lower an advertised fence.
 # 
+# A Device status MUST keep in its lastFence field the highest fence that the Device has advertised.
+# 
+# A write to a Device MUST NOT lower its lastFence. A release is such a write.
+# 
+# Deleting a claim MUST NOT complete before the lastFence of its Device is at least the claim's fence.
+# 
 # A controller MUST reconcile only claims whose status names its own cluster.
 # 
 # When a claim's session lapses, the controller MUST set the claim to Lost.
@@ -74,6 +80,24 @@ A receiver MUST reject an effect whose fence is lower than the highest fence it 
 level = "MUST"
 quote = '''
 A status write MUST NOT lower an advertised fence.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A Device status MUST keep in its lastFence field the highest fence that the Device has advertised.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+A write to a Device MUST NOT lower its lastFence.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Deleting a claim MUST NOT complete before the lastFence of its Device is at least the claim's fence.
 '''
 
 [[spec]]

@@ -221,6 +221,42 @@ func TestPlanFencesKeepsOnlyTheSoleHolderOfTheHighestFence(t *testing.T) {
 	}
 }
 
+// A released lease leaves only lastFence. The import seeds the lock at
+// lastFence, and a Bound claim below it is stale.
+func TestPlanFencesReadsLastFence(t *testing.T) {
+	//= docs/spec/fleet.md#7-migration
+	//= type=test
+	//# The fences that the export records for a Device MUST include the lastFence in its status.
+	released := device("d1", "uid-d1")
+	_ = unstructured.SetNestedMap(released.Object, map[string]any{
+		"phase": "Available", "lastFence": int64(7),
+	}, "status")
+	stale := leasedDevice("d2", "old", "east", 3)
+	_ = unstructured.SetNestedField(stale.Object, int64(6), "status", "lastFence")
+	objects := []*unstructured.Unstructured{released, stale, boundClaim("old", "d2", "east", 3)}
+	seeds, err := planFences(objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []LockSeed{{Device: "d1", Fence: 7}, {Device: "d2", Fence: 6}}
+	if !reflect.DeepEqual(seeds, want) {
+		t.Fatalf("seeds = %+v\nwant %+v", seeds, want)
+	}
+	if p := phaseOf(t, objects, "old"); p != "Lost" {
+		t.Fatalf("claim below lastFence = %s, want Lost", p)
+	}
+
+	// Control: without lastFence, the export records no fence for d1.
+	unstructured.RemoveNestedField(released.Object, "status", "lastFence")
+	seeds, err = planFences([]*unstructured.Unstructured{released})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seeds) != 0 {
+		t.Fatalf("seeds without lastFence = %+v, want none", seeds)
+	}
+}
+
 func TestPlanFencesRejectsANegativeFence(t *testing.T) {
 	if _, err := planFences([]*unstructured.Unstructured{leasedDevice("d", "c", "east", -1)}); err == nil {
 		t.Fatal("planFences accepted a negative fence")
