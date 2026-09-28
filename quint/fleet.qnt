@@ -76,6 +76,7 @@
 // quint-check: control=stepCreateUnguarded:NoIncarnationCollapse
 // quint-check: control=stepReflectorObjectSeqRV:ReflectorMatchesIndex
 // quint-check: verify-steps=7
+// quint-check: verify-split=each
 module fleet {
   pure val NAMES = Set("a", "b")
   pure val CLUSTERS = Set("east", "west")

@@ -13,15 +13,24 @@
 #                                            at least one is required
 #   // quint-check: step=step                good step (default: step)
 #   // quint-check: verify-steps=12          `quint verify` bound (default: 12)
+#   // quint-check: verify-split=each        verify each invariant in its own
+#                                            CI job (default: none, one job)
+#   // quint-check: verify-init=initA,initB  verify from each init in its own
+#                                            CI job; together they must cover init
 #
 # A module without a quint-check line is not checked. A module with
 # invariants but no control fails the gate.
 #
-# Usage: scripts/quint-check.sh [--verify] [--verify-only] [--module FILE] [--list]
+# Usage: scripts/quint-check.sh [--verify] [--verify-only] [--module FILE]
+#          [--invariants A,B] [--list] [--verify-jobs]
 #   --verify       also run bounded `quint verify` for each module
 #   --verify-only  run only `quint verify` (CI runs one module per job)
 #   --module FILE  check only FILE
 #   --list         print the modules that have quint-check lines
+#   --invariants A,B  with --verify-only: verify only these invariants
+#   --init NAME    with --verify-only: verify from this init action
+#   --verify-jobs  print the CI verify jobs as JSON: one per module, or one
+#                  per invariant for a module with verify-split=each
 #
 #= docs/spec/fleet.md#10-verification
 ## The Quint model MUST include a negative control for each invariant that
@@ -35,12 +44,18 @@ VERIFY=0
 CHECKS=1
 ONLY=""
 LIST=0
+VJOBS=0
+ONLYINV=""
+ONLYINIT=""
 while [ $# -gt 0 ]; do
   case $1 in
     --verify) VERIFY=1 ;;
     --verify-only) VERIFY=1; CHECKS=0 ;;
     --module) ONLY=${2:?--module needs a file}; shift ;;
     --list) LIST=1 ;;
+    --verify-jobs) VJOBS=1 ;;
+    --invariants) ONLYINV=${2:?--invariants needs a list}; shift ;;
+    --init) ONLYINIT=${2:?--init needs an action}; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -59,7 +74,7 @@ die() { echo "FAIL: $*" >&2; exit 1; }
 # and VSTEPS from the quint-check header lines of SPEC.
 parse() {
   local spec=$1 line key val inv found
-  INVARIANTS=() CONTROLS=() GOOD=step VSTEPS=12
+  INVARIANTS=() CONTROLS=() GOOD=step VSTEPS=12 VSPLIT=none VINITS=()
   while IFS= read -r line; do
     line=${line#*quint-check:}
     line=${line#"${line%%[![:space:]]*}"}
@@ -78,6 +93,11 @@ parse() {
       verify-steps)
         [[ $val =~ ^[0-9]+$ ]] || die "$spec: verify-steps must be a number, got $val"
         VSTEPS=$val ;;
+      verify-init)
+        IFS=, read -r -a VINITS <<<"$val" ;;
+      verify-split)
+        [[ $val =~ ^(each|none)$ ]] || die "$spec: verify-split must be each or none, got $val"
+        VSPLIT=$val ;;
       *) die "$spec: unknown quint-check key: $key" ;;
     esac
   done < <(grep -E '^[[:space:]]*//[[:space:]]*quint-check:' "$spec")
@@ -124,6 +144,26 @@ if [ -n "$ONLY" ]; then
 fi
 if [ $LIST -eq 1 ]; then printf "%s\n" "${SPECS[@]}"; exit 0; fi
 
+# --verify-jobs prints the CI verify matrix. A module with verify-split=each
+# gets one job per invariant, so its slowest invariant sets the wall time.
+if [ $VJOBS -eq 1 ]; then
+  jobs=()
+  for spec in "${SPECS[@]}"; do
+    parse "$spec"
+    invs=("")
+    [ "$VSPLIT" = each ] && invs=("${INVARIANTS[@]}")
+    inits=("")
+    [ ${#VINITS[@]} -gt 0 ] && inits=("${VINITS[@]}")
+    for ini in "${inits[@]}"; do
+      for inv in "${invs[@]}"; do
+        jobs+=("{\"module\":\"$spec\",\"invariants\":\"$inv\",\"init\":\"$ini\"}")
+      done
+    done
+  done
+  (IFS=,; echo "[${jobs[*]}]")
+  exit 0
+fi
+
 # Parse every header first, so a bad header fails before the slow runs.
 for spec in "${SPECS[@]}"; do parse "$spec"; done
 
@@ -142,8 +182,19 @@ for spec in "${SPECS[@]}"; do
     done
   fi
   if [ $VERIFY -eq 1 ]; then
-    echo "== quint verify (Apalache, bounded at $VSTEPS steps)"
-    q verify "$spec" --step="$GOOD" --max-steps="$VSTEPS" --invariants "${INVARIANTS[@]}"
+    VINV=("${INVARIANTS[@]}")
+    if [ -n "$ONLYINV" ]; then
+      IFS=, read -r -a VINV <<<"$ONLYINV"
+      for inv in "${VINV[@]}"; do
+        found=0
+        for key in "${INVARIANTS[@]}"; do [ "$key" = "$inv" ] && found=1; done
+        [ $found -eq 1 ] || die "$spec: --invariants names $inv, which is not in the invariants line"
+      done
+    fi
+    echo "== quint verify (Apalache, bounded at $VSTEPS steps): ${VINV[*]} ${ONLYINIT:+from $ONLYINIT}"
+    initarg=()
+    [ -n "$ONLYINIT" ] && initarg=(--init="$ONLYINIT")
+    q verify "$spec" "${initarg[@]}" --step="$GOOD" --max-steps="$VSTEPS" --invariants "${VINV[@]}"
   fi
 done
 echo "quint: ok"

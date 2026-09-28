@@ -55,6 +55,7 @@
 // quint-check: control=stepCarryCountsAnyAck:NoCommittedLoss
 // quint-check: control=stepRemoveNoJoint:NoCommittedLoss
 // quint-check: verify-steps=6
+// quint-check: verify-init=initGrow,initShrink
 module core_change {
   type Phase = Old | Joint | New
 
@@ -145,6 +146,11 @@ module core_change {
   // nondet, not any: with any, the simulator samples one branch far less
   // often, and a control that needs the grow misses its bug.
   action init = { nondet s = oneOf(Set(false, true)) initWith(s) }
+
+  // The two init cases on their own. CI verifies each in its own job
+  // (verify-init), which covers the same states as init in less wall time.
+  action initGrow = initWith(false)
+  action initShrink = initWith(true)
 
   // ---- writes ------------------------------------------------------------
 
