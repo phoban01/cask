@@ -1598,3 +1598,30 @@ the returned resourceVersion.
 Files: `cmd/cask-apiserver/storage/index.go`, `cmd/cask-apiserver/storage/lostround_test.go`
 
 Done when: the new test passes, and fails without the change.
+
+## security: refuse to serve consensus without mutual TLS
+
+labels: membership
+
+Spec: docs/spec/fleet.md#8-security
+> The cask client API and control endpoints MUST NOT be reachable outside the pod without authentication.
+
+Since #48, `--consensus-cert`, `--consensus-key`, and `--consensus-ca` put
+mutual TLS on the consensus listener. The acceptor RPC, `/roster`,
+`/roster/join`, `/roster/keys`, and the admin endpoints then need a client
+certificate that the fleet CA signed. Without the flags, both binaries log
+a warning and serve all of these in plaintext to anyone who can reach the
+port. The demo and e2e now pass the flags, so the fallback only serves
+unit tests.
+
+Task: make `cmd/cask-apiserver` exit when `--listen-consensus` is set
+without the three consensus flags, unless `--insecure-consensus` is set.
+Keep the plaintext path for tests behind that flag. Then remove the
+control-endpoint half of the Duvet exception in
+`cmd/cask-apiserver/main.go`; the API half stays on #38.
+
+Files: `cmd/cask-apiserver/main.go`, `internal/mtls/mtls.go`
+
+Done when: `go -C cmd/cask-apiserver test -race ./...` passes, and a test
+shows that start fails without the flags and without
+`--insecure-consensus`.

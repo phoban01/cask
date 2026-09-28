@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -20,6 +21,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "gen-consensus-certs" {
+		if err := genConsensusCerts(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "gen-consensus-certs:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	var (
 		listen  = flag.String("listen", ":9443", "address to serve the API group on")
 		cluster = flag.String("cluster", "", "this cluster's name (stamped on claims it manages); required")
@@ -72,8 +80,9 @@ func main() {
 		os.Exit(1)
 	}
 	if consensusTLS != nil {
-		log.Warn("consensus TLS files are valid but not used yet; tracked in issue #48")
+		log.Info("consensus traffic uses mutual TLS", "cert", consensusFiles.Cert, "ca", consensusFiles.CA)
 	}
+	network := consensusNetwork(consensusTLS)
 
 	// The storage engine. cask is designed to be embedded: with
 	// --listen-consensus each apiserver carries its own acceptor and the
@@ -155,7 +164,7 @@ func main() {
 			if dynamic {
 				// Every peer call carries a context, and the client also has
 				// a timeout, so no peer request can hang forever.
-				hc := transport.TCP{}.HTTPClient()
+				hc := network.HTTPClient()
 				hc.Timeout = 10 * time.Second
 				mem = newMembership(membershipConfig{
 					ID:        *self,
@@ -172,19 +181,22 @@ func main() {
 				mux.Handle(transport.ConnectHandler(local))
 				h = mux
 			}
-			// The consensus listener and the peer dialer use plain HTTP.
-			// Anyone who can reach --listen-consensus can propose.
+			// With the consensus flags, the listener serves the acceptor and
+			// the roster endpoints only to a peer with a certificate that the
+			// fleet CA signed. Without them, it serves anyone who can reach
+			// --listen-consensus. The aggregated API has no delegated auth.
 			//= docs/spec/fleet.md#8-security
 			//= type=exception
-			//= reason=consensus traffic is plaintext; tracked in issues #47 and #48
-			//# Consensus traffic between members MUST use mutual TLS.
-			//= docs/spec/fleet.md#8-security
-			//= type=exception
-			//= reason=no client certificate on the consensus listener and no delegated auth on the API; tracked in issues #48 and #38
+			//= reason=the control endpoints are open when the consensus TLS flags are absent, and the API has no delegated auth; tracked in issues #158 and #38
 			//# The cask client API and control endpoints MUST NOT be reachable outside the pod without authentication.
+			ln, err := network.Listen(ctx, *consLn)
+			if err != nil {
+				log.Error("consensus listen", "listen", *consLn, "err", err)
+				os.Exit(1)
+			}
 			go func() {
-				log.Info("embedded cask acceptor serving", "listen", *consLn)
-				if err := http.ListenAndServe(*consLn, h); err != nil {
+				log.Info("embedded cask acceptor serving", "listen", *consLn, "mtls", consensusTLS != nil)
+				if err := http.Serve(ln, h); err != nil {
 					log.Error("consensus server stopped", "err", err)
 					os.Exit(1)
 				}
@@ -201,7 +213,7 @@ func main() {
 			listKeys = mem.listDataKeys
 			break
 		}
-		hc := transport.TCP{}.HTTPClient()
+		hc := network.HTTPClient()
 		var clients []caspaxos.AcceptorClient
 		for _, addr := range splitCSV(*peers) {
 			if local != nil && addr == *adv {
@@ -290,6 +302,19 @@ func main() {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
+}
+
+// consensusNetwork returns the network for consensus traffic: mutual TLS
+// when the member has a consensus identity, plain TCP otherwise. The
+// listener and every peer client come from it: acceptor RPCs, roster
+// calls, and key listings.
+func consensusNetwork(cfg *mtls.Config) transport.Network {
+	if cfg == nil {
+		return transport.TCP{}
+	}
+	//= docs/spec/fleet.md#8-security
+	//# Consensus traffic between members MUST use mutual TLS.
+	return transport.TLS{Net: transport.TCP{}, Server: cfg.Server, Client: cfg.Client}
 }
 
 func splitCSV(s string) []string {

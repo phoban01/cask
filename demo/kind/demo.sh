@@ -24,6 +24,18 @@ step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 step "Building the demo image (cask-apiserver with embedded cask)"
 docker build -q -f "$REPO_ROOT/demo/kind/Dockerfile" -t "$IMG" "$REPO_ROOT"
 
+# Consensus traffic runs mutual TLS. The image makes a fleet CA and one
+# certificate per member. The files stay in .consensus-certs between runs,
+# so a re-run on live clusters keeps one CA; teardown.sh deletes them.
+CERTS="$PWD/.consensus-certs"
+if [ ! -f "$CERTS/ca.crt" ]; then
+  step "Making the consensus CA and one certificate per member"
+  mkdir -p "$CERTS"
+  docker run --rm --user "$(id -u):$(id -g)" -v "$CERTS:/out" "$IMG" \
+    gen-consensus-certs --out /out "${CLUSTERS[@]}"
+fi
+b64() { base64 < "$1" | tr -d '\n'; }
+
 step "Creating kind clusters: ${CLUSTERS[*]}"
 for c in "${CLUSTERS[@]}"; do
   kind get clusters 2>/dev/null | grep -qx "$c" || kind create cluster --name "$c" --wait 120s
@@ -45,6 +57,9 @@ id=101
 for c in "${CLUSTERS[@]}"; do
   kind load docker-image "$IMG" --name "$c"
   sed -e "s/__CLUSTER__/$c/" -e "s/__ID__/$id/" -e "s/__CASK_PEERS__/$CASK_PEERS/" \
+    -e "s|__CONSENSUS_CA__|$(b64 "$CERTS/ca.crt")|" \
+    -e "s|__CONSENSUS_CERT__|$(b64 "$CERTS/$c.crt")|" \
+    -e "s|__CONSENSUS_KEY__|$(b64 "$CERTS/$c.key")|" \
     manifests/apiserver.yaml | kubectl --context "kind-$c" apply -f -
   id=$((id + 1))
 done
