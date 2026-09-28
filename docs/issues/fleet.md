@@ -1434,3 +1434,80 @@ Files: `docs/spec/fleet.md`, `quint/fleet.qnt`
 
 Done when: the spec states which resourceVersion a watch event carries,
 and `devbox run quint` shows the resume control fails.
+
+## ci: fail when Go files are not gofmt-clean
+
+labels: ci
+
+Spec: docs/spec/fleet.md#10-verification
+> CI MUST run the unit tests with the race detector.
+
+Several files on main are not gofmt-clean, for example
+`internal/caspaxos/ballotspace_test.go`, `internal/caspaxos/unknown_test.go`,
+`internal/owner/manager.go`, `cmd/cask/mint.go`, and
+`cmd/cask-apiserver/types.go`. Nothing in CI checks formatting, so the
+drift grows and agents keep reporting it.
+
+Task: run `gofmt -w` on every Go file in both modules. Add a step to the
+`go` job in `.github/workflows/verify.yml` that fails when
+`gofmt -l .` prints anything. Add the same check to `devbox run verify`.
+Check that gofmt does not rewrite any `//=` Duvet line (citations must
+stay inside function bodies).
+
+Files: `.github/workflows/verify.yml`, `devbox.json`, the unformatted files
+
+Done when: `test -z "$(gofmt -l .)"` passes and `devbox run duvet-ci` passes.
+
+
+
+## roster: Remove must not change the core outside a joint change
+
+labels: membership
+
+Spec: docs/spec/fleet.md#6-membership
+> The voter set MUST change only by joint-consensus reconfiguration of the roster.
+
+Found in the second review of #117. A quiescent `Roster.Remove`
+(`internal/roster/roster.go`) drops a voter from Core directly and bumps
+ConfigGen. It never runs joint consensus, so the carry hook never runs.
+Reproduced: core {1..5}, voters 1 and 2 hung while 5 keys commit on
+{3,4,5}, then Remove(5) and Remove(4) leave core {1,2,3}; with voter 3
+stopped, all 5 keys read back empty.
+
+Task: when a carry hook is set, route a core-changing Remove through
+`Reconfigure` (joint change plus carry), or refuse it. Add the review's
+`TestReviewRemoveShrinkNoCarry` as a regression test. Add a shrink to
+`quint/core_change.qnt` with a negative control that removes a voter
+without a joint change.
+
+Files: `internal/roster/roster.go`, `quint/core_change.qnt`, tests
+
+Done when: the regression test passes and `devbox run quint` prints `quint: ok`.
+
+
+
+## apiserver: legacy fleetStore update and delete must compare on sequence
+
+labels: apiserver
+
+Spec: docs/spec/fleet.md#3-storage-model
+> An update MUST use a compare-and-set on the resourceVersion the client supplied.
+
+Found while building the storage.Interface in #127 to #131. The legacy
+`fleetStore` in `cmd/cask-apiserver/store.go` still has two races:
+
+- `update` compares values, not sequences. If a value changes and then
+  changes back, a stale resourceVersion passes the check.
+- `delete` reads, then deletes without a condition. A concurrent update
+  between the two is silently deleted.
+
+Task: switch `update` to `mvcc.CASSeq` and `delete` to `mvcc.DeleteSeq`
+on the sequence read (both added in #130 and #131). Add a test for each
+race. Once the generic server (#38) replaces the legacy handlers, this
+code goes away; until then it serves the demo.
+
+Files: `cmd/cask-apiserver/store.go`, `cmd/cask-apiserver/server_test.go`
+
+Done when: `go -C cmd/cask-apiserver test -race ./...` passes with both new tests.
+
+
