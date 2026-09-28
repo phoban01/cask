@@ -131,6 +131,12 @@ A receiver MUST reject an effect whose fence is lower than the highest fence it 
 
 A status write MUST NOT lower an advertised fence.
 
+A Device status MUST keep in its lastFence field the highest fence that the Device has advertised.
+
+A write to a Device MUST NOT lower its lastFence. A release is such a write.
+
+Deleting a claim MUST NOT complete before the lastFence of its Device is at least the claim's fence.
+
 A controller MUST reconcile only claims whose status names its own cluster.
 
 When a claim's session lapses, the controller MUST set the claim to Lost.
@@ -206,6 +212,8 @@ The APIService MUST NOT become available while any imported object that other ob
 The initial index sequence for each resource type MUST be greater than the source etcd revision at export time.
 
 The export records fences in the status of each Device and each DeviceClaim. The highest fence that the export recorded for an object is the highest of these fences for that object.
+
+The fences that the export records for a Device MUST include the lastFence in its status.
 
 The import MUST NOT seed an object's lock at a fence below the highest fence that the export recorded for that object.
 

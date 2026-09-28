@@ -127,20 +127,134 @@ func (c *claimController) renew(ctx context.Context, claim DeviceClaim, rv uint6
 	return nil
 }
 
-// release drops a claim's lease (called when the claim object is deleted).
-func (c *claimController) release(ctx context.Context, claim DeviceClaim) {
-	if claim.Status.Cluster != c.cluster || claim.Status.Phase != ClaimBound {
-		return
+// release drops a claim's lease. The server calls it before it deletes the
+// claim object. An error means the device status does not keep the
+// claim's fence yet, so the delete must not go ahead.
+func (c *claimController) release(ctx context.Context, claim DeviceClaim) error {
+	own := claim.Status.Cluster == c.cluster
+	if own && claim.Status.Phase == ClaimBound {
+		session := claimSessionID(c.cluster, claim.Name)
+		//= docs/spec/fleet.md#5-claims-and-fencing
+		//# Deleting a Bound claim MUST release the object's lock.
+		if err := c.store.locks.Release(ctx, deviceLockName(claim.Spec.DeviceName), session); err != nil {
+			c.log.Warn("lock release", "device", claim.Spec.DeviceName, "err", err)
+		}
 	}
-	session := claimSessionID(c.cluster, claim.Name)
+	if claim.Status.Fence == 0 {
+		return nil
+	}
+	// The claim object goes next, and with it the claim's fence. The
+	// device keeps the fence first, so the cutover export still sees it.
 	//= docs/spec/fleet.md#5-claims-and-fencing
-	//# Deleting a Bound claim MUST release the object's lock.
-	if err := c.store.locks.Release(ctx, deviceLockName(claim.Spec.DeviceName), session); err != nil {
-		c.log.Warn("lock release", "device", claim.Spec.DeviceName, "err", err)
+	//# Deleting a claim MUST NOT complete before the lastFence of its Device is at least the claim's fence.
+	err := c.releaseDeviceLease(ctx, claim.Spec.DeviceName, claim.Status.Fence, own)
+	if errors.Is(err, errNotFound) {
+		return nil // no device, so no status to keep the fence in
 	}
-	if err := c.setDeviceLease(ctx, claim.Spec.DeviceName, nil); err != nil && !errors.Is(err, errNotFound) {
-		c.log.Warn("device status clear", "device", claim.Spec.DeviceName, "err", err)
+	return err
+}
+
+// statusRetries bounds the compare-and-set retries of a device status write.
+const statusRetries = 5
+
+// updateDeviceStatus reads the device and compares and sets the status
+// that next returns. next returns false when no write is needed. A
+// conflict makes it read the device again and retry.
+func (c *claimController) updateDeviceStatus(ctx context.Context, name string,
+	next func(DeviceStatus) (DeviceStatus, bool)) error {
+	var err error
+	for range statusRetries {
+		var (
+			raw, out []byte
+			rv       uint64
+			dev      Device
+		)
+		//= docs/spec/fleet.md#3-storage-model
+		//# The extension server MUST re-read an object before it retries a write that returned a conflict.
+		if raw, rv, err = c.store.get(ctx, "devices", name); err != nil {
+			return err
+		}
+		if err = json.Unmarshal(raw, &dev); err != nil {
+			return err
+		}
+		status, write := next(dev.Status)
+		if !write {
+			return nil
+		}
+		dev.Status = status
+		dev.ResourceVersion = ""
+		if out, err = json.Marshal(dev); err != nil {
+			return err
+		}
+		if _, _, err = c.store.update(ctx, "devices", name, out, rv); !errors.Is(err, errConflict) {
+			return err
+		}
 	}
+	return err
+}
+
+// keptFence is the highest fence that status shows: its lastFence or its
+// lease fence. A device written before lastFence existed has only the
+// lease fence.
+func keptFence(st DeviceStatus) uint64 {
+	if st.Lease != nil {
+		return max(st.LastFence, st.Lease.Fence)
+	}
+	return st.LastFence
+}
+
+// setDeviceLease advertises ref as the device's lease. The authoritative
+// lease is the LOCK; this is observability for kubectl and the fence
+// record that the cutover export reads.
+func (c *claimController) setDeviceLease(ctx context.Context, name string, ref *LeaseRef) error {
+	return c.updateDeviceStatus(ctx, name, func(st DeviceStatus) (DeviceStatus, bool) {
+		// Fencing on the STATUS write itself: never regress the advertised
+		// fence — a zombie's stale write must not mask a live higher lease,
+		// and must not re-advertise a fence that a release already let go.
+		//= docs/spec/fleet.md#5-claims-and-fencing
+		//# A status write MUST NOT lower an advertised fence.
+		//= docs/spec/fleet.md#5-claims-and-fencing
+		//# A receiver MUST reject an effect whose fence is lower than the highest fence it has accepted for that object.
+		//= docs/spec/fleet.md#5-claims-and-fencing
+		//# A write to a Device MUST NOT lower its lastFence.
+		kept := keptFence(st)
+		if ref.Fence < kept || (ref.Fence == kept && (st.Lease == nil || *st.Lease != *ref)) {
+			// No counter counts this rejection, and none counts lease expiries.
+			//= docs/spec/fleet.md#9-operations
+			//= type=exception
+			//= reason=no metrics yet; tracked in issue #63
+			//# Cask MUST expose counters for lease expiries and for rejected fence regressions.
+			return st, false
+		}
+		if st.Lease != nil && *st.Lease == *ref && st.LastFence == ref.Fence {
+			return st, false // already advertised
+		}
+		//= docs/spec/fleet.md#5-claims-and-fencing
+		//# A Device status MUST keep in its lastFence field the highest fence that the Device has advertised.
+		return DeviceStatus{Phase: DeviceLeased, Lease: ref, LastFence: ref.Fence}, true
+	})
+}
+
+// releaseDeviceLease records a released claim's fence in the device's
+// lastFence. With clear, it also clears the lease when no higher fence
+// holds it.
+func (c *claimController) releaseDeviceLease(ctx context.Context, name string, fence uint64, clear bool) error {
+	return c.updateDeviceStatus(ctx, name, func(st DeviceStatus) (DeviceStatus, bool) {
+		// A release keeps the fence. It clears only the lease.
+		//= docs/spec/fleet.md#5-claims-and-fencing
+		//# A write to a Device MUST NOT lower its lastFence.
+		next := DeviceStatus{Phase: st.Phase, Lease: st.Lease, LastFence: max(keptFence(st), fence)}
+		// A zombie's release must not clear a successor's higher lease.
+		//= docs/spec/fleet.md#5-claims-and-fencing
+		//# A status write MUST NOT lower an advertised fence.
+		if clear && st.Lease != nil && st.Lease.Fence <= fence {
+			next.Lease = nil
+		}
+		if next.Lease == nil {
+			next.Phase = DeviceAvailable
+		}
+		return next, next.Phase != st.Phase || next.Lease != st.Lease || next.LastFence != st.LastFence
+	})
 }
 
 // setClaimStatus CAS-updates a claim's status against the version reconciled.
@@ -160,49 +274,6 @@ func (c *claimController) setClaimStatus(ctx context.Context, claim DeviceClaim,
 		//= docs/spec/fleet.md#3-storage-model
 		//# A retried write MUST be a compare-and-set, never a blind reapplication of a change.
 		return nil // the claim moved (user update / delete); next tick re-reads
-	} else if err != nil {
-		return err
-	}
-	return nil
-}
-
-// setDeviceLease updates a device's advertised lease (nil = Available). The
-// authoritative lease is the LOCK; this is observability for kubectl.
-func (c *claimController) setDeviceLease(ctx context.Context, name string, ref *LeaseRef) error {
-	raw, rv, err := c.store.get(ctx, "devices", name)
-	if err != nil {
-		return err
-	}
-	var dev Device
-	if err := json.Unmarshal(raw, &dev); err != nil {
-		return err
-	}
-	// Fencing on the STATUS write itself: never regress the advertised fence
-	// — a zombie's stale clear/downgrade must not mask a live higher lease.
-	//= docs/spec/fleet.md#5-claims-and-fencing
-	//# A status write MUST NOT lower an advertised fence.
-	//= docs/spec/fleet.md#5-claims-and-fencing
-	//# A receiver MUST reject an effect whose fence is lower than the highest fence it has accepted for that object.
-	if ref != nil && dev.Status.Lease != nil && dev.Status.Lease.Fence > ref.Fence {
-		// No counter counts this rejection, and none counts lease expiries.
-		//= docs/spec/fleet.md#9-operations
-		//= type=exception
-		//= reason=no metrics yet; tracked in issue #63
-		//# Cask MUST expose counters for lease expiries and for rejected fence regressions.
-		return nil
-	}
-	if ref == nil {
-		dev.Status = DeviceStatus{Phase: DeviceAvailable}
-	} else {
-		dev.Status = DeviceStatus{Phase: DeviceLeased, Lease: ref}
-	}
-	dev.ResourceVersion = ""
-	next, err := json.Marshal(dev)
-	if err != nil {
-		return err
-	}
-	if _, _, err := c.store.update(ctx, "devices", name, next, rv); errors.Is(err, errConflict) {
-		return nil // raced another status writer; next reconcile converges
 	} else if err != nil {
 		return err
 	}

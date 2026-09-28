@@ -57,6 +57,9 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST]: A controller MUST include the claim's fence in every effect it applies for that object.
     TEXT[!MUST,implementation,implication,test]: A receiver MUST reject an effect whose fence is lower than the highest fence it has accepted for that object.
     TEXT[!MUST,implementation,test]: A status write MUST NOT lower an advertised fence.
+    TEXT[!MUST,implementation,implication,test]: A Device status MUST keep in its lastFence field the highest fence that the Device has advertised.
+    TEXT[!MUST,implementation,implication,test]: A write to a Device MUST NOT lower its lastFence.
+    TEXT[!MUST,implementation,implication,test]: Deleting a claim MUST NOT complete before the lastFence of its Device is at least the claim's fence.
     TEXT[!MUST,implementation]: A controller MUST reconcile only claims whose status names its own cluster.
     TEXT[!MUST,implementation,implication,test]: When a claim's session lapses, the controller MUST set the claim to Lost.
     TEXT[!MUST]: A controller MUST NOT apply an effect for a claim it knows to be Lost.
@@ -96,6 +99,7 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST,exception]: The APIService MUST NOT become available before the import has completed.
     TEXT[!MUST,exception]: The APIService MUST NOT become available while any imported object that other objects reference by ownerReference is missing.
     TEXT[!MUST,exception]: The initial index sequence for each resource type MUST be greater than the source etcd revision at export time.
+    TEXT[!MUST,implementation,implication,test]: The fences that the export records for a Device MUST include the lastFence in its status.
     TEXT[!MUST,implementation,implication,test]: The import MUST NOT seed an object's lock at a fence below the highest fence that the export recorded for that object.
     TEXT[!MUST,implementation,implication,test]: The import MUST restore a Bound claim as Bound only when that claim alone holds the highest fence that the export recorded for its object.
     TEXT[!MUST,implementation,implication,test]: The import MUST write a Bound claim as Lost when it does not restore that claim as Bound.
