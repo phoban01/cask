@@ -85,7 +85,10 @@ protocol code.
   the range's applied HLC (a later write can commit below a future `t`).
   `SnapshotRead` now carries the guard `t <= hlc[range]`; the implementation
   must enforce the same rule (callers wanting fresher snapshots first advance
-  the HLC — the §4.6 `GetReadVersion` mechanism).
+  the HLC — the §4.6 `GetReadVersion` mechanism). `mvcc.SnapshotAt` keeps
+  it per register (#181): it refuses a `t` ahead of the local clock with
+  `ErrSnapshotAhead`, and it raises the key's read floor to `t` in the read
+  round, so every later write on the key is stamped above `t`.
 - `CrossRange.tla` checks its contract against a single nondeterministic
   witness read rather than an accumulating read set (whose subsets blow up
   the state space): reads never affect `hlc`/`history`, so every multi-read

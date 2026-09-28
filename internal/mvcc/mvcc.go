@@ -66,6 +66,21 @@ type history struct {
 	// Seq < CompactedBelow have been garbage-collected. A watcher that tries to
 	// resume from before this point gets a "compacted" signal and must re-list.
 	CompactedBelow uint64 `json:"compacted_below,omitempty"`
+	// ReadFloor is the highest snapshot time a read has taken on this key.
+	// The next version is stamped above it, so a write can never land at or
+	// below a snapshot that was already read. It is the per-register form of
+	// the read guard t <= hlc[range] in quint/cross_range.qnt.
+	ReadFloor hlc.Timestamp `json:"read_floor,omitzero"`
+}
+
+// clock is the key's clock: the head's commit time or the read floor,
+// whichever is later. The next version is stamped above it.
+func (h history) clock() hlc.Timestamp {
+	head, _ := h.head()
+	if head.HLC.Less(h.ReadFloor) {
+		return h.ReadFloor
+	}
+	return head.HLC
 }
 
 func decode(raw []byte) (history, error) {
@@ -136,7 +151,7 @@ type KV struct {
 type KVOption func(*KV)
 
 // WithLocalReader lets reads try lr before the full round. Every read path
-// (Get, GetAt, History, SnapshotAt) inherits it through read().
+// (Get, GetAt, History, SnapshotAt) tries it first.
 func WithLocalReader(lr LocalReader) KVOption { return func(kv *KV) { kv.local = lr } }
 
 // WithIncarnation sets the incarnation of the KV's OpIDs in place of a random
@@ -202,9 +217,10 @@ func (kv *KV) appendOp(op OpID, mk func(head Version, present bool) (value []byt
 		if err != nil {
 			return nil, err
 		}
-		// Stamp strictly after the previous version to keep per-key HLC
+		// Stamp strictly after the previous version and after every
+		// snapshot already read on the key. This keeps per-key HLC
 		// monotonic regardless of proposer retries or clock skew.
-		ts := kv.clock.Update(head.HLC)
+		ts := kv.clock.Update(h.clock())
 		h.Versions = append(h.Versions, Version{
 			Seq:       head.Seq + 1,
 			HLC:       ts,
@@ -386,10 +402,31 @@ func (kv *KV) GetAt(ctx context.Context, key []byte, seq uint64) (Version, bool,
 	return Version{}, false, nil
 }
 
+// ErrSnapshotAhead means a snapshot time is ahead of this KV's clock. The
+// read did not happen. The caller can retry once its clock has passed t, or
+// read at an earlier time.
+var ErrSnapshotAhead = errors.New("mvcc: snapshot time is ahead of the local clock")
+
 // SnapshotAt returns the newest version whose commit timestamp is at or before
 // t — the value the key held as of snapshot time t.
+//
+// A read at t is stable only if no later write can commit at or below t.
+// quint/cross_range.qnt states this as the guard t <= hlc[range], and its
+// control stepNoReadGuard shows the contract breaks without it. SnapshotAt
+// keeps the rule in two parts:
+//
+//   - It refuses a t ahead of this KV's clock with ErrSnapshotAhead. It
+//     does not wait. A future t would push every later write on the key
+//     into the future.
+//   - If the key's clock (the head's commit time or the read floor) is
+//     below t, the read raises the key's read floor to t in the same
+//     consensus round. Every later write on the key is then stamped
+//     above t.
+//
+// The owner cache serves the read only if the key's clock is already at or
+// above t.
 func (kv *KV) SnapshotAt(ctx context.Context, key []byte, t hlc.Timestamp) (Version, bool, error) {
-	h, err := kv.read(ctx, key)
+	h, err := kv.readAt(ctx, key, t)
 	if err != nil {
 		return Version{}, false, err
 	}
@@ -407,10 +444,45 @@ func (kv *KV) SnapshotAt(ctx context.Context, key []byte, t hlc.Timestamp) (Vers
 	return out, found, nil
 }
 
+// readAt returns the key's history once the key's clock is at or above t.
+// SnapshotAt states the rule.
+func (kv *KV) readAt(ctx context.Context, key []byte, t hlc.Timestamp) (history, error) {
+	if now := kv.clock.Now(); now.Less(t) {
+		return history{}, fmt.Errorf("%w: t=%s now=%s", ErrSnapshotAhead, t, now)
+	}
+	if kv.local != nil && !buggify.Maybe("mvcc_skip_owner_cache", 0.05) {
+		if raw, served, err := kv.local.ReadLocal(ctx, key); err == nil && served {
+			h, err := decode(raw)
+			if err != nil {
+				return history{}, err
+			}
+			if t.LessEqual(h.clock()) {
+				return h, nil
+			}
+		}
+	}
+	raw, err := kv.propose(ctx, key, func(current []byte) ([]byte, error) {
+		h, err := decode(current)
+		if err != nil {
+			return nil, err
+		}
+		if t.LessEqual(h.clock()) {
+			return current, nil
+		}
+		h.ReadFloor = t
+		return encode(h)
+	})
+	if err != nil {
+		return history{}, err
+	}
+	return decode(raw)
+}
+
 // SnapshotRead returns each key's value as of HLC timestamp t — a consistent
 // cross-key snapshot. Keys may live in different ranges; each is read
 // independently and filtered to t. A key absent (or tombstoned) at t is omitted
-// from the result.
+// from the result. Each key follows the SnapshotAt rule, so a t ahead of this
+// KV's clock fails with ErrSnapshotAhead.
 func (kv *KV) SnapshotRead(ctx context.Context, keys [][]byte, t hlc.Timestamp) (map[string]Version, error) {
 	out := make(map[string]Version, len(keys))
 	for _, key := range keys {
