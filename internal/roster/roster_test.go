@@ -2,6 +2,7 @@ package roster_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/phoban01/cask/internal/caspaxos"
@@ -140,4 +141,76 @@ func downIDs(c *failure.CutDetector) []uint64 {
 		}
 	}
 	return out
+}
+
+// losingProposer loses the round of its first lose calls, then passes
+// every call to p.
+type losingProposer struct {
+	p     roster.Proposer
+	lose  int
+	calls int
+}
+
+func (l *losingProposer) Propose(ctx context.Context, key []byte, change caspaxos.ChangeFunc) ([]byte, error) {
+	l.calls++
+	if l.calls <= l.lose {
+		return nil, caspaxos.ErrPreempted
+	}
+	return l.p.Propose(ctx, key, change)
+}
+
+func newLosingRoster(t *testing.T, rf int) (*roster.Roster, *losingProposer) {
+	t.Helper()
+	stores := make([]caspaxos.Storage, rf)
+	for i := range stores {
+		stores[i] = store.NewMem()
+	}
+	lp := &losingProposer{p: caspaxos.NewProposer(1, sim.NewNetwork(stores).Clients())}
+	r := roster.NewWithProposer(1, lp)
+	if _, err := r.Genesis(context.Background(), []roster.Member{member(1)}); err != nil {
+		t.Fatal(err)
+	}
+	return r, lp
+}
+
+// A roster read that loses its round runs again. A write reads the roster
+// first, and it does not fail on that lost read.
+func TestGetRetriesALostRound(t *testing.T) {
+	//= docs/spec/fleet.md#6-membership
+	//= type=test
+	//# A roster read that loses its round MUST retry after a jittered backoff, up to a fixed number of attempts.
+	ctx := context.Background()
+	r, lp := newLosingRoster(t, 3)
+
+	lp.calls, lp.lose = 0, 3
+	v, err := r.Get(ctx)
+	if err != nil || len(v.Members) != 1 {
+		t.Fatalf("Get after 3 lost rounds = %+v, %v; want the roster", v, err)
+	}
+	if lp.calls != 4 {
+		t.Fatalf("Get ran %d rounds, want 3 lost rounds and 1 more", lp.calls)
+	}
+
+	lp.calls, lp.lose = 0, 2
+	if v, err := r.Add(ctx, member(2)); err != nil || len(v.Members) != 2 {
+		t.Fatalf("Add after 2 lost read rounds = %+v, %v; want 2 members", v, err)
+	}
+}
+
+// A roster read that loses every round stops after a fixed number of
+// attempts and returns the lost round.
+func TestGetStopsAfterFixedAttempts(t *testing.T) {
+	//= docs/spec/fleet.md#6-membership
+	//= type=test
+	//# A roster read that loses its round MUST retry after a jittered backoff, up to a fixed number of attempts.
+	ctx := context.Background()
+	r, lp := newLosingRoster(t, 1)
+
+	lp.calls, lp.lose = 0, 1<<30
+	if _, err := r.Get(ctx); !errors.Is(err, caspaxos.ErrPreempted) {
+		t.Fatalf("Get with every round lost = %v, want ErrPreempted", err)
+	}
+	if lp.calls < 2 || lp.calls > 16 {
+		t.Fatalf("Get ran %d rounds, want at least one retry and at most 16", lp.calls)
+	}
 }

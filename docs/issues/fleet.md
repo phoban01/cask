@@ -1930,3 +1930,29 @@ Task: add `demo/kind/upgrade.sh`. For each of east, west, and north in turn: bui
 Files: `demo/kind/upgrade.sh`, `demo/kind/README.md`
 
 Done when: `demo/kind/upgrade.sh` upgrades all three clusters and `kubectl get devices` answers from every cluster during the run.
+
+## ci: admin and membership tests fail when a consensus round is preempted
+
+labels: agent-5m, ci, fleet
+
+Spec: docs/spec/fleet.md#6-membership
+> The voter set MUST change only by joint-consensus reconfiguration of the roster.
+
+`TestPromoteToTwoVotersIsRefused` in `cmd/cask-apiserver/admin_test.go`
+failed in CI on PR #187 with `admin_test.go:154: caspaxos: preempted`.
+The storage layer now retries lost rounds (#174, #183), but the admin and
+membership paths still surface `ErrPreempted` from a read or a roster
+write to the test. A lost round changes nothing, so it should be retried,
+not reported.
+
+Task: find every place in `cmd/cask-apiserver` membership and admin code
+(roster reads, `changeCore` planning reads, key listing) and in the test
+helpers where a lost round reaches the caller, and retry it with the
+bounded backoff from `storage/index.go`. Keep the rule that a write with
+an unknown outcome is re-read before any retry. Reproduce first with a
+single `go test -race -count=100 -run 'Promote|Demote|VoterChange' ./`
+process.
+
+Files: `cmd/cask-apiserver/admin.go`, `membership.go`, `corechange.go`, `*_test.go`
+
+Done when: that command passes 100 of 100.

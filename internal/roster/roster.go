@@ -22,7 +22,9 @@ import (
 	"slices"
 	"sort"
 	"sync"
+	"time"
 
+	"github.com/phoban01/cask/internal/backoff"
 	"github.com/phoban01/cask/internal/caspaxos"
 )
 
@@ -340,7 +342,27 @@ func (r *Roster) UpdateRangeIDs(ctx context.Context, mutate func(ids []uint64) [
 // believed acceptor set and, if a reconfiguration is in flight, re-reads against
 // the joint union so the value returned is the latest chosen one. Either way it
 // advances the believed set so subsequent operations target the live Core.
+//
+// A read round that loses to other proposers changes nothing, so Get runs it
+// again after a jittered backoff, up to readAttempts times in all.
 func (r *Roster) Get(ctx context.Context) (Value, error) {
+	//= docs/spec/fleet.md#6-membership
+	//# A roster read that loses its round MUST retry after a jittered backoff, up to a fixed number of attempts.
+	return caspaxos.RetryLost(ctx, readAttempts, readBackoff, func() (Value, error) {
+		return r.getOnce(ctx)
+	})
+}
+
+// readAttempts bounds how often Get runs a read that loses its round.
+const readAttempts = 8
+
+// readBackoff spaces the retries of a lost roster read. The rounds that
+// preempted it often run again at once, so an immediate retry meets them
+// again.
+var readBackoff = backoff.FullJitter(time.Millisecond, 50*time.Millisecond)
+
+// getOnce is one attempt of Get.
+func (r *Roster) getOnce(ctx context.Context) (Value, error) {
 	core := r.believedCore()
 	if len(core) == 0 {
 		return Value{}, fmt.Errorf("roster: no believed acceptor set (adopt a core or found first)")
