@@ -196,7 +196,7 @@ func main() {
 			}
 			go func() {
 				log.Info("embedded cask acceptor serving", "listen", *consLn, "mtls", consensusTLS != nil)
-				if err := http.Serve(ln, h); err != nil {
+				if err := transport.NewServer(h).Serve(ln); err != nil {
 					log.Error("consensus server stopped", "err", err)
 					os.Exit(1)
 				}

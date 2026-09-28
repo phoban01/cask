@@ -234,7 +234,7 @@ func main() {
 		// Consensus rides the overlay; the client API rides the host listener
 		// below so operators can still curl localhost.
 		go func() {
-			if err := http.Serve(overlayLn, mux); err != nil {
+			if err := transport.NewServer(mux).Serve(overlayLn); err != nil {
 				log.Error("overlay server stopped", "err", err)
 			}
 		}()
@@ -266,7 +266,7 @@ func main() {
 		log.Error("listen failed", "err", err)
 		os.Exit(1)
 	}
-	if err := http.Serve(ln, mux); err != nil {
+	if err := transport.NewServer(mux).Serve(ln); err != nil {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
 	}

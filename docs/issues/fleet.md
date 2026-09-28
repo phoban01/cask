@@ -1625,3 +1625,98 @@ Files: `cmd/cask-apiserver/main.go`, `internal/mtls/mtls.go`
 Done when: `go -C cmd/cask-apiserver test -race ./...` passes, and a test
 shows that start fails without the flags and without
 `--insecure-consensus`.
+
+## security: rotate and revoke consensus certificates
+
+labels: membership
+
+Spec: docs/spec/fleet.md#8-security
+> Consensus traffic between members MUST use mutual TLS.
+
+Since #48, each member reads `--consensus-cert`, `--consensus-key`, and
+`--consensus-ca` once at start. `cask-apiserver gen-consensus-certs`
+discards the CA key, and member certificates live for one year. So an
+operator cannot add a member to the demo CA, cannot rotate a certificate
+without a restart, and cannot revoke a stolen certificate.
+
+Task: reload the three files when they change on disk. Use
+`tls.Config.GetCertificate`, `GetClientCertificate`, and a CA pool that
+`VerifyConnection` and `VerifyPeerCertificate` read under a lock. Add a
+deny list of certificate serial numbers, read from an optional
+`--consensus-deny` file, that both sides check. Keep the CA key in
+`gen-consensus-certs` behind `--ca-key-out`.
+
+Files: `internal/mtls/mtls.go`, `cmd/cask-apiserver/certs.go`
+
+Done when: `go test -race ./internal/mtls/` shows that a member picks up a
+new certificate without a restart, and that a denied serial is refused on
+both sides.
+
+## security: disable TLS session tickets on the consensus listener
+
+labels: membership
+
+Spec: docs/spec/fleet.md#8-security
+> Consensus traffic between members MUST use mutual TLS.
+
+A TLS 1.3 session ticket lets a client resume without a new certificate
+check. Once consensus certificates can be revoked, a revoked member could
+resume a session it opened before the revocation. This depends on the
+rotation and revocation issue, #160.
+
+Task: set `SessionTicketsDisabled: true` on the server config in
+`mtls.New`.
+
+Files: `internal/mtls/mtls.go`, `internal/mtls/mtls_test.go`
+
+Done when: `go test -race ./internal/mtls/` shows that the server config
+disables session tickets and that a second connection runs a full
+handshake.
+
+## security: bind the consensus certificate to the node id
+
+labels: membership
+
+Spec: docs/spec/fleet.md#8-security
+> Consensus traffic between members MUST use mutual TLS.
+
+Mutual TLS checks only that the fleet CA signed the peer certificate. Any
+member certificate can then join the roster as any node id, or propose
+with any ballot node id. A stolen certificate from one member can
+impersonate every member.
+
+Task: put the node id in each member certificate, as a URI SAN
+`cask://node/<id>`. On the server, read the verified peer certificate from
+`r.TLS` in `/roster/join` and reject a join whose node id differs. In the
+acceptor handler, reject a ballot whose node id differs. Keep the check
+off when the listener is plaintext.
+
+Files: `internal/mtls/ca.go`, `internal/cluster/cluster.go`,
+`internal/transport/connect.go`, `cmd/cask-apiserver/membership.go`
+
+Done when: `go -C cmd/cask-apiserver test -race ./...` passes, and a test
+shows that a member with the certificate of node 2 cannot join as node 9
+or prepare with ballot node id 9.
+
+## security: stop serving consensus on the host port in cmd/cask overlay mode
+
+labels: membership
+
+Spec: docs/spec/fleet.md#8-security
+> Consensus traffic between members MUST use mutual TLS.
+
+With `--nebula-config` or `--mint`, `cmd/cask` serves the consensus mux on
+the Nebula overlay. It also serves the same mux, with the acceptor RPC,
+`/roster`, `/roster/join`, `/rangekeys`, `/health`, and the admin
+endpoints, in plaintext on the host `--listen` port. A client that reaches
+the host port bypasses the overlay's peer authentication.
+
+Task: in overlay mode, serve only the client API (`/kv/`, `/cas/`,
+`/session/`, `/lock/`) on `--listen`. Keep the consensus, roster, health,
+and admin handlers on the overlay listener only.
+
+Files: `cmd/cask/main.go`
+
+Done when: `go test -race ./cmd/cask/` passes, and a test shows that the
+host listener answers 404 for the acceptor route and `/roster` in overlay
+mode.
