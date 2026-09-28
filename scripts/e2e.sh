@@ -14,4 +14,6 @@ until mkdir "$LOCK" 2>/dev/null; do
   sleep 15
 done
 trap 'rmdir "$LOCK"' EXIT
-go test -tags e2e ./test/e2e -timeout 30m "$@"
+# -count=1 bypasses the Go test cache. A cached result would report a
+# pass without creating any cluster.
+go test -tags e2e -count=1 ./test/e2e -timeout 30m "$@"
