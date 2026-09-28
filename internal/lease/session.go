@@ -11,7 +11,7 @@
 // carried forward by reconfiguration — a fenced downstream resource can always
 // reject a stale/zombie holder, even across owner changes and range moves. These
 // are the SingleHolder and FenceMonotone properties model-checked in
-// tla/Lease.tla.
+// quint/lease.qnt.
 //
 // Time is injected (Clock returns a unix-nanos-like count), so behaviour under
 // clock skew is deterministic and unit-testable.

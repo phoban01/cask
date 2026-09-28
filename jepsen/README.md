@@ -6,7 +6,7 @@ history with Jepsen's Elle/Knossos checkers.
 
 ## Status
 
-This directory is a **scaffold/artifact** (like `tla/`). The CI-enforced version
+This directory is a **scaffold/artifact** (like `quint/`). The CI-enforced version
 of the headline gate already runs **in-process and deterministically** at
 [`test/jepsen/fencing_test.go`](../test/jepsen/fencing_test.go) — the
 fencing-token monotonicity invariant under a partition nemesis. The Clojure

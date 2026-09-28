@@ -11,7 +11,7 @@
 #   * the data plane (KV + a fenced lock) works across the overlay.
 #
 # This is the runnable companion to the reflexive-reconfiguration safety work
-# (internal/roster + tla/RosterReconfig.tla). Run: bash demo/local-dynamic.sh
+# (internal/roster + quint/roster_reconfig.qnt). Run: bash demo/local-dynamic.sh
 set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 

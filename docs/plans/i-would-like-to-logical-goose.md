@@ -70,7 +70,7 @@ internal/cluster               discovery (mDNS + seeds/DNS-SRV), bootstrap, plan
 internal/server                composition root + lifecycle
 testutil/sim                   deterministic seeded whole-cluster simulation
 test/linearizability           porcupine models + recorded histories
-tla/                           TLA+/PlusCal specs + TLC/Apalache configs (safety-critical protocols)
+quint/                         Quint specs checked with TLC and Apalache (safety-critical protocols)
 jepsen/                        Clojure Jepsen test (Elle/Knossos), nemeses incl. churn + clock-skew
 ```
 
@@ -161,7 +161,7 @@ returns fencing token), **Admin** (roster, ranges, placement, status). `caskctl`
 ---
 
 ## Milestones
-- **M0 Spec the core:** `tla/CasPaxosMvcc.tla` + `tla/Lease.tla` model-checked in TLC (agreement,
+- **M0 Spec the core:** `quint/caspaxos.qnt` + `quint/lease.qnt` model-checked in TLC (agreement,
   monotonicity, single-holder, fencing) — the safety contract the code must refine.
 - **M1 Range core + MVCC:** pure `caspaxos` + pebble; per-key version chains; HLC; Put/Get/Cas/GetAt
   on one range. Property tests (`rapid`) mirroring the M0 invariants. No network.
@@ -177,7 +177,7 @@ returns fencing token), **Admin** (roster, ranges, placement, status). `caskctl`
 - **M4 Membership plane:** in-house **HyParView+Plumtree** (pure, simulated partitions/asymmetric/mass
   failure), phi-accrual + multi-observer cut detection, consensus **roster** driving placement; mDNS
   + seeds/DNS-SRV discovery; genesis/bootstrap.
-- **M5 Elastic placement (spec-first):** write & model-check `tla/Reconfig.tla` (no-lost-value under
+- **M5 Elastic placement (spec-first):** write & model-check `quint/reconfig.qnt` (no-lost-value under
   churn) **before coding**; then the placement driver (failure-domain spread, hysteresis,
   catch-up-before-release), per-range joint-config reconfig, split/merge. Churn + partition tests
   (no lock loss) in the simulator.
@@ -199,7 +199,7 @@ churn**, leases/fencing) are exactly the class where Paxos-family bugs hide. We 
 escalating layers, **spec-first for the risky parts** — model-check a protocol before trusting code
 built on it.
 
-### Layer 1 — Formal specification: TLA+ / PlusCal (in `tla/`)
+### Layer 1 — Formal specification: Quint, checked with TLC and Apalache (in `quint/`)
 Write machine-checked specs and model-check invariants with **TLC** (and **Apalache**, the symbolic
 checker, for larger state spaces) *before* implementing the corresponding code:
 - **`CasPaxosMvcc.tla`** — our CASPaxos register variant with version chains + HLC stamping.
@@ -252,7 +252,7 @@ then a larger seeded fleet to watch elastic placement + failure-domain spread + 
 ## Key risks & open questions
 1. **Elastic storage churn is the sharpest risk** (your choice, eyes open): correlated loss of a
    range's quorum = lost locks. Mitigation is designed in (failure-domain spread, hysteresis,
-   catch-up-before-release, RF=5–7) **and retired in two places**: model-checked in `tla/Reconfig.tla`
+   catch-up-before-release, RF=5–7) **and retired in two places**: model-checked in `quint/reconfig.qnt`
    (no committed value lost across reconfiguration) before coding, then exercised by simulator churn
    tests and a Jepsen partition+churn lock-fencing run (the release gate). Consider a configurable
    **minimum-stability** gate so brand-new/flaky nodes can't hold a quorum alone.

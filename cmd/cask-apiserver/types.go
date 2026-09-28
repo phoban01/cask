@@ -8,7 +8,7 @@
 // that matters is that AT MOST ONE lease exists per device globally. That is
 // not enforced by this server's logic — it is inherited from cask's fenced
 // locks (the SingleHolder and FenceMonotone properties model-checked in
-// tla/Lease.tla): binding a claim IS acquiring the device's lock, and the
+// quint/lease.qnt): binding a claim IS acquiring the device's lock, and the
 // fencing token in the claim's status is what workloads present downstream,
 // making a zombie holder's late actions rejectable.
 package main

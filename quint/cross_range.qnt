@@ -13,7 +13,8 @@
 // and 3 steps. Each control found its violation in 20 of 20 runs with
 // different seeds at 30 steps and 2000 samples.
 //
-// cross_range.qnt — Quint port of tla/CrossRange.tla.
+// cross_range.qnt — Quint port of CrossRange.tla. The TLA+ source is
+// retired. quint/PARITY.md names the commit that still holds it.
 //
 // Scope: cross-range snapshots stay off the fleet path. Lists come from
 // the index register. This module covers the snapshot contract of
@@ -34,7 +35,11 @@
 // read takes one key at a time t and returns the latest entry with an HLC
 // at or before t. The read needs t at or below the range's HLC. TLC found
 // that guard: a read at a future t can be broken by a later write at or
-// below t.
+// below t. The guard is load-bearing, and stepNoReadGuard shows why.
+// mvcc.SnapshotAt enforces it since #182 (issue #181): it refuses a t
+// ahead of the key's clock with ErrSnapshotAhead, and a snapshot read
+// raises a per-key read floor so later writes land above t. A caller
+// that wants a fresher snapshot must first advance the HLC.
 //
 // One witness read is enough, as in the TLA+. A read does not change hlc
 // or history. So a run with many reads is covered by the runs that take
@@ -50,7 +55,7 @@
 //   Inv                  TypeOK, NoSkewOverflow and UncertaintyContract, as
 //                        in the TLA+
 //
-// Constants are the values from tla/CrossRange.cfg: ranges r1 and r2,
+// Constants are the values from CrossRange.cfg: ranges r1 and r2,
 // keys k1 and k2, values v1 and v2, MaxOffset 2, MaxTime 6.
 //
 // Differences from the TLA+ source:

@@ -2,7 +2,7 @@
 
 Three kind clusters. One global inventory of devices. **At most one lease per
 device across the whole fleet** — enforced by cask's fenced locks
-(model-checked: `SingleHolder`, `FenceMonotone` in `tla/Lease.tla`), not by
+(model-checked: `SingleHolder`, `FenceMonotone` in `quint/lease.qnt`), not by
 anything running in Kubernetes.
 
 cask is **embedded**: each cluster's extension apiserver carries its own cask

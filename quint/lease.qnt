@@ -8,12 +8,18 @@
 // init. `quint verify` at 10 steps reaches every state and finishes in
 // about 5 seconds (quint/PARITY.md).
 //
-// lease.qnt — Quint port of tla/Lease.tla.
+// lease.qnt — Quint port of Lease.tla. The TLA+ source is
+// retired. quint/PARITY.md names the commit that still holds it.
 //
 // A lease is a CASPaxos register that holds {owner, expiry, fence}. Time is
 // a counter `now`. A lease is live while its expiry is in the future.
 // Acquire is enabled only when no live lease exists. This models lazy
 // expiry: an expired lease is never seen as live.
+//
+// Scope: the model covers one register. It does not carry the fence
+// across a range relocation or a core change. A CarryForward action that
+// composes with reconfig.qnt is future work (invariant S7 in
+// docs/etcd-little-sister.md section 6.5).
 //
 // Invariants:
 //
@@ -25,7 +31,7 @@
 //   TypeOK         the variables stay in their ranges
 //   Inv            TypeOK, SingleHolder and FenceLatest, as in the TLA+
 //
-// Constants are the values from tla/Lease.cfg: two clients, MaxTime 4,
+// Constants are the values from Lease.cfg: two clients, MaxTime 4,
 // TTL 2, MaxFence 6.
 //
 // Differences from the TLA+ source:

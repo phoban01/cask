@@ -11,7 +11,8 @@
 // invariant in 20 of 20 runs with different seeds at 30 steps and 2000
 // samples.
 //
-// roster_reconfig.qnt — Quint port of tla/RosterReconfig.tla.
+// roster_reconfig.qnt — Quint port of RosterReconfig.tla. The TLA+ source is
+// retired. quint/PARITY.md names the commit that still holds it.
 //
 // The membership register stores its own acceptor set, the core. The core
 // moves from Cold to Cnew through a joint phase that runs on the register
@@ -52,7 +53,7 @@
 //   Inv               TypeOK, NoLostMembership and AlwaysAvailable, as in
 //                     the TLA+
 //
-// Constants are the values from tla/RosterReconfig.cfg: five nodes,
+// Constants are the values from RosterReconfig.cfg: five nodes,
 // Cold = {n1, n2, n3}, Cnew = {n3, n4, n5}, MaxVer 2.
 //
 // Differences from the TLA+ source:

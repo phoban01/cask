@@ -33,8 +33,9 @@ The project name is cask. Do not use any other name for it.
 1. **Spec first.** `docs/spec/fleet.md` is the requirement source. Change
    the spec before the code. Re-extract with `devbox run spec` and commit
    the regenerated `docs/spec/fleet/*.toml`.
-2. **Model in Quint.** `quint/` holds the models. TLA+ is being retired in
-   favour of Quint at every level. Every safety rule is an invariant, and
+2. **Model in Quint.** `quint/` holds the models. TLA+ is retired;
+   Quint is used at every level. `quint/PARITY.md` records the port and
+   names the commit that holds the TLA+ originals. Every safety rule is an invariant, and
    every invariant has a negative control that must fail. Run
    `devbox run quint`. Each module declares its invariants and controls
    in `// quint-check:` header lines. Bounded verification with Apalache

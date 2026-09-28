@@ -9,7 +9,8 @@ The design and rationale live in-repo:
 - [`docs/etcd-little-sister.md`](docs/etcd-little-sister.md) — the canonical
   performance + scale roadmap, the decided designs (range descriptors C',
   cross-range consistency A), and the §6.5 safety-invariant contract.
-- [`docs/confidence.md`](docs/confidence.md) — how cask earns trust (TLA+,
+- [`docs/confidence.md`](docs/confidence.md) — how cask earns trust (Quint
+  specifications checked with TLC and Apalache,
   deterministic simulation, Jepsen, burn-in) and where it sits on its own
   trust ladder today (**demo**).
 - [`docs/sim-gate.md`](docs/sim-gate.md) — the simulator release gate: what it
@@ -28,9 +29,9 @@ so "crash/restart" coverage is against the simulated crash model — durable
 acceptor storage (Pebble) is the gating roadmap item
 (`docs/etcd-little-sister.md` §3.0). Built so far:
 
-- **M0 — safety specs** (`tla/`): `CasPaxosMvcc.tla` (consensus agreement) and
-  `Lease.tla` (single-holder + fencing monotonicity). Spec-first; require TLC to
-  model-check (see `tla/README.md`).
+- **M0 — safety specs** (`quint/`): `caspaxos.qnt` (consensus agreement) and
+  `lease.qnt` (single-holder + fencing monotonicity). Spec-first; Quint
+  specifications checked with TLC and Apalache (see `quint/PARITY.md`).
 - **M1 — range core + MVCC** (`internal/`): the pure, deterministic CASPaxos core
   (`caspaxos`), a hybrid logical clock (`hlc`), per-key MVCC version chains with
   snapshot/time-travel reads (`mvcc`), and an in-memory acceptor store (`store`).
@@ -80,7 +81,7 @@ acceptor storage (Pebble) is the gating roadmap item
   evidence. Tested over the sim network, including the stable-until-cut-decides
   property.
 
-- **M5 — elastic placement** (spec-first): `tla/Reconfig.tla` model-checks that
+- **M5 — elastic placement** (spec-first): `quint/reconfig.qnt` model-checks that
   joint-consensus reconfiguration with catch-up-before-release loses no committed
   value. The proposer now supports **joint quorums** (a majority required in every
   config group); `reconfig` carries a range old→joint→new with no value lost,
@@ -107,7 +108,7 @@ acceptor storage (Pebble) is the gating roadmap item
   lock is never observed held. Tests cover single-holder, fence monotonicity,
   **clock skew** (fencing is the source of truth when wall clocks disagree),
   batched keepalive, reaper cascade, and **fence monotonicity across a range
-  reconfiguration** — matching the model-checked `tla/Lease.tla` invariants.
+  reconfiguration** — matching the model-checked `quint/lease.qnt` invariants.
 - **M7.2 — 1-RTT owner fast path** (`caspaxos.OwnedProposer`): the phase-1 skip
   deferred from M2, now safe. The ownership **epoch (a lease fence) is encoded in
   the ballot's high bits**, so a newer owner's ballots dominate every ballot an
@@ -193,7 +194,7 @@ internal/transport  ConnectRPC consensus transport + the Network seam (TCP / ove
 internal/transport/nebula  optional Nebula-overlay Network backend + lighthouse discovery
 internal/roster     consensus membership register; internal/placement zone-aware HRW
 proto/, gen/        protobuf schema and generated ConnectRPC stubs (buf)
-tla/                TLA+ safety specifications
+quint/              Quint specifications checked with TLC and Apalache
 ```
 
 The consensus, clock, and MVCC cores are deliberately **pure** (no I/O, net, or

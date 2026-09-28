@@ -12,7 +12,7 @@ import (
 
 // claimController binds DeviceClaims to devices. A binding IS holding the
 // device's cask lock under the claim's session: cask's SingleHolder property
-// (tla/Lease.tla) is what makes the lease globally exclusive across every
+// (quint/lease.qnt) is what makes the lease globally exclusive across every
 // cluster's apiserver — this controller contains no mutual-exclusion logic
 // of its own, only bookkeeping.
 //

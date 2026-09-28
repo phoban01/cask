@@ -15,7 +15,7 @@ Three decisions reshape it:
 - **No static genesis.** The roster register becomes **reflexive**: it stores the membership, and a
   bounded *core* of that membership is the register's own CASPaxos acceptor set. The cluster
   bootstraps from a **single founder** and grows/shrinks the core via **joint-consensus
-  reconfiguration**, reusing `internal/reconfig` (TLA-checked in `tla/Reconfig.tla`).
+  reconfiguration**, reusing `internal/reconfig` (TLA-checked in `quint/reconfig.qnt`).
 
 The hard constraint that shapes the bootstrap: CASPaxos safety requires every proposer to a register
 to use quorums from the *same* acceptor set, and there is no coordination-free way to establish the
@@ -181,10 +181,10 @@ reconfig automatically targets the current core; the loop `dialer.learn`s new co
    the *new* core only; (c) a core member fails (`nw.SetReachable(c,false)`) and is replaced, value
    intact; (d) concurrent `Add` between Step 1 and Step 3 survives (issued through the joint proposer);
    (e) a stale-core node fails its stale read then follows discovery to the current core.
-4. **TLA:** the existing config-agnostic `tla/Reconfig.tla` already models this transition (instantiate
+4. **TLA:** the existing config-agnostic `quint/reconfig.qnt` already models this transition (instantiate
    `Cold/Cnew` = old/new core, single key = `\x00roster`); optionally extend it for concurrent
    membership writes during the joint phase and resume-after-crash. Note the reflexive reuse in
-   `tla/README.md`.
+   `quint/PARITY.md`.
 5. **Local loopback e2e (no clouds):** `cask mint` on 127.0.0.1; one `--bootstrap` replica founds;
    add replicas + a `--role client`; assert core grows to `registerRF`, cross-node read-after-write,
    client holds no replica; kill a core member and confirm reconfig replaces it and the cluster keeps

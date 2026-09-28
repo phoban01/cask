@@ -33,7 +33,7 @@ decisions already locked in by those plans:
 | [`plans/i-would-like-to-logical-goose.md`](plans/i-would-like-to-logical-goose.md) | 2026-06-01 | The master architecture plan ("logical goose"). | Two-tier topology, milestones M0–M8, verification layers, language choice, the existence of TLA+ as a release gate. |
 | [`plans/warm-plotting-biscuit.md`](plans/warm-plotting-biscuit.md) Phase 1 | 2026-06-06 | Multi-cloud demo (implemented + live). | Cross-cloud deployment scripts under `demo/`, Nebula listen-vs-advertise split, client-only mode. |
 | [`plans/warm-plotting-biscuit.md`](plans/warm-plotting-biscuit.md) Phase 2 | superseded | Registry + relay control plane. | **Superseded** by nifty-globe. Do not implement. |
-| [`plans/i-was-thinking-more-nifty-globe.md`](plans/i-was-thinking-more-nifty-globe.md) | 2026-06-06 | Stateless mint + DNS-SRV + **reflexive roster** on a dynamic Core. | **The control-plane shape**: bootstrap (founder gate), NodeID lifecycle (cert is the persistent identity), roster value shape (`{Epoch, Members, Core, Joint, ConfigGen}`), DNS-SRV discovery. **Status: Work Items 1–4 implemented in commit `4d82117` (2026-06-08).** WI1 certgen split (`internal/transport/nebula/certgen.go`); WI2 `cask mint` + enrollment (`cmd/cask/mint*.go`); WI3 DNS-SRV (`internal/discovery/srv.go`); WI4 reflexive roster reconfig (`internal/roster/roster.go` extended + `internal/roster/reconfig.go` new). `tla/RosterReconfig.tla` proves the reflexive case (`NoLostMembership`, `AlwaysAvailable`). |
+| [`plans/i-was-thinking-more-nifty-globe.md`](plans/i-was-thinking-more-nifty-globe.md) | 2026-06-06 | Stateless mint + DNS-SRV + **reflexive roster** on a dynamic Core. | **The control-plane shape**: bootstrap (founder gate), NodeID lifecycle (cert is the persistent identity), roster value shape (`{Epoch, Members, Core, Joint, ConfigGen}`), DNS-SRV discovery. **Status: Work Items 1–4 implemented in commit `4d82117` (2026-06-08).** WI1 certgen split (`internal/transport/nebula/certgen.go`); WI2 `cask mint` + enrollment (`cmd/cask/mint*.go`); WI3 DNS-SRV (`internal/discovery/srv.go`); WI4 reflexive roster reconfig (`internal/roster/roster.go` extended + `internal/roster/reconfig.go` new). `quint/roster_reconfig.qnt` proves the reflexive case (`NoLostMembership`, `AlwaysAvailable`). |
 | `docs/etcd-little-sister.md` | 2026-06-06 | This document. | Performance + scale roadmap, range-descriptor placement (C'), cross-range consistency (A), invariants list, TLA+ specs added for §4.3 and §4.4. |
 
 **Where this doc supersedes the master plan:** the master plan said
@@ -44,7 +44,7 @@ descriptors are individual CASPaxos registers, all hosted on the **Core**
 nifty-globe. This unifies the control-plane consensus group into one
 Core rather than two (roster + meta-range), and reuses the joint-
 consensus reconfiguration machinery `internal/reconfig` and
-`tla/Reconfig.tla` already prove correct.
+`quint/reconfig.qnt` already prove correct.
 
 **Where this doc inherits from nifty-globe:** the `Core` concept,
 the reflexive roster register shape, the `--bootstrap` founder gate,
@@ -146,7 +146,7 @@ Directories that matter most for this roadmap:
 | `internal/discovery/`             | DNS-SRV `roster.Discovery` adapter (nifty-globe WI3, commit `4d82117`). |
 | `cmd/cask/mint.go`, `mint_client.go` | Stateless `cask mint` CA + enrollment client (nifty-globe WI2, commit `4d82117`). |
 | `cmd/cask/`                       | Runnable single binary; static + overlay + founder-bootstrap (`--bootstrap`) + mint enrollment wiring. |
-| `tla/`                            | TLA+ safety specs (per-register, lease, per-range reconfig, **reflexive roster reconfig**, range descriptors, cross-range). |
+| `quint/`                          | Quint safety specs, checked with TLC and Apalache (per-register, lease, per-range reconfig, **reflexive roster reconfig**, range descriptors, cross-range). |
 
 Two facts that drive most of the optimizations below:
 
@@ -252,7 +252,7 @@ accepted. That is exactly the invariant we need for a local read.
 the epoch-fenced owner is the unique writer for the key for the lease
 duration. Any future writer must increment the epoch (via
 `TakeOwnership`), which invalidates this owner's lease before any new
-value can be accepted. Cross-check with `tla/Lease.tla`: extend it with
+value can be accepted. Cross-check with `quint/lease.qnt`: extend it with
 a `LocalRead(owner, key)` action that returns `Accepted.Value` when
 the owner's lease is live, and verify the existing invariants still
 hold.
@@ -265,7 +265,7 @@ hold.
   `LocalReader` interface.
 - `internal/agent/router.go` — let the agent's per-range proposer
   expose its `OwnedProposer` for read-side access.
-- `tla/Lease.tla` — add `LocalRead` action, re-run TLC.
+- `quint/lease.qnt` — add `LocalRead` action, re-run TLC.
 
 **Done when.**
 
@@ -609,7 +609,7 @@ authoritative design.
   same as the roster.
 - The Core may itself change (growing 1→3→5 as `Members` grows, or
   replacing a condemned core member). That is the reflexive-roster
-  reconfiguration nifty-globe specifies, which `tla/Reconfig.tla`
+  reconfiguration nifty-globe specifies, which `quint/reconfig.qnt`
   already proves preserves any committed value. **Descriptors ride on
   the same Core**, so they inherit the same proof — no separate Core
   for descriptors.
@@ -739,7 +739,7 @@ makes the trigger decision; we wire it to the orchestrator.
   keeps serving reads against cached descriptors (degraded mode).
   When the Core recovers, the cut detector triggers a Core reconfig
   via nifty-globe §c.
-- **TLA+:** extend `tla/Reconfig.tla` (or add `tla/SplitMerge.tla`)
+- **TLA+:** extend `quint/reconfig.qnt` (or add `quint/split_merge.qnt`)
   to model the four-step split with a concurrent client; verify no
   reachable state lets two clients write the same key to disjoint
   replica sets.
@@ -753,7 +753,7 @@ makes the trigger decision; we wire it to the orchestrator.
   **Satisfied** by commit `4d82117`: `internal/roster/roster.go` now
   carries `{Epoch, Members, Core, Joint, ConfigGen}`,
   `internal/roster/reconfig.go` implements the 3-step joint reconfig,
-  and `tla/RosterReconfig.tla` proves `NoLostMembership` and
+  and `quint/roster_reconfig.qnt` proves `NoLostMembership` and
   `AlwaysAvailable`. §4.3 work can now extend the value with
   `RangeIDs []uint64` and reuse the same reconfig machinery for
   descriptor registers.
@@ -824,7 +824,7 @@ architectural change required.
 - `README.md` — replace any "consistent point in time across keys in
   different ranges" wording with the uncertainty-window contract; lead
   with fencing tokens as the cross-key consistency story.
-- `tla/CrossRange.tla` (new) — model two ranges with clock skew
+- `quint/cross_range.qnt` (new) — model two ranges with clock skew
   bounded by `MaxOffset`; verify that for any key K and snapshot time
   t such that K was last modified at time t' < t - MaxOffset, the
   snapshot observes K at t'.
@@ -849,7 +849,7 @@ The `mvcc.SnapshotRead` doc comment should read approximately:
 - Existing `SnapshotRead` callers tolerate the documented contract; no
   test in the repo currently depends on cross-range linearizability
   beyond what HLC ordering provides within a range (verify this).
-- `tla/CrossRange.tla` passes TLC with `MaxOffset = 500ms`,
+- `quint/cross_range.qnt` passes TLC with `MaxOffset = 500ms`,
   `NumRanges = 2`, `NumKeys = 4`, depth ≥ 20.
 - README and `mvcc.SnapshotRead` godoc both carry the new wording, and
   any conflicting prose is removed.
@@ -862,15 +862,15 @@ Nothing structural. Can land independently of §4.3.
 
 ### 4.5 — TLA+ for joint reconfig + range carry-forward together
 
-**Status.** `tla/CasPaxosMvcc.tla` proves per-register agreement.
-`tla/Lease.tla` proves fencing monotonicity. `tla/Reconfig.tla` proves
+**Status.** `quint/caspaxos.qnt` proves per-register agreement.
+`quint/lease.qnt` proves fencing monotonicity. `quint/reconfig.qnt` proves
 joint-consensus reconfig is non-lossy. They don't compose.
 
-**Fix.** A `tla/CrossRange.tla` that has two ranges, one range reconfig
+**Fix.** A `quint/cross_range.qnt` that has two ranges, one range reconfig
 in flight, snapshot reads spanning both, and checks the combined
 invariant. This is what gates "we believe the cross-range story".
 
-**Files.** `tla/CrossRange.tla` (new), `tla/README.md`.
+**Files.** `quint/cross_range.qnt` (new), `quint/PARITY.md`.
 
 ---
 
@@ -1519,42 +1519,42 @@ compounds — every found bug strengthens the gate.
 ## 6.5 — Invariants (the safety contract)
 
 Every implementation in this roadmap must preserve the invariants
-below. Each is paired with the TLA+ spec that model-checks it (existing
+below. Each is paired with the Quint specification (checked with TLC and Apalache) that model-checks it (existing
 or to-be-written) and the Go test layer (rapid PBT or porcupine /
 Jepsen) that exercises it against the running code. **A regression to
 any of these is a release-blocker.**
 
-| # | Invariant | Stated as | TLA+ spec | Go test |
+| # | Invariant | Stated as | Quint spec | Go test |
 |---|---|---|---|---|
-| **S1** | **Per-register agreement.** Once a value is chosen for a key at any ballot, no different value is ever chosen for that key. | `Consistency` | `tla/CasPaxosMvcc.tla` | `internal/caspaxos/proposer_test.go` (rapid), `test/linearizability` (porcupine) |
+| **S1** | **Per-register agreement.** Once a value is chosen for a key at any ballot, no different value is ever chosen for that key. | `Consistency` | `quint/caspaxos.qnt` | `internal/caspaxos/proposer_test.go` (rapid), `test/linearizability` (porcupine) |
 | **S2** | **Per-key version monotonicity.** A key's MVCC `Seq` is strictly increasing in commit order. | implicit in HLC chain stamping | proven structurally from S1 + stamping | `internal/mvcc/mvcc_test.go` |
 | **S3** | **HLC monotonicity per range.** Within a range, HLC timestamps are strictly increasing in commit order. | per-range `HLC' > HLC` | (covered by `internal/hlc` invariants) | `internal/hlc/hlc_test.go` |
-| **S4** | **No committed value lost across reconfig.** For any sequence of joint-quorum reconfigs of a register's acceptor set, every previously chosen value remains chosen. | `NoLostValue` | `tla/Reconfig.tla` | `internal/reconfig/reconfig_test.go` |
-| **S5** | **Catch-up before release.** A reconfig may not finalize the new-only phase until every value chosen in the old config is chosen in the new config. | `CatchUpHeld` | `tla/Reconfig.tla` | same |
-| **S5.1** | **No lost membership across reflexive reconfig.** When the roster register's Core changes old → joint → new, no membership version committed under the old core is lost — by `LeaveJoint` time the latest committed value is present in the new core. The harder, reflexive-register case of S4/S5: the value advances *during* the very transition that hands the register to a new quorum. | `NoLostMembership` | **`tla/RosterReconfig.tla` (new, shipped commit `4d82117`)** | `internal/roster/reconfig_test.go`, `internal/roster/property_test.go` |
-| **S5.2** | **Always-available membership.** The latest committed membership version is always present on some currently-active configuration — the register is never stranded on a quorum that has already been left behind. | `AlwaysAvailable` | `tla/RosterReconfig.tla` | `internal/roster/reconfig_test.go` |
-| **S6** | **Single lock holder.** At any instant, at most one client holds a live lease on a given lock register. | `SingleHolder` | `tla/Lease.tla` | `internal/lease/lock_test.go`, `test/jepsen/fencing_test.go` |
-| **S7** | **Fence monotonicity.** The fencing token issued on every successful `Acquire` is strictly greater than every previously issued token for that lock — across owner preemption, range relocation, and core reconfig. | `FenceLatest`, `FenceMonotone` | `tla/Lease.tla` (extend to include carry-forward across reconfig — see TLA work below) | `test/jepsen/fencing_test.go` |
-| **S8** | **No two replica sets for one key (post-cutover).** After a split's roster cutover (§4.3 step 3), no two clients can successfully write the same key to disjoint replica sets at the same descriptor epoch. | `NoSplitBrain` | **`tla/RangeDescriptors.tla` (new — §4.3)** | `test/linearizability/split_test.go` (new) |
-| **S9** | **Descriptor-epoch carry-forward.** A descriptor's `Epoch` strictly increases on every reconfig of that range; an `ErrRangeChanged` is returned for any proposal carrying an older epoch. | per-descriptor epoch monotonicity | `tla/RangeDescriptors.tla` (new) | `internal/agent/router_test.go` (extend) |
-| **S10** | **Cross-range HLC skew bound.** For any two ranges r1, r2, the HLC values they have observed differ by at most `MaxOffset` plus in-flight network delay; a `SnapshotRead(t)` returns the value at `t'` ≤ `t - MaxOffset` for any key not modified in `[t - MaxOffset, t]`. | `UncertaintyContract`, `NoSkewOverflow` | **`tla/CrossRange.tla` (new — §4.4)** | `internal/mvcc/snapshot_test.go` (extend with skew injection) |
+| **S4** | **No committed value lost across reconfig.** For any sequence of joint-quorum reconfigs of a register's acceptor set, every previously chosen value remains chosen. | `NoLostValue` | `quint/reconfig.qnt` | `internal/reconfig/reconfig_test.go` |
+| **S5** | **Catch-up before release.** A reconfig may not finalize the new-only phase until every value chosen in the old config is chosen in the new config. | `CatchUpHeld` | `quint/reconfig.qnt` | same |
+| **S5.1** | **No lost membership across reflexive reconfig.** When the roster register's Core changes old → joint → new, no membership version committed under the old core is lost — by `LeaveJoint` time the latest committed value is present in the new core. The harder, reflexive-register case of S4/S5: the value advances *during* the very transition that hands the register to a new quorum. | `NoLostMembership` | **`quint/roster_reconfig.qnt` (new, shipped commit `4d82117`)** | `internal/roster/reconfig_test.go`, `internal/roster/property_test.go` |
+| **S5.2** | **Always-available membership.** The latest committed membership version is always present on some currently-active configuration — the register is never stranded on a quorum that has already been left behind. | `AlwaysAvailable` | `quint/roster_reconfig.qnt` | `internal/roster/reconfig_test.go` |
+| **S6** | **Single lock holder.** At any instant, at most one client holds a live lease on a given lock register. | `SingleHolder` | `quint/lease.qnt` | `internal/lease/lock_test.go`, `test/jepsen/fencing_test.go` |
+| **S7** | **Fence monotonicity.** The fencing token issued on every successful `Acquire` is strictly greater than every previously issued token for that lock — across owner preemption, range relocation, and core reconfig. | `FenceLatest`, `FenceMonotone` | `quint/lease.qnt` (extend to include carry-forward across reconfig — see TLA work below) | `test/jepsen/fencing_test.go` |
+| **S8** | **No two replica sets for one key (post-cutover).** After a split's roster cutover (§4.3 step 3), no two clients can successfully write the same key to disjoint replica sets at the same descriptor epoch. | `NoSplitBrain` | **`quint/range_descriptors.qnt` (new — §4.3)** | `test/linearizability/split_test.go` (new) |
+| **S9** | **Descriptor-epoch carry-forward.** A descriptor's `Epoch` strictly increases on every reconfig of that range; an `ErrRangeChanged` is returned for any proposal carrying an older epoch. | per-descriptor epoch monotonicity | `quint/range_descriptors.qnt` (new) | `internal/agent/router_test.go` (extend) |
+| **S10** | **Cross-range HLC skew bound.** For any two ranges r1, r2, the HLC values they have observed differ by at most `MaxOffset` plus in-flight network delay; a `SnapshotRead(t)` returns the value at `t'` ≤ `t - MaxOffset` for any key not modified in `[t - MaxOffset, t]`. | `UncertaintyContract`, `NoSkewOverflow` | **`quint/cross_range.qnt` (new — §4.4)** | `internal/mvcc/snapshot_test.go` (extend with skew injection) |
 | **S11** | **Owner-epoch dominance (1-RTT safety).** A stale owner's ballot is dominated by every ballot a current owner can mint at a higher epoch; a stale owner's `Accept` always NACKs. | proven by ballot encoding (high bits = epoch) | covered by `CasPaxosMvcc.tla` via ballot comparison; document the encoding | `internal/caspaxos/owned_test.go` |
 | **S12** | **Watcher non-starvation.** Compaction never advances past the cursor of a live watcher registered before the compaction call. | `SafeCompactPoint(cursors)` contract | (not model-checked; structural argument) | `internal/watch/watch_test.go` |
-| **L1** | **Liveness — eventual rmap consistency.** Under fair scheduling, every client eventually refreshes its rmap after an `ErrRangeChanged`. | weak fairness on `ClientRefreshRmap` | `tla/RangeDescriptors.tla` (under WF assumption) | exercised by `split_test.go` |
-| **L2** | **Liveness — eventual lock takeover.** Under fair scheduling, an expired lock is eventually re-acquirable by any waiting client. | weak fairness on `Acquire` | `tla/Lease.tla` (extend, optional) | `internal/lease/lock_test.go` |
+| **L1** | **Liveness — eventual rmap consistency.** Under fair scheduling, every client eventually refreshes its rmap after an `ErrRangeChanged`. | weak fairness on `ClientRefreshRmap` | `quint/range_descriptors.qnt` (under WF assumption) | exercised by `split_test.go` |
+| **L2** | **Liveness — eventual lock takeover.** Under fair scheduling, an expired lock is eventually re-acquirable by any waiting client. | weak fairness on `Acquire` | `quint/lease.qnt` (extend, optional) | `internal/lease/lock_test.go` |
 
 Safety items (S*) are non-negotiable. Liveness items (L*) require
 fairness assumptions; document them where they bite.
 
 **TLA+ work this section calls out:**
 
-- `tla/RangeDescriptors.tla` — proves S8, S9, L1. **Shipped** in
+- `quint/range_descriptors.qnt` — proves S8, S9, L1. **Shipped** in
   commit `4d82117`.
-- `tla/CrossRange.tla` — proves S10. **Shipped** in commit `4d82117`.
-- `tla/RosterReconfig.tla` — proves S5.1 + S5.2. **Shipped** in
+- `quint/cross_range.qnt` — proves S10. **Shipped** in commit `4d82117`.
+- `quint/roster_reconfig.qnt` — proves S5.1 + S5.2. **Shipped** in
   commit `4d82117`. Closes the reflexive-register gap that
   `Reconfig.tla` alone left open.
-- Extension to `tla/Lease.tla` — add carry-forward across a range
+- Extension to `quint/lease.qnt` — add carry-forward across a range
   reconfig action so S7 is proved across the boundary, not just within
   one register. (S7 is already implemented and tested; the spec gap is
   closing the proof loop.) **Still pending.**
@@ -1615,7 +1615,7 @@ under `slow_fsync` + `crash_restart` is verified before merge.
 **PR #4:** §1 layers framing in README + `docs/layers.md` with the
 external-layer recipes. No code; positioning + docs.
 
-**Side track (can land any time, independent):** extend `tla/Lease.tla`
+**Side track (can land any time, independent):** extend `quint/lease.qnt`
 with a carry-forward action so S7 composes with `Reconfig.tla` and
 `RosterReconfig.tla` — closes the spec gap noted in §6.5.
 

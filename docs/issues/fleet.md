@@ -158,7 +158,7 @@ Spec: docs/spec/fleet.md#10-verification
 > Every safety rule in sections 3 and 5 MUST be an invariant in the Quint model.
 
 Recipe, one PR per step if any step passes five minutes:
-1. `quint/caspaxos.qnt`: state and `init` from `tla/CasPaxosMvcc.tla`.
+1. `quint/caspaxos.qnt`: state and `init` from `CasPaxosMvcc.tla`.
 2. Actions, one to one with the TLA+ actions.
 3. Invariants `Consistency`, `OneValuePerBallot`, `VotesSafe`, plus a negative control that drops the promise check.
 4. `quint compile --target tlaplus` and run TLC on the output with the original `.cfg` values. Record the state count next to the original's in `quint/PARITY.md`.
@@ -173,7 +173,7 @@ Spec: docs/spec/fleet.md#10-verification
 > The Quint model MUST include a negative control for each invariant that fails when the rule is omitted.
 
 Same recipe as the CasPaxosMvcc port. The negative control is
-`tla/OwnedRegisterBug.cfg`, the pre-W0 ballot rule; it must still find the
+`OwnedRegisterBug.cfg`, the pre-W0 ballot rule; it must still find the
 lost update as a short trace.
 
 Files: `quint/owned_register.qnt`, `quint/PARITY.md`
@@ -203,7 +203,7 @@ Spec: docs/spec/fleet.md#10-verification
 > Every safety rule in sections 3 and 5 MUST be an invariant in the Quint model.
 
 Same recipe. Invariant `NoStaleRead`; negative control is
-`tla/OwnerReadsBug.cfg` (naive lease checks).
+`OwnerReadsBug.cfg` (naive lease checks).
 
 Files: `quint/owner_reads.qnt`, `quint/PARITY.md`
 
