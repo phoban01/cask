@@ -232,6 +232,23 @@ func (kv *KV) CASSeq(ctx context.Context, key []byte, seq uint64, value []byte) 
 	}))
 }
 
+// DeleteSeq writes a tombstone only if the key's head version has
+// sequence seq and is live. It returns caspaxos.ErrConflict if the
+// precondition fails. seq must be nonzero: an absent key has nothing to
+// delete.
+func (kv *KV) DeleteSeq(ctx context.Context, key []byte, seq uint64) (Version, error) {
+	if seq == 0 {
+		return Version{}, errors.New("mvcc: DeleteSeq needs a live sequence, got 0")
+	}
+	op := kv.nextOp()
+	return kv.commit(ctx, key, op, kv.appendOp(op, func(head Version, present bool) ([]byte, bool, error) {
+		if !headIs(head, present, seq) {
+			return nil, false, caspaxos.ErrConflict
+		}
+		return nil, true, nil
+	}))
+}
+
 // headIs reports whether the head is the live version seq. seq 0 means
 // the key is absent or tombstoned.
 func headIs(head Version, present bool, seq uint64) bool {

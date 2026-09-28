@@ -137,10 +137,75 @@ func (s *Store) Create(ctx context.Context, key string, obj, out runtime.Object,
 	return s.decode(key, raw, v.Seq, out)
 }
 
-// Delete returns ErrNotImplemented.
-func (*Store) Delete(_ context.Context, _ string, _ runtime.Object, _ *apistorage.Preconditions,
-	_ apistorage.ValidateObjectFunc, _ runtime.Object, _ apistorage.DeleteOptions) error {
-	return ErrNotImplemented
+// Delete removes the object at key and decodes the deleted object into
+// out. The resourceVersion of out is the sequence of the tombstone.
+//
+// Delete reads the object, checks the preconditions, and runs
+// validateDeletion. It then tombstones the register with a
+// compare-and-set on the sequence it read, and removes the name from the
+// index. When another write lands first, it reads the object again and
+// repeats the checks. cachedExistingObject is not used: every attempt
+// reads the register.
+func (s *Store) Delete(ctx context.Context, key string, out runtime.Object, preconditions *apistorage.Preconditions,
+	validateDeletion apistorage.ValidateObjectFunc, _ runtime.Object, opts apistorage.DeleteOptions) error {
+	reg, name, err := s.objectKey(key)
+	if err != nil {
+		return err
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		v, ok, err := s.head(ctx, reg)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return apistorage.NewKeyNotFoundError(key, 0)
+		}
+		existing := newLike(out)
+		readable := true
+		if err := s.decode(key, v.Value, v.Seq, existing); err != nil {
+			if !opts.IgnoreStoreReadError {
+				return err
+			}
+			// The caller asked to delete an object it cannot decode.
+			// There is no object to check.
+			readable = false
+		}
+		if readable {
+			if err := preconditions.Check(key, existing); err != nil {
+				return err
+			}
+			if validateDeletion != nil {
+				if err := validateDeletion(ctx, existing); err != nil {
+					return err
+				}
+			}
+		}
+		//= docs/spec/fleet.md#3-storage-model
+		//# A delete MUST tombstone the object register before it removes the name from the index register.
+		tomb, err := s.kv.DeleteSeq(ctx, reg, v.Seq)
+		if errors.Is(err, caspaxos.ErrConflict) {
+			// Another write landed after the read. The checks ran on an
+			// old copy, so read again and repeat them.
+			//= docs/spec/fleet.md#3-storage-model
+			//# The extension server MUST re-read an object before it retries a write that returned a conflict.
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		//= docs/spec/fleet.md#3-storage-model
+		//# A mutation MUST write the object register before the index register.
+		if err := WriteIndex(ctx, s.kv, s.resource, name); err != nil {
+			return fmt.Errorf("cask storage: delete %q: object tombstoned, index write failed: %w", key, err)
+		}
+		if !readable {
+			return runtime.SetZeroValue(out)
+		}
+		return s.decode(key, v.Value, tomb.Seq, out)
+	}
 }
 
 // Watch returns ErrNotImplemented.
