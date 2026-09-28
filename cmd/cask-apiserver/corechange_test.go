@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/phoban01/cask/internal/backoff"
 	"github.com/phoban01/cask/internal/caspaxos"
 	"github.com/phoban01/cask/internal/roster"
 )
@@ -92,6 +93,12 @@ func TestCoreGrowthCarriesDataRegisters(t *testing.T) {
 	checkKeys(t, ctx, second, want, "after the founder stopped")
 }
 
+// testRetries and testBackoff bound the retries of a test read or write
+// that loses its round to the run loop's rounds.
+const testRetries = 8
+
+var testBackoff = backoff.FullJitter(time.Millisecond, 50*time.Millisecond)
+
 // writeKeys writes n data keys, taking the writers in turn, and returns
 // the values it wrote.
 func writeKeys(t *testing.T, ctx context.Context, n int, writers ...*membership) map[string]string {
@@ -100,7 +107,17 @@ func writeKeys(t *testing.T, ctx context.Context, n int, writers ...*membership)
 	for i := range n {
 		w := writers[i%len(writers)]
 		key, val := fmt.Sprintf("fleet/devices/d%02d", i), fmt.Sprintf("v%d", i)
-		if _, err := w.Propose(ctx, []byte(key), func([]byte) ([]byte, error) { return []byte(val), nil }); err != nil {
+		// Each attempt compares and sets on the key's current value. A
+		// retry after an unknown outcome finds its own write and keeps it.
+		_, err := caspaxos.RetryLost(ctx, testRetries, testBackoff, func() ([]byte, error) {
+			return w.Propose(ctx, []byte(key), func(cur []byte) ([]byte, error) {
+				if len(cur) != 0 && string(cur) != val {
+					return nil, fmt.Errorf("%s holds %q, want empty or %q", key, cur, val)
+				}
+				return []byte(val), nil
+			})
+		})
+		if err != nil {
 			t.Fatalf("write %s: %v", key, err)
 		}
 		want[key] = val
@@ -114,7 +131,9 @@ func checkKeys(t *testing.T, ctx context.Context, reader *membership, want map[s
 	t.Helper()
 	for key, val := range want {
 		rctx, rcancel := context.WithTimeout(ctx, 5*time.Second)
-		got, err := reader.Propose(rctx, []byte(key), caspaxos.Identity)
+		got, err := caspaxos.RetryLost(rctx, testRetries, testBackoff, func() ([]byte, error) {
+			return reader.Propose(rctx, []byte(key), caspaxos.Identity)
+		})
 		rcancel()
 		if err != nil {
 			t.Fatalf("read %s %s: %v", key, when, err)

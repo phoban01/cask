@@ -237,7 +237,7 @@ func TestSweepNeverAheadUnderConcurrentWritersAndSweeps(t *testing.T) {
 				// Contention can preempt a round or leave its outcome
 				// unknown. That costs progress, not safety, so the next
 				// pass tries again.
-				if _, err := Sweep(ctx, kv, "devices", list); err != nil && !lostRound(err) {
+				if _, err := Sweep(ctx, kv, "devices", list); err != nil && !caspaxos.LostRound(err) {
 					report(err)
 					return
 				}
@@ -325,7 +325,7 @@ func TestObjectName(t *testing.T) {
 func untilRoundWon(f func() error) error {
 	for {
 		err := f()
-		if !lostRound(err) {
+		if !caspaxos.LostRound(err) {
 			return err
 		}
 		time.Sleep(time.Millisecond)

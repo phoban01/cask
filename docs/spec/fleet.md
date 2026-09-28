@@ -175,6 +175,8 @@ A resumed core change MUST carry every data register that it did not carry under
 
 The extension server MUST answer a data write that a voter rejected as stale with a retryable status.
 
+A roster read that loses its round MUST retry after a jittered backoff, up to a fixed number of attempts.
+
 An operator MUST NOT grow the voter set by restarting members with a longer static peer list.
 
 The voter count MUST be odd.

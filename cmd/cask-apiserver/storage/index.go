@@ -95,12 +95,6 @@ const indexWriteRetries = 32
 // retry often meets the same rounds again.
 var contentionBackoff = backoff.FullJitter(time.Millisecond, 50*time.Millisecond)
 
-// lostRound reports whether err means that a round lost to other
-// proposers: caspaxos.ErrPreempted, or caspaxos.ErrUnknownOutcome.
-func lostRound(err error) bool {
-	return errors.Is(err, caspaxos.ErrPreempted) || errors.Is(err, caspaxos.ErrUnknownOutcome)
-}
-
 // WriteIndex makes the index entry for name agree with the object
 // register. It records the object's current sequence, or removes the name
 // when the object is tombstoned or absent. Call it after the object write
@@ -159,7 +153,7 @@ func writeIndex(ctx context.Context, kv *mvcc.KV, resource, name string) (indexW
 			return w, nil
 		case errors.Is(err, caspaxos.ErrConflict):
 			// Another index writer changed the register after the read.
-		case lostRound(err):
+		case caspaxos.LostRound(err):
 			lost = err
 			if err := contentionBackoff(ctx, lostRounds); err != nil {
 				return indexWrite{}, err
@@ -272,19 +266,7 @@ func readHistory(ctx context.Context, kv *mvcc.KV, key []byte) (mvcc.Chain, erro
 func retryRead[T any](ctx context.Context, read func() (T, error)) (T, error) {
 	//= docs/spec/fleet.md#3-storage-model
 	//# A read of the index register or an object register MUST retry when its round loses or has an unknown outcome.
-	var zero T
-	var err error
-	for attempt := range indexWriteRetries {
-		var out T
-		out, err = read()
-		if err == nil || !lostRound(err) {
-			return out, err
-		}
-		if err := contentionBackoff(ctx, attempt); err != nil {
-			return zero, err
-		}
-	}
-	return zero, err
+	return caspaxos.RetryLost(ctx, indexWriteRetries, contentionBackoff, read)
 }
 
 // ErrNotRecorded means that the retained index history holds no entry for
