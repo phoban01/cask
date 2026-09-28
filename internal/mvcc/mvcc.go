@@ -215,6 +215,33 @@ func (kv *KV) CAS(ctx context.Context, key, expected, value []byte) (Version, er
 	}))
 }
 
+// CASSeq sets the key to value only if its head version has sequence seq
+// and is live. seq 0 matches an absent or tombstoned key. It returns
+// caspaxos.ErrConflict if the precondition fails.
+//
+// CAS compares values, so a value that changes and changes back still
+// matches. CASSeq compares sequences, which never repeat, so it detects
+// every write since the caller read seq.
+func (kv *KV) CASSeq(ctx context.Context, key []byte, seq uint64, value []byte) (Version, error) {
+	op := kv.nextOp()
+	return kv.commit(ctx, key, op, kv.appendOp(op, func(head Version, present bool) ([]byte, bool, error) {
+		if !headIs(head, present, seq) {
+			return nil, false, caspaxos.ErrConflict
+		}
+		return value, false, nil
+	}))
+}
+
+// headIs reports whether the head is the live version seq. seq 0 means
+// the key is absent or tombstoned.
+func headIs(head Version, present bool, seq uint64) bool {
+	live := present && head.Live()
+	if seq == 0 {
+		return !live
+	}
+	return live && head.Seq == seq
+}
+
 // commit proposes change and returns the version produced by op. The version is
 // located by OpID rather than by position, since other operations may commit
 // before or after it in the chain.

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/phoban01/cask/cmd/cask-apiserver/apis/fleet/v1alpha1"
+	"github.com/phoban01/cask/internal/mvcc"
 	"k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -14,15 +15,21 @@ import (
 	apistorage "k8s.io/apiserver/pkg/storage"
 )
 
-// newTestStore returns a Store for devices over an in-process cask.
+// newTestStore returns a Store for devices over a new in-process cask.
 func newTestStore(t *testing.T) *Store {
+	t.Helper()
+	return newStoreOn(t, newKV(t))
+}
+
+// newStoreOn returns a Store for devices over kv.
+func newStoreOn(t *testing.T, kv *mvcc.KV) *Store {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := v1alpha1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
 	codec := serializer.NewCodecFactory(scheme).LegacyCodec(v1alpha1.SchemeGroupVersion)
-	return New(newKV(t), codec, "devices")
+	return New(kv, codec, "devices")
 }
 
 const keyPrefix = "/fleet.cask.dev/devices/"
