@@ -270,6 +270,9 @@ var errVoteDropped = errors.New("caspaxos: vote dropped (buggify)")
 // ballot within the responding quorum. It returns as soon as the quorum is
 // gathered — or as soon as one is provably unreachable — and cancels the
 // stragglers; a slow or dead replica costs nothing while a quorum is healthy.
+// It also returns at the first rejection. The round is then preempted, and
+// Propose retries above the conflict ballot. Without this, a promise, a
+// rejection, and a hung acceptor wait forever on the hung one.
 //
 // Safety of the early return: the carried value is the max accepted over
 // exactly the promised set at return time, which is a valid prepare quorum —
@@ -314,7 +317,13 @@ func (p *Proposer) prepare(ctx context.Context, key []byte, b Ballot) (current [
 		case r.err != nil:
 			// unreachable acceptor (or a dropped vote): a non-vote
 		case !r.v.Promised:
-			conflict = conflict.Max(r.v.Conflict)
+			// A higher ballot preempts this round. Stop here and retry
+			// above it. Do not wait for the undecided acceptors: one of
+			// them can hang, and the round must not wait on it while a
+			// majority answers (#143).
+			//= docs/spec/fleet.md#6-membership
+			//# A core change MUST finish while a majority of the old core and a majority of the new core answer.
+			return nil, conflict.Max(r.v.Conflict), false, nil
 		default:
 			promised[r.i] = true
 			if best.Less(r.v.Accepted) {
