@@ -1258,3 +1258,29 @@ Files: `cmd/cask/cluster.go`
 
 Done when: a test writes a descriptor on a one-voter core, grows it to
 three, stops the founder, and reads the descriptor back.
+
+## ci: TestDuelingProposersConvergeWithBackoff fails when unknown outcomes repeat
+
+labels: ci, agent-5m
+
+Spec: docs/spec/fleet.md#3-storage-model
+> A retried write MUST be a compare-and-set, never a blind reapplication of a change.
+
+`TestDuelingProposersConvergeWithBackoff` in `internal/caspaxos/backoff_test.go`
+fails on CI with `writer 2: caspaxos: write outcome unknown; re-read before
+retry (livelock: backoff failed to converge)`. Since #86, a contended write
+whose accept fails returns `ErrUnknownOutcome`. The test retries such a write
+only four times. Each retry is a new `Propose` call, so its backoff starts
+again at attempt 0 and the delay never grows. Six writers on one key can
+then collide four times in a row. A stress run fails 18 of 3000 runs.
+
+Task: give each op one retry budget. After `ErrUnknownOutcome` or
+`ErrPreempted`, the writer backs off with an attempt count that grows across
+retries, then proposes again. The retry reads the register and skips an op id
+that already landed. Keep the exactly-once check on op ids. A writer that
+spends its budget still fails the test as a livelock.
+
+Files: `internal/caspaxos/backoff_test.go`
+
+Done when: `go test -race -count=500 -cpu=1,2,4 -run TestDuelingProposersConvergeWithBackoff ./internal/caspaxos/`
+passes in two copies at once, 3000 of 3000 runs.

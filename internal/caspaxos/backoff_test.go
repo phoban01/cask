@@ -50,6 +50,9 @@ func TestBackoffCalledOnPreemption(t *testing.T) {
 // driver convention, converge under ballot bumping + randomized backoff
 // without exhausting their retry budgets.
 func TestDuelingProposersConvergeWithBackoff(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A retried write MUST be a compare-and-set, never a blind reapplication of a change.
 	const (
 		writers = 6
 		ops     = 5
@@ -60,23 +63,13 @@ func TestDuelingProposersConvergeWithBackoff(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, writers)
 	for w := range writers {
-		p := caspaxos.NewProposer(uint64(w+1), acc,
-			caspaxos.WithBackoff(backoff.Seeded(200_000, 5_000_000, int64(w)))) // 200µs..5ms
+		pause := backoff.Seeded(200_000, 5_000_000, int64(w)) // 200µs..5ms
+		p := caspaxos.NewProposer(uint64(w+1), acc, caspaxos.WithBackoff(pause))
 		wg.Add(1)
 		go func(w int, p *caspaxos.Proposer) {
 			defer wg.Done()
 			for i := range ops {
-				// Retry an unknown outcome with a change that skips an
-				// append that already landed: the caller side of the
-				// ErrUnknownOutcome contract.
-				change := appendOnce(fmt.Sprintf("w%d-%d", w, i))
-				var err error
-				for range 4 {
-					if _, err = p.Propose(ctx, []byte("hot"), change); !errors.Is(err, caspaxos.ErrUnknownOutcome) {
-						break
-					}
-				}
-				if err != nil {
+				if err := appendRetrying(ctx, p, pause, fmt.Sprintf("w%d-%d", w, i)); err != nil {
 					errs[w] = err
 					return
 				}
@@ -109,6 +102,34 @@ func TestDuelingProposersConvergeWithBackoff(t *testing.T) {
 			}
 		}
 	}
+}
+
+// clientRetries is the retry budget for one append. A writer that spends it
+// makes no progress, and the test reports a livelock.
+const clientRetries = 12
+
+// appendRetrying appends marker to the "hot" register exactly once. It is the
+// caller side of the ErrUnknownOutcome contract. After an unknown outcome or
+// a preempted call, it backs off and proposes again. The next round reads the
+// register in its prepare phase. appendOnce then skips marker if an earlier
+// attempt landed, so a retry never reapplies the append blindly.
+//
+// Each Propose call starts its own backoff at attempt 0. The attempt count
+// here grows across calls, so the delay between calls grows too. Without
+// that, six writers can keep colliding at the shortest delay.
+func appendRetrying(ctx context.Context, p *caspaxos.Proposer, pause backoff.Func, marker string) error {
+	change := appendOnce(marker)
+	var err error
+	for attempt := range clientRetries {
+		_, err = p.Propose(ctx, []byte("hot"), change)
+		if !errors.Is(err, caspaxos.ErrUnknownOutcome) && !errors.Is(err, caspaxos.ErrPreempted) {
+			return err
+		}
+		if perr := pause(ctx, attempt+1); perr != nil {
+			return perr
+		}
+	}
+	return err
 }
 
 // appendOnce is appendChange that returns the current value unchanged when
