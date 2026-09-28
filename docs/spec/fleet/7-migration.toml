@@ -16,6 +16,22 @@ target = "docs/spec/fleet.md#7-migration"
 # 
 # The initial index sequence for each resource type MUST be greater than the source etcd revision at export time.
 # 
+# The export records fences in the status of each Device and each DeviceClaim. The highest fence that the export recorded for an object is the highest of these fences for that object.
+# 
+# The import MUST NOT seed an object's lock at a fence below the highest fence that the export recorded for that object.
+# 
+# The import MUST restore a Bound claim as Bound only when that claim alone holds the highest fence that the export recorded for its object.
+# 
+# The import MUST write a Bound claim as Lost when it does not restore that claim as Bound.
+# 
+# The import MUST grant a restored claim's session and seed its lock before it writes the claim.
+# 
+# The import MUST grant a restored claim's session for the claim's TTL plus an import grace.
+# 
+# The import MUST renew each restored claim's session after it writes the import marker.
+# 
+# A restored claim stays Bound only when the import ends within the grace after the seed, and the controller of the claim's cluster renews the session within the grace and the TTL after the import ends. Otherwise the claim goes to Lost, and its fence stays in the lock.
+# 
 # A continuous export of all fleet objects MUST run from the first day of phase one.
 # 
 # The cutover MUST be rehearsed on a copy of the management cluster before it runs on the real one.
@@ -60,6 +76,42 @@ The APIService MUST NOT become available while any imported object that other ob
 level = "MUST"
 quote = '''
 The initial index sequence for each resource type MUST be greater than the source etcd revision at export time.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The import MUST NOT seed an object's lock at a fence below the highest fence that the export recorded for that object.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The import MUST restore a Bound claim as Bound only when that claim alone holds the highest fence that the export recorded for its object.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The import MUST write a Bound claim as Lost when it does not restore that claim as Bound.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The import MUST grant a restored claim's session and seed its lock before it writes the claim.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The import MUST grant a restored claim's session for the claim's TTL plus an import grace.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+The import MUST renew each restored claim's session after it writes the import marker.
 '''
 
 [[spec]]

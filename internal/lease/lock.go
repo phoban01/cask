@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/phoban01/cask/internal/caspaxos"
 )
@@ -174,6 +175,102 @@ func (l *Locks) Bump(ctx context.Context, name, sessionID string, minFence uint6
 		return newFence, nil
 	}
 	return 0, ErrContended
+}
+
+// ErrSeedConflict means Seed found a lock register that it cannot raise to
+// the seed without losing a live holder or a fence.
+var ErrSeedConflict = errors.New("lease: lock register conflicts with the seed")
+
+// Seed sets up a lock register that another system minted fences for, so
+// that cask continues its fences. The import of a cutover uses it.
+//
+// After Seed, the register fence is at least fence. When sessionID is not
+// empty, sessionID holds the lock at exactly fence. The caller must grant
+// that session first; otherwise a concurrent Acquire sees a holder that is
+// not live and takes the lock over.
+//
+// Seed never lowers a fence and never takes a lock from a live holder. A
+// holder whose session has lapsed is free, as it is for Acquire, but only
+// when the seed raises the fence above the lapsed holder's fence. Seed
+// returns ErrSeedConflict when the register holds a live lock at a lower
+// fence, or when sessionID must hold the lock and the register has moved
+// past fence or names another holder at fence. A second Seed with the same
+// arguments changes nothing.
+func (l *Locks) Seed(ctx context.Context, name, sessionID string, fence uint64) error {
+	key := LockKey(name)
+	for attempt := 0; attempt < l.retries; attempt++ {
+		cur, err := l.read(ctx, key)
+		if err != nil {
+			return err
+		}
+		write, err := l.seedNeedsWrite(ctx, name, cur, sessionID, fence)
+		if err != nil || !write {
+			return err
+		}
+		// The seed only raises the fence, so a later Acquire mints above
+		// every fence the other system minted.
+		observed := cur
+		next := Lock{Session: sessionID, Held: sessionID != "", Fence: fence}
+		_, err = l.prop.Propose(ctx, key, func(current []byte) ([]byte, error) {
+			if decodeLock(current) != observed {
+				return nil, caspaxos.ErrConflict // raced since we read: retry from the top
+			}
+			return marshal(next)
+		})
+		// The re-read at the top finds the seed when an unknown outcome
+		// landed, and compares and sets again otherwise.
+		if errors.Is(err, caspaxos.ErrConflict) || errors.Is(err, caspaxos.ErrUnknownOutcome) {
+			if perr := l.pause(ctx, attempt); perr != nil {
+				return perr
+			}
+			continue
+		}
+		return err
+	}
+	return ErrContended
+}
+
+// CheckSeed reads the register and returns ErrSeedConflict when Seed with
+// the same arguments would conflict. It writes nothing. A caller checks
+// before it grants the session that the seed names, so a seed that cannot
+// succeed leaves no live session behind. The register can still change
+// between CheckSeed and Seed.
+func (l *Locks) CheckSeed(ctx context.Context, name, sessionID string, fence uint64) error {
+	cur, err := l.read(ctx, LockKey(name))
+	if err != nil {
+		return err
+	}
+	_, err = l.seedNeedsWrite(ctx, name, cur, sessionID, fence)
+	return err
+}
+
+// seedNeedsWrite decides a seed against the register cur. It reports
+// whether Seed must write, or returns ErrSeedConflict.
+func (l *Locks) seedNeedsWrite(ctx context.Context, name string, cur Lock, sessionID string, fence uint64) (bool, error) {
+	conflict := func() (bool, error) {
+		return false, fmt.Errorf("%w: %q has %+v, seed is fence %d for session %q",
+			ErrSeedConflict, name, cur, fence, sessionID)
+	}
+	switch {
+	case cur.Fence > fence && sessionID == "":
+		return false, nil // cask minted above the seed already
+	case cur.Fence == fence && (sessionID == "" || (cur.Held && cur.Session == sessionID)):
+		return false, nil // seeded already
+	case cur.Fence >= fence:
+		// Taking the lock here would keep or lower the fence.
+		return conflict()
+	case cur.Held:
+		live, err := l.sessions.Live(ctx, cur.Session)
+		if err != nil {
+			return false, err
+		}
+		if live {
+			return conflict()
+		}
+		// The holder lapsed. The seed takes over at a higher fence, so
+		// a receiver rejects the lapsed holder's effects.
+	}
+	return true, nil
 }
 
 // Release frees the lock if held by sessionID. It is idempotent and keeps the

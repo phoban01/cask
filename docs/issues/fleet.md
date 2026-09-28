@@ -1862,3 +1862,56 @@ Files: `docs/spec/fleet.md`, `internal/caspaxos/proposer.go`,
 `internal/caspaxos/unknown.go`, `internal/mvcc/mvcc.go`, tests
 
 Done when: `go test -race -run 'TestGateCleanAcrossProfiles/contention' ./testutil/sim/` passes, and a new test fails when `Propose` ignores the retry number.
+
+## migrate: carry claim locks and fences across the cutover
+
+labels: fleet, migration
+
+Spec: docs/spec/fleet.md#5-claims-and-fencing
+> Every successful acquisition MUST mint a fence strictly greater than every fence previously minted for that object.
+
+Found while writing the cutover runbook (#52, PR #193). An imported Bound
+claim holds no cask lock, so its next renewal fails and it goes to Lost.
+The first acquisition after the cutover mints fence 1, and a receiver
+that kept a higher fence from before the cutover rejects it.
+
+Task: spec first. Decide how the import re-acquires the lock for each
+Bound claim and seeds the lock fence above the highest fence the export
+saw. Add the rule to section 7, model it in Quint with a negative control
+that restarts fences at 1, then implement it in the import.
+
+Files: `docs/spec/fleet.md`, `quint/`, `cmd/cask-apiserver/migrate/import.go`
+
+Done when: an import test binds a claim at fence 7 in the export, and
+after the import the claim stays Bound and the next acquisition mints a
+fence above 7.
+
+
+
+## apiserver: keep the last fence in Device status after a release
+
+labels: fleet, migration
+
+Spec: docs/spec/fleet.md#5-claims-and-fencing
+> A status write MUST NOT lower an advertised fence.
+
+Found while fixing #196. `setDeviceLease(nil)` in
+`cmd/cask-apiserver/claims.go` sets the Device status to `Available` with
+no lease. The advertised fence goes back to none. When the claim is then
+deleted, no object records the fence. An export at that moment cannot see
+it, so the import seeds the lock too low. The next acquisition after the
+cutover can then mint a fence that a receiver already accepted.
+
+Task: keep the last fence in the Device status after a release. For
+example, set the phase to `Available` and keep `status.lease` with its
+fence, or add `status.lastFence`. Update `planFences` in
+`cmd/cask-apiserver/migrate/fences.go` if the field changes. Drop the
+assumption note in `quint/cutover.qnt`.
+
+Files: `cmd/cask-apiserver/claims.go`, `cmd/cask-apiserver/types.go`,
+`cmd/cask-apiserver/apis/fleet/v1alpha1/`,
+`cmd/cask-apiserver/migrate/fences.go`, `quint/cutover.qnt`
+
+Done when: `go -C cmd/cask-apiserver test -race ./...` passes, and a test
+binds a claim at fence 3, deletes it, and finds fence 3 in the Device
+status.

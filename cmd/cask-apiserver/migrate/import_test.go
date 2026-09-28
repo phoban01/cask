@@ -43,8 +43,16 @@ func newKV(t *testing.T) *mvcc.KV {
 // client and returns the file.
 func exportFixture(t *testing.T) []byte {
 	t.Helper()
+	// claim-a is Bound to dev-a at fence 7, and dev-a advertises it, so
+	// the import keeps the claim as it is.
+	devA := device("dev-a", "uid-a")
+	if err := unstructured.SetNestedMap(devA.Object, map[string]any{
+		"cluster": "east", "claim": "claim-a", "fence": int64(7),
+	}, "status", "lease"); err != nil {
+		t.Fatal(err)
+	}
 	devices := []*unstructured.Unstructured{
-		device("dev-c", "uid-c"), device("dev-a", "uid-a"), device("dev-b", "uid-b"),
+		device("dev-c", "uid-c"), devA, device("dev-b", "uid-b"),
 	}
 	claims := []*unstructured.Unstructured{claim("claim-a", "uid-claim-a")}
 	var buf bytes.Buffer
@@ -60,7 +68,7 @@ func importFile(t *testing.T, kv *mvcc.KV, file []byte) (Result, error) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Import(context.Background(), kv, h, objects)
+	return Import(context.Background(), kv, &fakeLocks{}, h, objects)
 }
 
 // newStore returns a storage.Store for resource over kv, as the API
@@ -116,8 +124,8 @@ func TestImportRoundTripsEveryFieldButResourceVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res != (Result{Written: 4}) {
-		t.Fatalf("result = %+v, want 4 written", res)
+	if res != (Result{Written: 4, Renewed: 1}) {
+		t.Fatalf("result = %+v, want 4 written and 1 renewed", res)
 	}
 
 	_, objects, err := Read(bytes.NewReader(file))
@@ -204,7 +212,7 @@ func TestImportRepairsLostIndexWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A crash after the first object write and before its index write.
-	items, err := prepare(h, objects)
+	items, _, err := prepare(h, objects)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,12 +220,12 @@ func TestImportRepairsLostIndexWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := Import(ctx, kv, h, objects)
+	res, err := Import(ctx, kv, &fakeLocks{}, h, objects)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res != (Result{Written: 3, Unchanged: 1}) {
-		t.Fatalf("result = %+v, want 3 written and 1 unchanged", res)
+	if res != (Result{Written: 3, Unchanged: 1, Renewed: 1}) {
+		t.Fatalf("result = %+v, want 3 written, 1 unchanged, 1 renewed", res)
 	}
 	idx, err := storage.ReadIndex(ctx, kv, items[0].resource)
 	if err != nil {
@@ -277,7 +285,7 @@ func TestImportRefusesInvalidFileBeforeWriting(t *testing.T) {
 		bad[i] = o.DeepCopy()
 	}
 	bad[len(bad)-1].SetUID("")
-	if _, err := Import(context.Background(), kv, h, bad); err == nil || !strings.Contains(err.Error(), "no uid") {
+	if _, err := Import(context.Background(), kv, &fakeLocks{}, h, bad); err == nil || !strings.Contains(err.Error(), "no uid") {
 		t.Fatalf("import err = %v, want a missing uid", err)
 	}
 

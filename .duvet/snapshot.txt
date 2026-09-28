@@ -96,6 +96,12 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST,exception]: The APIService MUST NOT become available before the import has completed.
     TEXT[!MUST,exception]: The APIService MUST NOT become available while any imported object that other objects reference by ownerReference is missing.
     TEXT[!MUST,exception]: The initial index sequence for each resource type MUST be greater than the source etcd revision at export time.
+    TEXT[!MUST,implementation,implication,test]: The import MUST NOT seed an object's lock at a fence below the highest fence that the export recorded for that object.
+    TEXT[!MUST,implementation,implication,test]: The import MUST restore a Bound claim as Bound only when that claim alone holds the highest fence that the export recorded for its object.
+    TEXT[!MUST,implementation,implication,test]: The import MUST write a Bound claim as Lost when it does not restore that claim as Bound.
+    TEXT[!MUST,implementation,implication,test]: The import MUST grant a restored claim's session and seed its lock before it writes the claim.
+    TEXT[!MUST,implementation,test]: The import MUST grant a restored claim's session for the claim's TTL plus an import grace.
+    TEXT[!MUST,implementation,test]: The import MUST renew each restored claim's session after it writes the import marker.
     TEXT[!MUST,exception]: A continuous export of all fleet objects MUST run from the first day of phase one.
     TEXT[!MUST,exception]: The cutover MUST be rehearsed on a copy of the management cluster before it runs on the real one.
 

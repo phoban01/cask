@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"time"
 
+	"github.com/phoban01/cask/cmd/cask-apiserver/migrate"
 	"github.com/phoban01/cask/cmd/cask-apiserver/storage"
 	"github.com/phoban01/cask/internal/caspaxos"
 	"github.com/phoban01/cask/internal/lease"
@@ -24,6 +26,10 @@ type fleetStore struct {
 	kv       *mvcc.KV
 	sessions *lease.Sessions
 	locks    *lease.Locks
+
+	// importGrace is the extra session time of a restored claim (see
+	// Seed). main sets defaultImportGrace.
+	importGrace time.Duration
 
 	// afterRead, if set, runs after update or delete reads the index entry
 	// and before it writes. Tests use it to land a concurrent write in
@@ -51,6 +57,65 @@ func deviceLockName(device string) string { return "device/" + device }
 // claimSessionID is the lease session backing one claim's holdership.
 func claimSessionID(cluster, claim string) string {
 	return fmt.Sprintf("claim/%s/%s", cluster, claim)
+}
+
+// defaultImportGrace is the extra session time that the import gives each
+// restored claim. It covers the object writes of the import and the start
+// of the claim's controller.
+const defaultImportGrace = 10 * time.Minute
+
+// importTTL is the session TTL of a restored claim, in nanoseconds: the
+// claim's TTL plus the import grace.
+func (s *fleetStore) importTTL(seed migrate.LockSeed) int64 {
+	ttl := seed.TTLSeconds
+	if ttl <= 0 {
+		ttl = 30
+	}
+	//= docs/spec/fleet.md#7-migration
+	//# The import MUST grant a restored claim's session for the claim's TTL plus an import grace.
+	return ttl*int64(time.Second) + int64(s.importGrace)
+}
+
+// Seed carries one device lock across the cutover (migrate.Locks).
+//
+// For a restored Bound claim, it first checks the lock register, so a
+// seed that must conflict grants no session. It then grants the claim's
+// session, so no Acquire can see the seeded holder as lapsed and take the
+// lock over. Last, it seeds the lock. If the register changed after the
+// check and the seed fails, it revokes the session, so the claim cannot
+// renew a session that holds no lock.
+func (s *fleetStore) Seed(ctx context.Context, seed migrate.LockSeed) error {
+	name := deviceLockName(seed.Device)
+	session := ""
+	if seed.Claim != "" {
+		session = claimSessionID(seed.Cluster, seed.Claim)
+		if err := s.locks.CheckSeed(ctx, name, session, seed.Fence); err != nil {
+			return err
+		}
+		//= docs/spec/fleet.md#7-migration
+		//# The import MUST grant a restored claim's session and seed its lock before it writes the claim.
+		if _, err := s.sessions.Grant(ctx, session, session, s.importTTL(seed)); err != nil {
+			return fmt.Errorf("session grant: %w", err)
+		}
+	}
+	//= docs/spec/fleet.md#7-migration
+	//# The import MUST NOT seed an object's lock at a fence below the highest fence that the export recorded for that object.
+	err := s.locks.Seed(ctx, name, session, seed.Fence)
+	if err != nil && session != "" {
+		if rerr := s.sessions.Revoke(ctx, session); rerr != nil {
+			err = errors.Join(err, fmt.Errorf("revoke session %q: %w", session, rerr))
+		}
+	}
+	return err
+}
+
+// Renew extends a restored claim's session by its TTL plus the import
+// grace (migrate.Locks). KeepAlive fails on a lapsed session and does not
+// grant it again.
+func (s *fleetStore) Renew(ctx context.Context, seed migrate.LockSeed) error {
+	session := claimSessionID(seed.Cluster, seed.Claim)
+	_, err := s.sessions.KeepAlive(ctx, session, session, s.importTTL(seed))
+	return err
 }
 
 // entry reads the index entry of name. It returns errNotFound when the
