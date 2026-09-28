@@ -49,11 +49,22 @@ import (
 // dataKeysPath lists the keys the member's acceptor holds.
 const dataKeysPath = "/roster/keys"
 
-// coreChange is a request to the run loop to move the core to target.
+// coreChange is a request to the run loop to move the core. plan computes
+// the target core from the roster value that the run loop reads, so the
+// target never comes from a stale view.
 type coreChange struct {
-	ctx    context.Context
-	target []uint64
-	done   chan coreResult
+	ctx  context.Context
+	plan func(cur roster.Value) ([]uint64, error)
+	done chan coreResult
+}
+
+// errNotDriver is the error of a core change on a member that is not the
+// driver of the current core.
+var errNotDriver = errors.New("membership: not the driver")
+
+// fixedTarget is a plan that always moves the core to target.
+func fixedTarget(target []uint64) func(roster.Value) ([]uint64, error) {
+	return func(roster.Value) ([]uint64, error) { return target, nil }
 }
 
 type coreResult struct {
@@ -64,10 +75,17 @@ type coreResult struct {
 // changeCore moves the roster core to target through joint consensus and
 // carries every data register with it. Only the driver runs it, inside its
 // run loop. Cancelling ctx stops the change; the roster keeps the joint
-// value, and the driver's run loop resumes it. The promote endpoint
-// (issue #45) will call it.
+// value, and the driver's run loop resumes it.
 func (m *membership) changeCore(ctx context.Context, target []uint64) (roster.Value, error) {
-	req := coreChange{ctx: ctx, target: target, done: make(chan coreResult, 1)}
+	return m.changeCoreBy(ctx, fixedTarget(target))
+}
+
+// changeCoreBy is changeCore with a target that plan computes on the run
+// loop from the current roster value. An error from plan stops the change
+// before it starts, and changeCoreBy returns that error. The promote and
+// demote endpoints (admin.go) call it.
+func (m *membership) changeCoreBy(ctx context.Context, plan func(cur roster.Value) ([]uint64, error)) (roster.Value, error) {
+	req := coreChange{ctx: ctx, plan: plan, done: make(chan coreResult, 1)}
 	select {
 	case m.coreReqs <- req:
 	case <-ctx.Done():
@@ -84,7 +102,7 @@ func (m *membership) changeCore(ctx context.Context, target []uint64) (roster.Va
 // runCoreChange is changeCore on the run loop. It stops when the caller's
 // context or the run loop's context ends, or when the change makes no
 // progress for CarryTimeout.
-func (m *membership) runCoreChange(runCtx, reqCtx context.Context, target []uint64) coreResult {
+func (m *membership) runCoreChange(runCtx, reqCtx context.Context, plan func(roster.Value) ([]uint64, error)) coreResult {
 	//= docs/spec/fleet.md#6-membership
 	//# A core change MUST finish while a majority of the old core and a majority of the new core answer.
 	ctx, cancel := context.WithCancelCause(reqCtx)
@@ -99,7 +117,18 @@ func (m *membership) runCoreChange(runCtx, reqCtx context.Context, target []uint
 
 	prev, _ := m.snap.Load()
 	if !cluster.IsDriver(m.self.NodeID, prev.Core) {
-		return coreResult{err: fmt.Errorf("membership: node %d is not the driver of core %v", m.self.NodeID, prev.Core)}
+		return coreResult{err: fmt.Errorf("%w: node %d is not the driver of core %v", errNotDriver, m.self.NodeID, prev.Core)}
+	}
+	// Plan against the register, not the local view. Only the driver
+	// writes the core, and it runs one change at a time, so the value
+	// stays current until Reconfigure publishes the joint core.
+	cur, err := m.rost.Get(ctx)
+	if err != nil {
+		return coreResult{err: err}
+	}
+	target, err := plan(cur)
+	if err != nil {
+		return coreResult{err: err}
 	}
 	v, err := m.rost.Reconfigure(ctx, target)
 	if err != nil {
