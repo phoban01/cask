@@ -73,6 +73,23 @@ Use devbox for everything. Do not install tools globally or call `nix-shell`
 by hand. `devbox.json` lists the packages and the scripts above.
 `devbox run duvet-install` installs Duvet through cargo on first use.
 
+
+## Local resources
+
+The development VM has 16 GB of memory. Running out of it kills the
+Claude Code session, so heavy jobs must not overlap.
+
+- devbox caps the Java heap at 3 GB (`JVM_ARGS` for Apalache,
+  `JAVA_TOOL_OPTIONS` for TLC and other JVMs), Go package parallelism at
+  four (`GOFLAGS=-p=4`), and the simulator gate at four shards.
+- Run one heavy job at a time: a `quint verify`, a TLC run, an e2e run,
+  or a race stress run. Do not start a second one in parallel.
+- `devbox run e2e` takes a lock, so a second run waits for the first.
+- A stress run uses one copy of `go test` with a moderate `-count`.
+  Do not run many copies at once.
+- Delete kind clusters when a run ends, and delete only clusters whose
+  names start with `e2e-`.
+
 ## Architecture decisions already made
 
 - Storage: one cask register per object, one index register per resource
