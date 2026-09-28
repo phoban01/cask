@@ -150,7 +150,15 @@ func (s *Store) entry(ctx context.Context, name string) (e Entry, ok bool, err e
 func (s *Store) indexed(ctx context.Context, name string, e Entry) ([]byte, error) {
 	//= docs/spec/fleet.md#3-storage-model
 	//# A get MUST read the object at the object register sequence that the index entry records.
-	v, found, err := s.kv.GetAt(ctx, ObjectKey(s.resource, name), e.Obj)
+	type got struct {
+		v     mvcc.Version
+		found bool
+	}
+	r, err := retryRead(ctx, func() (got, error) {
+		v, found, err := s.kv.GetAt(ctx, ObjectKey(s.resource, name), e.Obj)
+		return got{v, found}, err
+	})
+	v, found := r.v, r.found
 	if err != nil {
 		return nil, err
 	}

@@ -63,6 +63,8 @@ When the index write of a mutation did not complete, the next index write for th
 
 A mutation whose object write committed MUST retry its index write when that index write loses a round or has an unknown outcome.
 
+A read of the index register or an object register MUST retry when its round loses or has an unknown outcome.
+
 The extension server MUST reconcile the index register against the object registers at startup.
 
 The extension server MUST reconcile the index register against the object registers at a fixed interval.

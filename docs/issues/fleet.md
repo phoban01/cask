@@ -1744,3 +1744,74 @@ test with a proposer that returns `ErrUnknownOutcome` and then
 Files: `internal/mvcc/mvcc.go`, `internal/mvcc/mvcc_test.go`
 
 Done when: the new test passes, and `devbox run test` passes.
+
+## storage: retry a read that loses its consensus round
+
+labels: fleet, apiserver, agent-5m
+
+Spec: docs/spec/fleet.md#3-storage-model
+> A get MUST serve an object only once the index register records it.
+
+Split from #164. Store reads (get, the index entry read, the object head
+read) run a full consensus round. Under contention that round can lose
+(`ErrPreempted`) before anything is written, and the Store returns a 500.
+A read changes nothing, so retrying it is safe. This is the last source
+of the storage test flakes after #174 and #178, for example
+`TestApiserversWithOneNodeIDKeepEveryWrite` failing with
+`east-c-0: caspaxos: preempted`.
+
+Task: retry a lost read round with jittered backoff, bounded, in the
+Store's read helpers. Do not retry a write here; writes follow #174 and
+#180. Add a test that injects `ErrPreempted` into the first read of a
+get, an update and a delete and asserts success.
+
+Files: `cmd/cask-apiserver/storage/cask.go`, `index.go`
+
+Done when: `go -C cmd/cask-apiserver test -race -count=50 ./storage/...` passes 50 of 50.
+
+## storage: serve bounded gets from the index feed
+
+labels: fleet, apiserver, agent-5m
+
+Spec: docs/spec/fleet.md#4-list-and-watch
+> Every resourceVersion that a get, a list, or a watch event reports MUST be an index sequence.
+
+Split from #164, option 2. A get with resourceVersion "0", or with a
+"not older than" bound at or below the feed's head, does not need a
+linearizable read. The Kubernetes watch cache serves such gets the same
+way. The #149 feed already holds a recent index chain.
+
+Task: add a spec sentence for when a get may be served from the feed.
+Serve those gets from the feed when a watch keeps it running, and fall
+back to a consensus read otherwise. A get with resourceVersion "" must
+still read through consensus.
+
+Files: `docs/spec/fleet.md`, `cmd/cask-apiserver/storage/cask.go`, `feed.go`
+
+Done when: a test shows a bounded get makes no consensus round when the feed is current, and a "" get still does.
+
+## storage: optimistic index entry for update and delete
+
+labels: fleet, apiserver, quint
+
+Spec: docs/spec/fleet.md#3-storage-model
+> A resourceVersion precondition MUST be checked against the index sequence of the object's index entry.
+
+Split from #164, option 3. GuaranteedUpdate and Delete read the index
+entry only to find the object sequence for the compare-and-set. They
+could take the entry from the feed and fall back to a consensus read on
+doubt. The compare-and-set on the object sequence fails if the entry was
+stale. A failed precondition or a "not found" must be confirmed with a
+consensus read before the Store returns it.
+
+Task, spec and Quint first: add the stale-read rule to section 3. In
+`quint/fleet.qnt`, split a write's read from its compare-and-set, add an
+invariant that no precondition failure is reported from a stale entry,
+and a negative control that reports a conflict from a stale entry
+without the re-read. Then change the code. This is larger than five
+minutes: do the spec and model as the first slice and open a follow-up
+for the code.
+
+Files: `docs/spec/fleet.md`, `quint/fleet.qnt`, `cmd/cask-apiserver/storage/cask.go`
+
+Done when: the model control gives a real violation in 20 of 20 seeds, and the code change keeps `go -C cmd/cask-apiserver test -race ./storage/...` green.
