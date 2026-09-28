@@ -9,9 +9,9 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST,exception]: The extension server MUST report not ready until any pending migration import is complete.
 
   SECTION: [3. Storage model](#3-storage-model)
-    TEXT[!MUST,implementation,exception]: Each object MUST be stored in one cask register keyed by resource type and name.
+    TEXT[!MUST,implementation,test,exception]: Each object MUST be stored in one cask register keyed by resource type and name.
     TEXT[!MUST,implementation,test]: Each resource type MUST have one index register that maps every object name to that object's latest sequence.
-    TEXT[!MUST]: An object's resourceVersion MUST be the sequence of its object register.
+    TEXT[!MUST,implementation,test]: An object's resourceVersion MUST be the sequence of its object register.
     TEXT[!MUST]: A list's resourceVersion MUST be the sequence of the index register.
     TEXT[!MUST,implementation,implication]: A mutation MUST write the object register before the index register.
     TEXT[!MUST,implementation,implication,test]: The index register MUST NOT record a sequence higher than the object register holds.
