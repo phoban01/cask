@@ -1353,3 +1353,84 @@ Files: `internal/caspaxos/proposer.go`, `internal/caspaxos/fanout_test.go`
 
 Done when: the new test passes, `go test -race -count=500 -cpu=1,2,4 ./internal/caspaxos/`
 passes, and `devbox run sim-gate` passes.
+
+## apiserver: push index writes from other clusters to watches
+
+labels: apiserver
+
+Spec: docs/spec/fleet.md#4-list-and-watch
+> Watch events SHOULD be pushed from the index register's change feed rather than polled.
+
+`Store.Watch` (#34) wakes at once after an index write through the same
+Store. A write from another cluster reaches the watch only at the next read
+of the index history. The default poll interval is 250 ms.
+
+Task: wake the watch when any proposer commits an index write, for example
+from the register owner's commit notification. Keep the poll as a fallback.
+Then replace the `type=exception` in `cmd/cask-apiserver/storage/watch.go`
+with an implementation citation.
+
+Files: `cmd/cask-apiserver/storage/watch.go`, `internal/watch/watch.go`
+
+Done when: a test with a 1 h poll interval sees a write through a second
+Store's proposer within 1 s, and `devbox run duvet-ci` passes.
+
+
+## apiserver: one index history reader per Store for all watches
+
+labels: apiserver
+
+Spec: docs/spec/fleet.md#3-storage-model
+> A mutation MUST write the object register before the index register.
+
+Each watch from `Store.Watch` (#34) reads the index history with its own
+identity round after every index write. These rounds preempt index writes.
+In `TestWatchFromOldVersionDeliversEveryChangeInOrder`, three writers and
+two watches made an index write lose all 12 rounds about once in 150
+runs. The object write had committed, so the index lagged until the next
+write for that name. The test now repairs the index write the way the
+sweep does.
+
+Task: give each Store one reader of the index history. It fans each index
+step out to the open watches through a bounded buffer per watch, as
+`internal/watch.FanOut` does. A watch whose buffer fills ends with 410
+Gone.
+
+Files: `cmd/cask-apiserver/storage/watch.go`, `cmd/cask-apiserver/storage/watch_test.go`
+
+Done when: a test with 20 open watches counts one index history read per
+index write, and the watch tests pass with `-count=300`.
+
+
+## spec: say which resourceVersion a watch event carries
+
+labels: spec
+
+Spec: docs/spec/fleet.md#4-list-and-watch
+> A watch from a resourceVersion MUST deliver every index change after that version, in order, with no gaps.
+
+Section 3 says an object's resourceVersion is its object register sequence.
+Section 4 says a watch event carries the object at the sequence the index
+recorded. So a watch event carries an object sequence.
+
+A client-go reflector resumes a watch from the resourceVersion of the last
+event it received. `Store.Watch` (#34) reads that value as an index
+sequence. The two sequences are not related:
+
+- An object sequence below the index sequence replays old index steps.
+- An object sequence above the index sequence gets "too large resource
+  version", and the reflector retries it until the index catches up.
+- An object sequence in between can skip index steps.
+
+Bookmarks carry the index sequence, so a resume from a bookmark is safe.
+
+Task: decide the rule in `docs/spec/fleet.md` section 4 before any code
+change. Options: send a bookmark after every event when the client allows
+bookmarks; or carry the index sequence on watch events and map it back on
+update. Add a Quint action for a resume from an event, with an invariant
+and a negative control.
+
+Files: `docs/spec/fleet.md`, `quint/fleet.qnt`
+
+Done when: the spec states which resourceVersion a watch event carries,
+and `devbox run quint` shows the resume control fails.

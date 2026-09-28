@@ -268,21 +268,23 @@ func (s *apiServer) serveWatch(w http.ResponseWriter, r *http.Request, resource 
 	// The watch ignores the start resourceVersion and diffs one poll against
 	// the next. Two changes between polls merge into one event. An ADDED or
 	// MODIFIED event carries the object at the sequence the index recorded.
+	// storage.Store.Watch follows the index history instead; issue #38
+	// serves watches through it.
 	//= docs/spec/fleet.md#4-list-and-watch
 	//= type=exception
-	//= reason=poll-diff can merge changes and ignores the start version; tracked in issue #34
+	//= reason=the plain mux poll-diff can merge changes and ignores the start version; tracked in issue #38
 	//# A watch from a resourceVersion MUST deliver every index change after that version, in order, with no gaps.
 	//= docs/spec/fleet.md#4-list-and-watch
 	//= type=exception
-	//= reason=no compaction check and no 410 yet; tracked in issue #34, modelled in issue #4
+	//= reason=the plain mux watch has no compaction check and no 410; tracked in issue #38
 	//# A watch whose start version is compacted MUST end with 410 Gone.
 	//= docs/spec/fleet.md#4-list-and-watch
 	//= type=exception
-	//= reason=a DELETED event carries only the name, not the object; tracked in issue #34
+	//= reason=a plain mux DELETED event carries only the name, not the object; tracked in issue #38
 	//# Each watch event MUST carry the object at the sequence the index recorded.
 	//= docs/spec/fleet.md#4-list-and-watch
 	//= type=exception
-	//= reason=poll-diff until the index change feed lands; tracked in issue #34
+	//= reason=the plain mux poll-diffs the list; tracked in issue #38
 	//# Watch events SHOULD be pushed from the index register's change feed rather than polled.
 	fl, ok := w.(http.Flusher)
 	if !ok {

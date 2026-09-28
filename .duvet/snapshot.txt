@@ -29,9 +29,9 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
 
   SECTION: [4. List and watch](#4-list-and-watch)
     TEXT[!MUST,implementation,test,exception]: A list MUST return every object that the index register names at the index sequence the list reports.
-    TEXT[!MUST,implication,exception]: A watch from a resourceVersion MUST deliver every index change after that version, in order, with no gaps.
-    TEXT[!MUST,exception]: A watch whose start version is compacted MUST end with 410 Gone.
-    TEXT[!MUST,exception]: Each watch event MUST carry the object at the sequence the index recorded.
+    TEXT[!MUST,implementation,implication,test,exception]: A watch from a resourceVersion MUST deliver every index change after that version, in order, with no gaps.
+    TEXT[!MUST,implementation,test,exception]: A watch whose start version is compacted MUST end with 410 Gone.
+    TEXT[!MUST,implementation,test,exception]: Each watch event MUST carry the object at the sequence the index recorded.
     TEXT[!SHOULD,exception]: Watch events SHOULD be pushed from the index register's change feed rather than polled.
 
   SECTION: [5. Claims and fencing](#5-claims-and-fencing)
