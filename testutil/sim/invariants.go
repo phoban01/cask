@@ -288,6 +288,7 @@ func checkS13(prev, cur Snapshot) error {
 
 type mvccOp struct {
 	Node uint64 `json:"node"`
+	Inc  uint64 `json:"inc,omitempty"`
 	Seq  uint64 `json:"seq"`
 }
 

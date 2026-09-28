@@ -69,6 +69,7 @@ Faults (`testutil/sim/faults/`, profiles in `testutil/sim/profile.go`):
 | `epoch_old_owner_write` | `lighthouse_loss`, `core_stale_rejoin` |
 | `owner_vs_full_proposer` (W0 ballot-space duel) | |
 | `dueling_proposers` (W3 liveness: K symmetric writers, no driver convention) | |
+| `restart_same_node_id` (issue #170: writers and a restart share a node id; a reused OpID drops a write) | |
 | `keepalive_blackhole` (buggify-driven) | `message_reorder` (needs logical-time scheduler) |
 | `duplicate_delivery` (at-least-once link) | membership-layer dup/reorder (HyParView/Plumtree not gate-driven) |
 | `slow_link` (link-latency injection) | |

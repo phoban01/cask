@@ -213,6 +213,50 @@ func TestTimeTravelAndSnapshot(t *testing.T) {
 	}
 }
 
+// Two KVs with one node id, or one KV and its restart, must not share
+// OpIDs. A shared OpID makes the second write a silent no-op (issue #170).
+func TestKVsWithOneNodeIDKeepEveryWrite(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# Every write MUST carry an operation identity that no other writer and no earlier process of the same writer has used.
+	ctx := context.Background()
+	acc, clock := cluster(3)
+	key := []byte("k")
+	a := mvcc.New(caspaxos.NewProposer(1, acc), clock, 1)
+	b := mvcc.New(caspaxos.NewProposer(2, acc), clock, 1)
+	restarted := mvcc.New(caspaxos.NewProposer(1, acc), clock, 1)
+	for i, kv := range []*mvcc.KV{a, b, restarted} {
+		want := string(rune('a' + i))
+		v, err := kv.Put(ctx, key, []byte(want))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v.Seq != uint64(i+1) || string(v.Value) != want {
+			t.Fatalf("write %d returned seq %d value %q, want seq %d value %q", i, v.Seq, v.Value, i+1, want)
+		}
+	}
+}
+
+// The control: KVs that share an incarnation share OpIDs, and the second
+// write returns the first write's version without writing.
+func TestSharedIncarnationDropsWrite(t *testing.T) {
+	ctx := context.Background()
+	acc, clock := cluster(3)
+	key := []byte("k")
+	a := mvcc.New(caspaxos.NewProposer(1, acc), clock, 1, mvcc.WithIncarnation(7))
+	b := mvcc.New(caspaxos.NewProposer(2, acc), clock, 1, mvcc.WithIncarnation(7))
+	if _, err := a.Put(ctx, key, []byte("a")); err != nil {
+		t.Fatal(err)
+	}
+	v, err := b.Put(ctx, key, []byte("b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Seq != 1 || string(v.Value) != "a" {
+		t.Fatalf("shared OpID: got seq %d value %q, want the dropped write to return seq 1 value a", v.Seq, v.Value)
+	}
+}
+
 // Model-based property test: a random sequence of operations from multiple
 // proposers against one key must behave as a single linearizable register, with
 // strictly increasing sequence numbers and HLC timestamps. This is the

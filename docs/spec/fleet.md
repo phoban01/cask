@@ -83,6 +83,8 @@ The extension server MUST re-read an object before it retries a write that retur
 
 A retried write MUST be a compare-and-set, never a blind reapplication of a change.
 
+Every write MUST carry an operation identity that no other writer and no earlier process of the same writer has used.
+
 A delete MUST tombstone the object register before it removes the name from the index register.
 
 An object value MUST NOT exceed 1 MiB.

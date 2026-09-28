@@ -14,6 +14,48 @@ import (
 	"github.com/phoban01/cask/testutil/sim/faults"
 )
 
+func warnings(s *sim.Sim) []string {
+	var out []string
+	for _, e := range s.Trace.Events() {
+		if strings.Contains(e, "WARNING") {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// Issue #170: processes that share a node id keep every write.
+func TestRestartSameNodeIDKeepsEveryWrite(t *testing.T) {
+	stores := []caspaxos.Storage{store.NewMem(), store.NewMem(), store.NewMem()}
+	s := sim.NewSim(1, sim.Consensus(), stores)
+	faults.RestartSameNodeID{}.Inject(s)
+	faults.RestartSameNodeID{}.Inject(s)
+	if w := warnings(s); len(w) > 0 {
+		t.Fatalf("fault reported a lost write: %v", w)
+	}
+	kv := mvcc.New(caspaxos.NewProposer(99, s.Net.Clients()), hlc.New(s.Clock.Phys()), 99)
+	chain, err := kv.History(context.Background(), []byte("\x00sim/same-node-id"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chain.Versions) != 6 {
+		t.Fatalf("probe key has %d versions, want 6 (three processes, two injections)", len(chain.Versions))
+	}
+}
+
+// Negative control: processes that share an incarnation, as every process
+// did before the fix, lose writes, and the fault WARNs.
+func TestRestartSameNodeIDCatchesSharedOpIDs(t *testing.T) {
+	stores := []caspaxos.Storage{store.NewMem(), store.NewMem(), store.NewMem()}
+	s := sim.NewSim(1, sim.Consensus(), stores)
+	faults.RestartSameNodeIDWith(s, func(p mvcc.Proposer, c *hlc.Clock, node uint64) *mvcc.KV {
+		return mvcc.New(p, c, node, mvcc.WithIncarnation(1))
+	})
+	if len(warnings(s)) == 0 {
+		t.Fatalf("shared OpIDs went unnoticed; trace: %v", s.Trace.Events())
+	}
+}
+
 // The W0 duel end-to-end on a live cluster: the deposed owner is fenced (no
 // WARNING traces) and both probe keys' committed chains hold exactly the owner
 // write then the full-proposer write — the stale write never lands.

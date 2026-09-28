@@ -1,6 +1,7 @@
 package faults
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -97,9 +98,9 @@ func duel(s *sim.Sim, key []byte, ownerID, fullID uint64) {
 	step := s.Step()
 	clock := hlc.New(s.Clock.Phys())
 
-	// Distinct OpID namespaces per injection: a reused (node, seq) OpID would
-	// be silently deduplicated by mvcc's exactly-once append and the probe
-	// writes would be no-ops.
+	// Distinct node ids per injection keep the trace readable. Each
+	// mvcc.New also draws its own incarnation, so OpIDs never repeat even
+	// with one node id (restart_same_node_id checks that).
 	kvNode := uint64(1_000 + 2*step)
 
 	// Establish the owner. The epoch must exceed whatever the key has already
@@ -215,6 +216,59 @@ func (DuelingProposers) Inject(s *sim.Sim) {
 			s.Trace.Add("step %d: dueling_proposers: WARNING writer %d preempted out (livelock: backoff failed to converge)", step, w)
 		default:
 			s.Trace.Add("step %d: dueling_proposers: writer %d failed: %v", step, w, err)
+		}
+	}
+}
+
+// RestartSameNodeID drives issue #170. Writer processes that share a node id
+// write one probe key in turn: two live processes, then a restart of the
+// first. cask-apiserver named its writes by PID, and the PID is 1 in every
+// pod. Each process must append its own version. A Put that returns another
+// version was dropped as a repeat of an older OpID: mvcc's exactly-once
+// dedup turns an OpID collision into a silent lost write, which S2 and S13
+// cannot see because the chain stays well-formed. So the fault WARNs.
+type RestartSameNodeID struct{}
+
+func (RestartSameNodeID) Name() string { return sim.FaultRestartSameNodeID }
+
+func (RestartSameNodeID) Inject(s *sim.Sim) {
+	RestartSameNodeIDWith(s, func(p mvcc.Proposer, c *hlc.Clock, node uint64) *mvcc.KV {
+		return mvcc.New(p, c, node)
+	})
+}
+
+// RestartSameNodeIDWith runs RestartSameNodeID with newKV as the constructor
+// of each process's KV. The negative control passes a constructor that pins
+// the incarnation, as every process did before the fix.
+func RestartSameNodeIDWith(s *sim.Sim, newKV func(mvcc.Proposer, *hlc.Clock, uint64) *mvcc.KV) {
+	ctx := context.Background()
+	clients := s.Net.Clients()
+	if len(clients) == 0 {
+		return
+	}
+	key := []byte("\x00sim/same-node-id")
+	s.Observe(key)
+	step := s.Step()
+	clock := hlc.New(s.Clock.Phys())
+
+	// The node id is the same for every process, as os.Getpid() was.
+	const node = 1
+	// Proposer ids stay distinct: they come from --id, which is unique.
+	procs := []struct {
+		name string
+		prop uint64
+	}{{"east", 40}, {"west", 41}, {"east-restarted", 40}}
+	for _, p := range procs {
+		kv := newKV(caspaxos.NewProposer(p.prop, clients), clock, node)
+		want := fmt.Appendf(nil, "%s-%d", p.name, step)
+		v, err := kv.Put(ctx, key, want)
+		if err != nil {
+			s.Trace.Add("step %d: restart_same_node_id: %s put failed: %v", step, p.name, err)
+			continue
+		}
+		if !bytes.Equal(v.Value, want) {
+			s.Trace.Add("step %d: restart_same_node_id: WARNING %s put returned seq %d value %q, not its own write (OpID reused, write lost)",
+				step, p.name, v.Seq, v.Value)
 		}
 	}
 }
