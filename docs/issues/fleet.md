@@ -1304,3 +1304,52 @@ Files: `internal/lease/revoke_test.go`
 
 Done when: `go test -race -count=1000 -cpu=1,2,4 -run TestRevokeRetryKeepsNewSession ./internal/lease/`
 passes in 16 copies at once, and the test fails against the pre-#101 Revoke.
+
+## ci: TestHungOldVoterDoesNotWedgeCoreChange times out intermittently
+
+labels: agent-5m, ci, fleet
+
+Spec: docs/spec/fleet.md#6-membership
+> A core change MUST finish while a majority of the old core and a majority of the new core answer.
+
+`TestHungOldVoterDoesNotWedgeCoreChange` in `cmd/cask-apiserver/regress_test.go`
+(from #117) timed out once in a `go test -race -count=5 ./...` run of the
+apiserver module. It passed on rerun and 10 times alone, so it depends on
+timing or load. A flaky required check blocks every merge.
+
+Task: reproduce under load (several copies at once, `-cpu=1,2,4`). Decide
+whether the test's deadline is too tight for the race detector, or the
+core change really stalls (for example the progress window from #133, the
+10 s peer client timeout, or the run loop). If the change stalls, that is
+a liveness bug: fix it in code and keep the test strict. Otherwise widen
+the test's deadline with a comment that states the budget.
+
+Files: `cmd/cask-apiserver/regress_test.go`, maybe `corechange.go`, `membership.go`
+
+Done when: 8 copies of `go -C cmd/cask-apiserver test -race -count=50 -run TestHungOldVoter ./...` pass together.
+
+## caspaxos: end the accept phase at the first rejection
+
+labels: fleet, agent-5m, membership
+
+Spec: docs/spec/fleet.md#6-membership
+> A core change MUST finish while a majority of the old core and a majority of the new core answer.
+
+#143 found that `prepare` in `internal/caspaxos/proposer.go` waited forever
+when one acceptor promised, one rejected, and one hung. The fix returns at
+the first rejection. The `accept` phase has the same shape. One accept, one
+rejection, and one hung acceptor keep `quorumStillPossible` true, so the
+phase waits on the hung acceptor. A rejection in accept needs a competing
+proposer between the two phases, so it is rarer, but it can still stall a
+round while a majority answers.
+
+Task: make `accept` return at the first rejection. Keep the `mayHold` rule:
+an acceptor that accepted, or one still in flight, may hold the value, so a
+changed value still ends in `ErrUnknownOutcome`. Add a test next to
+`TestRejectionEndsPrepareWithHungPeer` with one acceptor that accepts, one
+that rejects, and one that hangs.
+
+Files: `internal/caspaxos/proposer.go`, `internal/caspaxos/fanout_test.go`
+
+Done when: the new test passes, `go test -race -count=500 -cpu=1,2,4 ./internal/caspaxos/`
+passes, and `devbox run sim-gate` passes.

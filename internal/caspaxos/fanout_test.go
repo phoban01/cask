@@ -201,3 +201,46 @@ func TestJointImpossibilityFailsFast(t *testing.T) {
 		t.Fatalf("joint impossibility took %v; should fail fast", elapsed)
 	}
 }
+
+// One acceptor promises, one rejects because it promised a higher ballot,
+// and one hangs. The prepare must not wait for the hung acceptor. The
+// rejection shows that the round is preempted, so the proposer retries
+// above it. Before #143, the prepare waited, because the hung acceptor could
+// still complete a quorum. A core change then stalled while a majority
+// answered.
+func TestRejectionEndsPrepareWithHungPeer(t *testing.T) {
+	//= docs/spec/fleet.md#6-membership
+	//= type=test
+	//# A core change MUST finish while a majority of the old core and a majority of the new core answer.
+	for _, tc := range []struct {
+		name  string
+		joint bool
+	}{{"single group", false}, {"joint", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			key := []byte("k")
+			fresh := caspaxos.NewAcceptor(store.NewMem())
+			ahead := caspaxos.NewAcceptor(store.NewMem())
+			if r, err := ahead.Prepare(ctx, key, caspaxos.Ballot{Counter: 5, NodeID: 9}); err != nil || !r.Promised {
+				t.Fatalf("seed a higher promise: %+v, %v", r, err)
+			}
+			hung := newBlocking()
+			var p *caspaxos.Proposer
+			if tc.joint {
+				// The shape of the core change in #143: old {1,2,3} with
+				// 2 hung, new {1,2,3,4,5} with 4 and 5 empty.
+				old := []caspaxos.AcceptorClient{fresh, hung, ahead}
+				nw := []caspaxos.AcceptorClient{fresh, hung, ahead,
+					caspaxos.NewAcceptor(store.NewMem()), caspaxos.NewAcceptor(store.NewMem())}
+				p = caspaxos.NewJointProposer(1, [][]caspaxos.AcceptorClient{old, nw})
+			} else {
+				p = caspaxos.NewProposer(1, []caspaxos.AcceptorClient{fresh, hung, ahead})
+			}
+			start := time.Now()
+			if _, err := p.Propose(ctx, key, caspaxos.Write([]byte("v"))); err != nil {
+				t.Fatalf("propose with one hung and one ahead acceptor: %v after %v", err, time.Since(start))
+			}
+		})
+	}
+}
