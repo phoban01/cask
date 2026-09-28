@@ -189,7 +189,7 @@ func (acceptNack) Accept(context.Context, []byte, caspaxos.Ballot, []byte) (casp
 // When every acceptor rejects the accept, no value from the round can be
 // chosen. Propose retries and does not return ErrUnknownOutcome. The
 // cluster has one acceptor: with more, the accept phase stops at the first
-// lost majority, and an acceptor still in flight may hold the value.
+// rejection, and an acceptor that has not rejected may hold the value.
 func TestAllRejectRetries(t *testing.T) {
 	ctx := context.Background()
 	acc := []caspaxos.AcceptorClient{acceptNack{newCluster(1)[0]}}
