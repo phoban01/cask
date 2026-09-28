@@ -17,7 +17,11 @@
 # A module without a quint-check line is not checked. A module with
 # invariants but no control fails the gate.
 #
-# Usage: scripts/quint-check.sh [--verify]
+# Usage: scripts/quint-check.sh [--verify] [--verify-only] [--module FILE] [--list]
+#   --verify       also run bounded `quint verify` for each module
+#   --verify-only  run only `quint verify` (CI runs one module per job)
+#   --module FILE  check only FILE
+#   --list         print the modules that have quint-check lines
 #
 #= docs/spec/fleet.md#10-verification
 ## The Quint model MUST include a negative control for each invariant that
@@ -28,7 +32,19 @@ cd "$(dirname "$0")/.."
 STEPS=${STEPS:-30}
 SAMPLES=${SAMPLES:-2000}
 VERIFY=0
-if [ "${1:-}" = "--verify" ]; then VERIFY=1; fi
+CHECKS=1
+ONLY=""
+LIST=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    --verify) VERIFY=1 ;;
+    --verify-only) VERIFY=1; CHECKS=0 ;;
+    --module) ONLY=${2:?--module needs a file}; shift ;;
+    --list) LIST=1 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
 
 if command -v quint >/dev/null 2>&1; then
   Q=quint
@@ -102,6 +118,11 @@ for spec in quint/*.qnt; do
   grep -qE '^[[:space:]]*//[[:space:]]*quint-check:' "$spec" && SPECS+=("$spec")
 done
 [ ${#SPECS[@]} -gt 0 ] || die "no quint/*.qnt module has a quint-check line"
+if [ -n "$ONLY" ]; then
+  printf "%s\n" "${SPECS[@]}" | grep -qxF "$ONLY" || die "$ONLY has no quint-check line"
+  SPECS=("$ONLY")
+fi
+if [ $LIST -eq 1 ]; then printf "%s\n" "${SPECS[@]}"; exit 0; fi
 
 # Parse every header first, so a bad header fails before the slow runs.
 for spec in "${SPECS[@]}"; do parse "$spec"; done
@@ -109,15 +130,17 @@ for spec in "${SPECS[@]}"; do parse "$spec"; done
 for spec in "${SPECS[@]}"; do
   parse "$spec"
   echo "=== $spec"
-  echo "== typecheck"
-  q typecheck "$spec"
-  echo "== witness runs"
-  q test "$spec"
-  echo "== $GOOD keeps ${INVARIANTS[*]} ($SAMPLES samples x $STEPS steps)"
-  q run "$spec" --step="$GOOD" --max-steps="$STEPS" --max-samples="$SAMPLES" --invariants "${INVARIANTS[@]}"
-  for c in "${CONTROLS[@]}"; do
-    must_fail "$spec" "${c%%:*}" "${c#*:}"
-  done
+  if [ $CHECKS -eq 1 ]; then
+    echo "== typecheck"
+    q typecheck "$spec"
+    echo "== witness runs"
+    q test "$spec"
+    echo "== $GOOD keeps ${INVARIANTS[*]} ($SAMPLES samples x $STEPS steps)"
+    q run "$spec" --step="$GOOD" --max-steps="$STEPS" --max-samples="$SAMPLES" --invariants "${INVARIANTS[@]}"
+    for c in "${CONTROLS[@]}"; do
+      must_fail "$spec" "${c%%:*}" "${c#*:}"
+    done
+  fi
   if [ $VERIFY -eq 1 ]; then
     echo "== quint verify (Apalache, bounded at $VSTEPS steps)"
     q verify "$spec" --step="$GOOD" --max-steps="$VSTEPS" --invariants "${INVARIANTS[@]}"
