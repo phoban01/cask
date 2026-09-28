@@ -344,14 +344,15 @@ func (s *apiServer) serveWatch(w http.ResponseWriter, r *http.Request, resource 
 // returns its storage form (resourceVersion stripped — RV lives in MVCC).
 func (s *apiServer) normalize(resource string, body []byte, isCreate bool) (string, []byte, error) {
 	// ObjectMeta has no uid and no creationTimestamp, so this decode drops
-	// both. The import command will write them directly.
+	// both. The import writes them directly, but the first update through
+	// this server drops them again. The generic server keeps them.
 	//= docs/spec/fleet.md#7-migration
 	//= type=exception
-	//= reason=ObjectMeta drops the uid; tracked in issue #50
+	//= reason=an update through this server drops the imported uid; tracked in issue #38
 	//# The migration MUST preserve each object's uid.
 	//= docs/spec/fleet.md#7-migration
 	//= type=exception
-	//= reason=ObjectMeta drops the creationTimestamp; tracked in issue #50
+	//= reason=an update through this server drops the imported creationTimestamp; tracked in issue #38
 	//# The migration MUST preserve each object's creationTimestamp.
 	switch resource {
 	case "devices":

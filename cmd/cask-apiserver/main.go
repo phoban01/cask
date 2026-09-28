@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/phoban01/cask/cmd/cask-apiserver/migrate"
 	"github.com/phoban01/cask/cmd/cask-apiserver/storage"
 	"github.com/phoban01/cask/internal/backoff"
 	"github.com/phoban01/cask/internal/caspaxos"
@@ -39,6 +40,7 @@ func main() {
 		self    = flag.Uint64("id", 0, "node id (unique per apiserver); required with --bootstrap, --seed, and --cask-peers")
 		dataDir = flag.String("data-dir", "", "directory for durable consensus state (Pebble); empty = in-memory (an embedded acceptor that restarts empty forgets its promises — demo only)")
 		sweepIv = flag.Duration("index-sweep-interval", time.Minute, "how often to repair index entries that a crash left behind (each wait adds up to 10% jitter)")
+		impFile = flag.String("import-file", "", "cask-export/v1 file to import before serving (see cask-migrate export); safe to repeat")
 		selfTLS = flag.Bool("self-signed-tls", false, "serve HTTPS with an in-memory self-signed cert (required for k8s API aggregation; pair with insecureSkipTLSVerify on the APIService)")
 	)
 	var consensusFiles mtls.Files
@@ -251,20 +253,30 @@ func main() {
 		log.Warn("no index sweep: --cask-peers cannot list keys on a majority; use --bootstrap or --seed")
 	}
 
+	// The import runs in this process, through the same proposer as every
+	// other write, before the server listens. No client write on this
+	// cluster can race it, and it needs no new endpoint.
+	if *impFile != "" {
+		if err := importFile(ctx, kv, *impFile, log); err != nil {
+			log.Error("import", "file", *impFile, "err", err)
+			os.Exit(1)
+		}
+	}
+
 	srv := newAPIServer(*cluster, fs, log)
 	go srv.runReconciler(ctx, 2*time.Second)
 
-	// The server has no import path and no readiness gate yet, so nothing
-	// checks imported owners before it serves.
+	// The import writes a marker last, but no readiness gate reads it yet,
+	// so nothing checks imported owners before the server serves.
 	//= docs/spec/fleet.md#7-migration
 	//= type=exception
 	//= reason=tracked in issue #40
 	//# The APIService MUST NOT become available while any imported object that other objects reference by ownerReference is missing.
 	//= docs/spec/fleet.md#7-migration
 	//= type=exception
-	//= reason=no import marker and no readiness gate; tracked in issue #40
+	//= reason=no readiness gate reads the import marker; tracked in issue #40
 	//# The APIService MUST NOT become available before the import has completed.
-	// cask-migrate export exists. The import, the cutover runbook, the
+	// cask-migrate export and the import exist. The cutover runbook, the
 	// export CronJob, and the rehearsal do not exist yet.
 	//= docs/spec/fleet.md#7-migration
 	//= type=exception
@@ -272,7 +284,7 @@ func main() {
 	//# Writers MUST be frozen from the start of the export until the APIService is available.
 	//= docs/spec/fleet.md#7-migration
 	//= type=exception
-	//= reason=no import command to seed the index; tracked in issue #51
+	//= reason=the import starts each index register at sequence 1, not above the revision; tracked in issue #51
 	//# The initial index sequence for each resource type MUST be greater than the source etcd revision at export time.
 	//= docs/spec/fleet.md#7-migration
 	//= type=exception
@@ -329,4 +341,25 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// importFile reads a cask-migrate export file and imports it into kv. It
+// writes nothing when the file is invalid or conflicts with cask.
+func importFile(ctx context.Context, kv *mvcc.KV, path string, log *slog.Logger) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h, objects, err := migrate.Read(f)
+	if err != nil {
+		return err
+	}
+	res, err := migrate.Import(ctx, kv, h, objects)
+	if err != nil {
+		return err
+	}
+	log.Info("import done", "group", h.Group, "revision", h.Revision,
+		"written", res.Written, "unchanged", res.Unchanged)
+	return nil
 }
