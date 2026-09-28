@@ -87,8 +87,8 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
 
   SECTION: [7. Migration](#7-migration)
     TEXT[!MUST,implementation,test]: The extension server MUST serve the same API group, version, and kinds that the CRD served.
-    TEXT[!MUST,exception]: The migration MUST preserve each object's uid.
-    TEXT[!MUST,exception]: The migration MUST preserve each object's creationTimestamp.
+    TEXT[!MUST,implementation,test,exception]: The migration MUST preserve each object's uid.
+    TEXT[!MUST,implementation,test,exception]: The migration MUST preserve each object's creationTimestamp.
     TEXT[!MUST,exception]: Writers MUST be frozen from the start of the export until the APIService is available.
     TEXT[!MUST,exception]: The APIService MUST NOT become available before the import has completed.
     TEXT[!MUST,exception]: The APIService MUST NOT become available while any imported object that other objects reference by ownerReference is missing.

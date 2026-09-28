@@ -14,7 +14,9 @@ COPY cmd/cask-apiserver/go.mod cmd/cask-apiserver/go.sum ./cmd/cask-apiserver/
 RUN go -C cmd/cask-apiserver mod download
 COPY . .
 RUN CGO_ENABLED=0 go -C cmd/cask-apiserver build -o /out/cask-apiserver .
+RUN CGO_ENABLED=0 go -C cmd/cask-apiserver build -o /out/cask-migrate ./cmd/cask-migrate
 
 FROM alpine:3.20
 COPY --from=build /out/cask-apiserver /usr/local/bin/cask-apiserver
+COPY --from=build /out/cask-migrate /usr/local/bin/cask-migrate
 ENTRYPOINT ["/usr/local/bin/cask-apiserver"]

@@ -241,8 +241,8 @@ func main() {
 	//= type=exception
 	//= reason=no import marker and no readiness gate; tracked in issue #40
 	//# The APIService MUST NOT become available before the import has completed.
-	// There is no cask-migrate command yet. The export, the import, the
-	// cutover runbook, and the rehearsal do not exist.
+	// cask-migrate export exists. The import, the cutover runbook, the
+	// export CronJob, and the rehearsal do not exist yet.
 	//= docs/spec/fleet.md#7-migration
 	//= type=exception
 	//= reason=no cutover runbook yet; tracked in issue #52
@@ -253,7 +253,7 @@ func main() {
 	//# The initial index sequence for each resource type MUST be greater than the source etcd revision at export time.
 	//= docs/spec/fleet.md#7-migration
 	//= type=exception
-	//= reason=no export command and no CronJob; tracked in issues #49 and #53
+	//= reason=cask-migrate export runs only by hand; no CronJob yet; tracked in issue #53
 	//# A continuous export of all fleet objects MUST run from the first day of phase one.
 	//= docs/spec/fleet.md#7-migration
 	//= type=exception
