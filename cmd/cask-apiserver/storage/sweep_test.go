@@ -201,7 +201,7 @@ func TestSweepNeverAheadUnderConcurrentWritersAndSweeps(t *testing.T) {
 			for r := range rounds {
 				name := names[(w+r)%len(names)]
 				key := ObjectKey("devices", name)
-				err := untilNotPreempted(func() error {
+				err := untilRoundWon(func() error {
 					if (w+r)%4 == 3 {
 						_, err := kv.Delete(ctx, key)
 						return err
@@ -216,7 +216,7 @@ func TestSweepNeverAheadUnderConcurrentWritersAndSweeps(t *testing.T) {
 				if r%2 == 1 {
 					continue // a crash before the index write
 				}
-				if err := untilNotPreempted(func() error { _, _, err := WriteIndex(ctx, kv, "devices", name); return err }); err != nil {
+				if err := untilRoundWon(func() error { _, _, err := WriteIndex(ctx, kv, "devices", name); return err }); err != nil {
 					report(err)
 					return
 				}
@@ -234,9 +234,10 @@ func TestSweepNeverAheadUnderConcurrentWritersAndSweeps(t *testing.T) {
 					return
 				default:
 				}
-				// Contention can preempt a round. That costs progress,
-				// not safety, so the next pass tries again.
-				if _, err := Sweep(ctx, kv, "devices", list); err != nil && !errors.Is(err, caspaxos.ErrPreempted) {
+				// Contention can preempt a round or leave its outcome
+				// unknown. That costs progress, not safety, so the next
+				// pass tries again.
+				if _, err := Sweep(ctx, kv, "devices", list); err != nil && !lostRound(err) {
 					report(err)
 					return
 				}
@@ -317,12 +318,14 @@ func TestObjectName(t *testing.T) {
 	}
 }
 
-// untilNotPreempted runs f again while contention preempts it. Running a
-// Put, a Delete, or an index write twice is harmless in these tests.
-func untilNotPreempted(f func() error) error {
+// untilRoundWon runs f again while f loses a round: contention preempts
+// it, or leaves its outcome unknown. After an unknown outcome the first
+// write may still land (issue #180), so f can take effect twice. Running
+// a Put, a Delete, or an index write twice is harmless in these tests.
+func untilRoundWon(f func() error) error {
 	for {
 		err := f()
-		if !errors.Is(err, caspaxos.ErrPreempted) {
+		if !lostRound(err) {
 			return err
 		}
 		time.Sleep(time.Millisecond)
