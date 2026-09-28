@@ -204,7 +204,11 @@ func main() {
 	}
 
 	clock := hlc.New(func() int64 { return time.Now().UnixNano() })
-	kv := mvcc.New(prop, clock, uint64(os.Getpid()))
+	// The KV names its writes by the member id. It adds a random
+	// incarnation, so a restart or a second apiserver with the same id
+	// never reuses an operation id. The PID is no name: it is 1 in every
+	// pod (issue #170).
+	kv := mvcc.New(prop, clock, *self)
 	sessions := lease.NewSessions(prop, func() int64 { return time.Now().UnixNano() })
 	locks := lease.NewLocks(prop, sessions)
 	fs := &fleetStore{kv: kv, sessions: sessions, locks: locks}

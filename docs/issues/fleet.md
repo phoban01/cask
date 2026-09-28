@@ -1534,3 +1534,38 @@ Files: `cmd/cask-apiserver/storage/cask.go`, `cmd/cask-apiserver/storage/index.g
 Done when: a get costs no identity round on the index register when the
 owner cache serves it, and `go -C cmd/cask-apiserver test -race -count=300
 -run TestWatch ./storage/` passes.
+
+## storage: index write landed at a lower sequence than the index read during a voter outage
+
+labels: apiserver, fleet
+
+Spec: docs/spec/fleet.md#3-storage-model
+> The index register MUST NOT record a sequence higher than the object register holds.
+
+Seen once in three e2e runs of `TestZombieFenceRejection` (#58, PR #169),
+while east's apiserver was scaled to zero:
+
+```
+create claim e2e-zombie-fence-west: cask storage: deviceclaims index write landed at 6, want 9
+```
+
+The error comes from `writeIndex` in `cmd/cask-apiserver/storage/index.go`
+(added in #165). The index register's sequence appears to go backwards
+across a read and a compare-and-set during a one-voter outage. If real,
+this is a linearizability violation: a stale read of the index register
+(for example an owner-cached or local read), or a lost committed write.
+No server logs were captured for that run.
+
+Task: reproduce in-process with three acceptors, one stopped and later
+restarted empty-state-free (its Pebble data kept), and concurrent
+creates on one resource type through two apiservers. Log every index
+read and CASSeq with ballot and sequence. Decide whether a committed
+index value was lost, a read was stale, or the error check itself is
+wrong. If it is a consensus or read-path bug, add a Quint negative
+control or a simulator fault that finds it, and fix it. If the check is
+wrong, fix the check and explain why the sequence may legitimately be
+lower.
+
+Files: `cmd/cask-apiserver/storage/index.go`, `internal/mvcc`, `internal/caspaxos`, `internal/owner`
+
+Done when: the reproduction runs 500 times with no regression, and the cause is written in the PR.

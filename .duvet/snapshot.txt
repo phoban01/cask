@@ -31,6 +31,7 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MAY,implementation,implication,test]: A write that returned a conflict MAY have been committed.
     TEXT[!MUST,implementation,implication,test]: The extension server MUST re-read an object before it retries a write that returned a conflict.
     TEXT[!MUST,implementation,implication,test]: A retried write MUST be a compare-and-set, never a blind reapplication of a change.
+    TEXT[!MUST,implementation,test]: Every write MUST carry an operation identity that no other writer and no earlier process of the same writer has used.
     TEXT[!MUST,implementation,implication,test]: A delete MUST tombstone the object register before it removes the name from the index register.
     TEXT[!MUST]: An object value MUST NOT exceed 1 MiB.
 

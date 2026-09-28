@@ -65,6 +65,7 @@ const (
 	FaultSlowLink            = "slow_link"
 	FaultOwnerVsFullProposer = "owner_vs_full_proposer"
 	FaultDuelingProposers    = "dueling_proposers"
+	FaultRestartSameNodeID   = "restart_same_node_id"
 )
 
 // Smoke is the fastest profile — runs on every PR.
@@ -86,6 +87,7 @@ func Consensus() *Profile {
 			FaultAsymmetricReach, FaultEpochOldOwnerWrite,
 			FaultDuplicateDelivery, FaultSlowLink,
 			FaultOwnerVsFullProposer, FaultDuelingProposers,
+			FaultRestartSameNodeID,
 		},
 	}
 }

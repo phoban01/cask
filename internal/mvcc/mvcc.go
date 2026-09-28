@@ -12,6 +12,8 @@ package mvcc
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,9 +35,17 @@ func init() {
 // change function many times (and another proposer may complete it via
 // carry-forward). Without this, a retried mutation could append its value to
 // the chain more than once, which is observably non-linearizable.
+//
+// The dedup also means that an OpID must never repeat. A repeated OpID makes
+// a new mutation a silent no-op: commit then returns the old version with that
+// OpID as if the new mutation had written it. Inc makes OpIDs unique across
+// KVs that share a Node, and across restarts of one process (issue #170).
 type OpID struct {
 	Node uint64 `json:"node"`
-	Seq  uint64 `json:"seq"`
+	// Inc is the random incarnation of the KV that minted the OpID. It is
+	// 0 in versions written before it existed, and never 0 after.
+	Inc uint64 `json:"inc,omitempty"`
+	Seq uint64 `json:"seq"`
 }
 
 // Version is one entry in a key's history.
@@ -118,6 +128,7 @@ type KV struct {
 	clock  *hlc.Clock
 	local  LocalReader // optional; nil = every read is a full round
 	nodeID uint64      // identity for minting OpIDs
+	inc    uint64      // random incarnation for minting OpIDs; never 0
 	opSeq  uint64      // atomic counter for OpIDs
 }
 
@@ -128,24 +139,48 @@ type KVOption func(*KV)
 // (Get, GetAt, History, SnapshotAt) inherits it through read().
 func WithLocalReader(lr LocalReader) KVOption { return func(kv *KV) { kv.local = lr } }
 
+// WithIncarnation sets the incarnation of the KV's OpIDs in place of a random
+// one. It is for tests that need two KVs to share an OpID space, as two
+// processes did before issue #170. inc must not be 0.
+func WithIncarnation(inc uint64) KVOption { return func(kv *KV) { kv.inc = inc } }
+
 // New returns a KV that proposes through prop and stamps versions with clock.
 //
-// nodeID namespaces the OpIDs this KV mints and MUST be unique per proposer
-// incarnation: two live proposers must differ, and a restarted proposer must
-// not reuse a previous incarnation's id (or it could mint an OpID that already
-// exists in a chain, and its mutation would be silently deduplicated). In
-// production this is a persisted node UUID combined with a boot epoch — the same
-// uniqueness the ballot counter needs.
+// nodeID names the writer in the OpIDs this KV mints. It need not be unique:
+// each KV draws a random 64-bit incarnation, and an OpID is (nodeID,
+// incarnation, counter). Callers once had to make nodeID unique per process,
+// and cask-apiserver used its PID, which is 1 in every pod. Two apiservers
+// then minted the same OpIDs, and mvcc dropped one's writes as duplicates of
+// the other's (issue #170).
 func New(prop Proposer, clock *hlc.Clock, nodeID uint64, opts ...KVOption) *KV {
-	kv := &KV{prop: prop, clock: clock, nodeID: nodeID}
+	//= docs/spec/fleet.md#3-storage-model
+	//# Every write MUST carry an operation identity that no other writer and no earlier process of the same writer has used.
+	kv := &KV{prop: prop, clock: clock, nodeID: nodeID, inc: newIncarnation()}
 	for _, o := range opts {
 		o(kv)
+	}
+	if kv.inc == 0 {
+		panic("mvcc: incarnation 0 is reserved for OpIDs minted before incarnations existed")
 	}
 	return kv
 }
 
+// newIncarnation returns a random, nonzero incarnation. Two KVs collide with
+// probability 2^-64.
+func newIncarnation() uint64 {
+	var b [8]byte
+	for {
+		if _, err := rand.Read(b[:]); err != nil {
+			panic(fmt.Sprintf("mvcc: read random incarnation: %v", err))
+		}
+		if inc := binary.LittleEndian.Uint64(b[:]); inc != 0 {
+			return inc
+		}
+	}
+}
+
 func (kv *KV) nextOp() OpID {
-	return OpID{Node: kv.nodeID, Seq: atomic.AddUint64(&kv.opSeq, 1)}
+	return OpID{Node: kv.nodeID, Inc: kv.inc, Seq: atomic.AddUint64(&kv.opSeq, 1)}
 }
 
 // appendOp builds a ChangeFunc that appends exactly one version, derived from

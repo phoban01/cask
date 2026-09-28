@@ -32,6 +32,7 @@ func All() map[string]sim.Fault {
 		EpochOldOwnerWrite{},
 		OwnerVsFullProposer{},
 		DuelingProposers{},
+		RestartSameNodeID{},
 		DuplicateDelivery{},
 		SlowLink{},
 	}
