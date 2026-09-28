@@ -12,9 +12,16 @@ package caspaxos
 import "fmt"
 
 // Ballot is a Paxos round number. The pair (Counter, NodeID) is a strict total
-// order over every ballot ever generated in the system with no coordination:
-// Counter is advanced locally by each proposer, and NodeID breaks ties so two
-// proposers can never mint equal ballots.
+// order over ballots with no coordination: Counter is advanced locally by each
+// proposer, and NodeID breaks ties between nodes.
+//
+// Two proposers with the same NodeID keep separate counters and can mint
+// equal ballots. The process builds such proposers: a roster operation, a
+// core carry, and a configuration change each build a fresh one (#204).
+// Safety does not need unique ballots. An acceptor promises a ballot only
+// if it is strictly higher than its promise, so at most one proposer
+// finishes phase 1 at a ballot, and only that proposer sends accepts at it.
+// A shared ballot costs a retry, never a second value at one ballot.
 type Ballot struct {
 	Counter uint64
 	NodeID  uint64

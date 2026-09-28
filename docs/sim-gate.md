@@ -70,6 +70,7 @@ Faults (`testutil/sim/faults/`, profiles in `testutil/sim/profile.go`):
 | `owner_vs_full_proposer` (W0 ballot-space duel) | |
 | `dueling_proposers` (W3 liveness: K symmetric writers, no driver convention) | |
 | `restart_same_node_id` (issue #170: writers and a restart share a node id; a reused OpID drops a write) | |
+| `shared_node_id_proposers` (issue #204: fresh proposers with one node id mint the same ballot on one key; no committed write may be lost) | |
 | `keepalive_blackhole` (buggify-driven) | `message_reorder` (needs logical-time scheduler) |
 | `duplicate_delivery` (at-least-once link) | membership-layer dup/reorder (HyParView/Plumtree not gate-driven) |
 | `slow_link` (link-latency injection) | |

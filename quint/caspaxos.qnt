@@ -30,6 +30,13 @@
 //     check (maxBal[a] =< b) from VoteFor and MUST violate Consistency and
 //     VotesSafe.
 //
+// Shared ballots (#204): this model cannot show them. Dropping the
+// one-value-per-ballot guard from VoteFor breaks OneValuePerBallot, but
+// Consistency and VotesSafe still hold in 5000 samples, because SafeAt
+// reads every acceptor's votes at once. The real proposer reads only its
+// prepare quorum. quint/shared_ballot.qnt models the two phases and shows
+// that the strict promise keeps a shared ballot safe.
+//
 // Gate checks, read by scripts/quint-check.sh. The shortest stepNoPromise
 // trace that breaks Consistency has 6 steps. At 10 steps Apalache ran for
 // more than 40 minutes on the good step (quint/PARITY.md).

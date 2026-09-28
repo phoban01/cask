@@ -56,6 +56,16 @@ func (a *Acceptor) Prepare(ctx context.Context, key []byte, b Ballot) (PrepareRe
 	// Accept the prepare only if b strictly exceeds the current promise. Because
 	// Accept sets Promise == Accepted, the promise already dominates the
 	// accepted ballot, so a single comparison is sufficient.
+	//
+	// The strict check also makes a shared ballot safe (#204). Two proposers
+	// with one node id keep separate counters and can mint the same ballot.
+	// This acceptor promises that ballot at most once, so two prepare quorums
+	// at it would need a shared acceptor to promise it twice. At most one
+	// proposer finishes phase 1 at a ballot, and only it sends accepts there.
+	// A >= check here would let both finish phase 1 and accept two values at
+	// one ballot (TestSharedNodeIDBallotsNeedStrictPromise).
+	//= docs/spec/fleet.md#3-storage-model
+	//# An acceptor MUST promise a ballot only if the ballot is higher than every ballot that the acceptor has promised.
 	if reg.Promise.Less(b) {
 		reg.Promise = b
 		if err := a.store.Store(ctx, key, reg); err != nil {

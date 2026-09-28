@@ -33,6 +33,7 @@ func All() map[string]sim.Fault {
 		OwnerVsFullProposer{},
 		DuelingProposers{},
 		RestartSameNodeID{},
+		SharedNodeIDProposers{},
 		DuplicateDelivery{},
 		SlowLink{},
 	}

@@ -54,18 +54,19 @@ func (p *Profile) HasFault(name string) bool {
 // constants so profiles and faults agree on spelling — a renamed fault that
 // drifts from a profile string would silently never run.
 const (
-	FaultPartition           = "partition"
-	FaultCrashRestart        = "crash_restart"
-	FaultMassFailure         = "mass_failure"
-	FaultSlowFsync           = "slow_fsync"
-	FaultAsymmetricReach     = "asymmetric_reachability"
-	FaultKeepaliveBlackhole  = "keepalive_blackhole"
-	FaultEpochOldOwnerWrite  = "epoch_old_owner_write"
-	FaultDuplicateDelivery   = "duplicate_delivery"
-	FaultSlowLink            = "slow_link"
-	FaultOwnerVsFullProposer = "owner_vs_full_proposer"
-	FaultDuelingProposers    = "dueling_proposers"
-	FaultRestartSameNodeID   = "restart_same_node_id"
+	FaultPartition             = "partition"
+	FaultCrashRestart          = "crash_restart"
+	FaultMassFailure           = "mass_failure"
+	FaultSlowFsync             = "slow_fsync"
+	FaultAsymmetricReach       = "asymmetric_reachability"
+	FaultKeepaliveBlackhole    = "keepalive_blackhole"
+	FaultEpochOldOwnerWrite    = "epoch_old_owner_write"
+	FaultDuplicateDelivery     = "duplicate_delivery"
+	FaultSlowLink              = "slow_link"
+	FaultOwnerVsFullProposer   = "owner_vs_full_proposer"
+	FaultDuelingProposers      = "dueling_proposers"
+	FaultRestartSameNodeID     = "restart_same_node_id"
+	FaultSharedNodeIDProposers = "shared_node_id_proposers"
 )
 
 // Smoke is the fastest profile — runs on every PR.
@@ -87,7 +88,7 @@ func Consensus() *Profile {
 			FaultAsymmetricReach, FaultEpochOldOwnerWrite,
 			FaultDuplicateDelivery, FaultSlowLink,
 			FaultOwnerVsFullProposer, FaultDuelingProposers,
-			FaultRestartSameNodeID,
+			FaultRestartSameNodeID, FaultSharedNodeIDProposers,
 		},
 	}
 }
@@ -121,7 +122,7 @@ func Contention() *Profile {
 	return &Profile{
 		Name: "contention",
 		Faults: []string{
-			FaultDuelingProposers, FaultOwnerVsFullProposer,
+			FaultDuelingProposers, FaultOwnerVsFullProposer, FaultSharedNodeIDProposers,
 			FaultEpochOldOwnerWrite, FaultSlowLink,
 			FaultAsymmetricReach, FaultDuplicateDelivery,
 		},

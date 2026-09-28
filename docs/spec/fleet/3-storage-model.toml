@@ -57,6 +57,10 @@ target = "docs/spec/fleet.md#3-storage-model"
 # A delete MUST tombstone the object register before it removes the name from the index register.
 # 
 # An object value MUST NOT exceed 1 MiB.
+# 
+# Two proposers MAY choose the same ballot.
+# 
+# An acceptor MUST promise a ballot only if the ballot is higher than every ballot that the acceptor has promised.
 
 [[spec]]
 level = "MUST"
@@ -224,5 +228,17 @@ A delete MUST tombstone the object register before it removes the name from the 
 level = "MUST"
 quote = '''
 An object value MUST NOT exceed 1 MiB.
+'''
+
+[[spec]]
+level = "MAY"
+quote = '''
+Two proposers MAY choose the same ballot.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+An acceptor MUST promise a ballot only if the ballot is higher than every ballot that the acceptor has promised.
 '''
 

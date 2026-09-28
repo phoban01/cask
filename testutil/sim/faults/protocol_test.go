@@ -43,6 +43,34 @@ func TestRestartSameNodeIDKeepsEveryWrite(t *testing.T) {
 	}
 }
 
+// Issue #204: fresh proposers that share a node id mint the same ballot,
+// and no write they commit is lost.
+func TestSharedNodeIDProposersKeepEveryWrite(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# Two proposers MAY choose the same ballot.
+	stores := []caspaxos.Storage{store.NewMem(), store.NewMem(), store.NewMem()}
+	s := sim.NewSim(1, sim.Consensus(), stores)
+	faults.SharedNodeIDProposers{}.Inject(s)
+	faults.SharedNodeIDProposers{}.Inject(s)
+	if w := warnings(s); len(w) > 0 {
+		t.Fatalf("fault reported a lost write: %v", w)
+	}
+	for _, e := range s.Trace.Events() {
+		if strings.Contains(e, "put failed") {
+			t.Fatalf("a write failed with no fault active: %s", e)
+		}
+	}
+	kv := mvcc.New(caspaxos.NewProposer(99, s.Net.Clients()), hlc.New(s.Clock.Phys()), 99)
+	chain, err := kv.History(context.Background(), []byte("\x00sim/shared-node-id"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chain.Versions) != 18 {
+		t.Fatalf("probe key has %d versions, want 18 (three writers, three ops, two injections)", len(chain.Versions))
+	}
+}
+
 // Negative control: processes that share an incarnation, as every process
 // did before the fix, lose writes, and the fault WARNs.
 func TestRestartSameNodeIDCatchesSharedOpIDs(t *testing.T) {
