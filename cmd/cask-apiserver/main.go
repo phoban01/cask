@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/phoban01/cask/cmd/cask-apiserver/storage"
 	"github.com/phoban01/cask/internal/backoff"
 	"github.com/phoban01/cask/internal/caspaxos"
 	"github.com/phoban01/cask/internal/hlc"
@@ -80,11 +81,19 @@ func main() {
 		log.Error("--bootstrap and --seed need --listen-consensus and --advertise-consensus")
 		os.Exit(1)
 	}
-	var prop mvcc.Proposer
+	var (
+		prop mvcc.Proposer
+		// listKeys lists the data keys on a majority of the acceptors,
+		// for the index sweep.
+		listKeys storage.KeyLister
+	)
 	switch {
 	case *peers == "" && !dynamic:
 		log.Warn("embedded single-node cask: state is process-local and non-durable (demo mode)")
-		prop = caspaxos.NewProposer(1, []caspaxos.AcceptorClient{caspaxos.NewAcceptor(store.NewMem())})
+		st := store.NewMem()
+		prop = caspaxos.NewProposer(1, []caspaxos.AcceptorClient{caspaxos.NewAcceptor(st)})
+		// The one acceptor is a majority.
+		listKeys = st.Keys
 	default:
 		if *self == 0 {
 			log.Error("--id required with --bootstrap, --seed, or --cask-peers (unique per apiserver)")
@@ -173,6 +182,7 @@ func main() {
 				os.Exit(1)
 			}
 			prop = mem
+			listKeys = mem.listDataKeys
 			break
 		}
 		hc := transport.TCP{}.HTTPClient()
@@ -193,10 +203,20 @@ func main() {
 	sessions := lease.NewSessions(prop, func() int64 { return time.Now().UnixNano() })
 	locks := lease.NewLocks(prop, sessions)
 	fs := &fleetStore{kv: kv, sessions: sessions, locks: locks}
-	//= docs/spec/fleet.md#3-storage-model
-	//= type=exception
-	//= reason=no index sweep runs at startup yet; tracked in issue #36
-	//# The extension server MUST reconcile the index register against the object registers at startup.
+
+	// Repair the index before the server serves, so no list misses an
+	// object whose index write a crash lost.
+	if listKeys != nil {
+		sw := &indexSweeper{kv: kv, list: listKeys, log: log}
+		if err := sw.sweepAtStartup(ctx, time.Second); err != nil {
+			log.Error("index sweep at startup", "err", err)
+			os.Exit(1)
+		}
+		log.Info("index sweep at startup done")
+	} else {
+		// A proposer over a static peer list cannot list keys on the peers.
+		log.Warn("no index sweep: --cask-peers cannot list keys on a majority; use --bootstrap or --seed")
+	}
 
 	srv := newAPIServer(*cluster, fs, log)
 	go srv.runReconciler(ctx, 2*time.Second)
