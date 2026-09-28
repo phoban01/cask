@@ -75,11 +75,24 @@ parse() {
   done
 }
 
+# must_fail passes only when quint exits non-zero and its output reports an
+# invariant violation: a line that starts with "[violation]" and the line
+# "error: Invariant violated". Any other failure (parse or type error,
+# unknown step or invariant, runtime error) fails the gate.
 must_fail() {
-  local spec=$1 step=$2 inv=$3
+  local spec=$1 step=$2 inv=$3 out rc=0
   echo "== negative control: $step must violate $inv"
-  if q run "$spec" --step="$step" --invariant="$inv" --max-steps="$STEPS" --max-samples="$SAMPLES" >/dev/null 2>&1; then
+  out=$(q run "$spec" --step="$step" --invariant="$inv" --max-steps="$STEPS" --max-samples="$SAMPLES" 2>&1) || rc=$?
+  if [ $rc -eq 0 ]; then
     die "$step did not violate $inv; the model has lost its teeth"
+  fi
+  if ! grep -qE '^\[violation\]' <<<"$out" || ! grep -qxF 'error: Invariant violated' <<<"$out"; then
+    {
+      echo "FAIL: $spec: control $step:$inv exited $rc without an invariant violation"
+      echo "first lines of quint output:"
+      printf '%s\n' "$out" | head -n 10 | sed 's/^/   /' || true
+    } >&2
+    exit 1
   fi
   echo "   violated as required"
 }
