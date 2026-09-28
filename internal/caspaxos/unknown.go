@@ -22,7 +22,9 @@ const unknownRetries = 8
 // register in its prepare phase. If the register holds the exact value the
 // earlier attempt wrote, that write landed: the round writes the value back
 // unchanged and returns it. Otherwise change runs on the fresh value, so a
-// compare-and-set in change sees any write that came in between.
+// compare-and-set in change sees any write that came in between. Each
+// retry marks its context with WithRetry, so the proposer's backoff keeps
+// growing across calls.
 //
 // Use it only when change is a compare-and-set, or when an equal value
 // means the same outcome. The test is on bytes: if another writer stored
@@ -54,8 +56,12 @@ func ProposeResolving(ctx context.Context, prop Proposing, key []byte, change Ch
 		}
 		return next, err
 	}
-	for range unknownRetries {
-		raw, err := prop.Propose(ctx, key, resolving)
+	//= docs/spec/fleet.md#3-storage-model
+	//# A write that retries after an unknown outcome MUST wait longer before each retry, up to a fixed limit.
+	base := RetryOf(ctx) // a caller's own retry count, if it has one
+	for retry := range unknownRetries {
+		// The retry number makes the proposer's backoff grow across calls.
+		raw, err := prop.Propose(WithRetry(ctx, base+retry), key, resolving)
 		switch {
 		case errors.Is(err, ErrUnknownOutcome):
 			pending = true

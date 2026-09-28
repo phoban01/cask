@@ -3,6 +3,7 @@ package caspaxos_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/phoban01/cask/internal/caspaxos"
@@ -156,5 +157,34 @@ func TestProposeResolvingKeepsUnknownAfterPreempted(t *testing.T) {
 	_, err := caspaxos.ProposeResolving(context.Background(), prop, []byte("k"), caspaxos.Identity)
 	if !errors.Is(err, caspaxos.ErrUnknownOutcome) || errors.Is(err, caspaxos.ErrPreempted) {
 		t.Fatalf("err = %v, want ErrUnknownOutcome and not ErrPreempted", err)
+	}
+}
+
+// retries is a fake proposer that records the retry number on each call
+// and returns one scripted error per call.
+type retries struct {
+	errs []error
+	seen []int
+}
+
+func (r *retries) Propose(ctx context.Context, _ []byte, _ caspaxos.ChangeFunc) ([]byte, error) {
+	r.seen = append(r.seen, caspaxos.RetryOf(ctx))
+	err := r.errs[0]
+	r.errs = r.errs[1:]
+	return nil, err
+}
+
+// ProposeResolving marks each call after an unknown outcome with its retry
+// number, so the proposer's backoff grows across calls.
+func TestProposeResolvingMarksRetries(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A write that retries after an unknown outcome MUST wait longer before each retry, up to a fixed limit.
+	prop := &retries{errs: []error{caspaxos.ErrUnknownOutcome, caspaxos.ErrUnknownOutcome, nil}}
+	if _, err := caspaxos.ProposeResolving(context.Background(), prop, []byte("k"), caspaxos.Identity); err != nil {
+		t.Fatal(err)
+	}
+	if want := []int{0, 1, 2}; !slices.Equal(prop.seen, want) {
+		t.Fatalf("retry numbers = %v, want %v", prop.seen, want)
 	}
 }

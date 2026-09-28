@@ -361,6 +361,11 @@ const unknownOutcomeRetries = 8
 // moves the watermark back. The retry re-reads the register in its prepare
 // phase and applies change to that value.
 //
+// Each retry marks its context with caspaxos.WithRetry. The proposer then
+// waits longer after each lost round, across calls. Each Propose call
+// starts its own rounds at attempt 0, so without the mark every retry
+// waits the shortest delay, and contending writers keep colliding.
+//
 // Once one attempt returns caspaxos.ErrUnknownOutcome, the outcome stays
 // unknown until a later round completes. An acceptor may still hold the
 // earlier value, and a later round can choose it. So after an unknown
@@ -375,9 +380,13 @@ func (kv *KV) propose(ctx context.Context, key []byte, change caspaxos.ChangeFun
 	//# A retried write MUST be a compare-and-set, never a blind reapplication of a change.
 	//= docs/spec/fleet.md#3-storage-model
 	//# A write that returned a conflict MAY have been committed.
+	//= docs/spec/fleet.md#3-storage-model
+	//# A write that retries after an unknown outcome MUST wait longer before each retry, up to a fixed limit.
 	unknown := false
-	for range unknownOutcomeRetries {
-		raw, err := kv.prop.Propose(ctx, key, change)
+	base := caspaxos.RetryOf(ctx) // a caller's own retry count, if it has one
+	for retry := range unknownOutcomeRetries {
+		// The retry number makes the proposer's backoff grow across calls.
+		raw, err := kv.prop.Propose(caspaxos.WithRetry(ctx, base+retry), key, change)
 		switch {
 		case errors.Is(err, caspaxos.ErrUnknownOutcome):
 			unknown = true

@@ -160,3 +160,32 @@ func splitCommas(b []byte) [][]byte {
 	}
 	return append(out, b[start:])
 }
+
+// A retry after ErrUnknownOutcome starts a new Propose call. The call
+// adds the retry number from WithRetry to each backoff attempt, so the
+// delay keeps growing across calls and does not restart at the shortest.
+func TestBackoffGrowsAcrossRetries(t *testing.T) {
+	//= docs/spec/fleet.md#3-storage-model
+	//= type=test
+	//# A write that retries after an unknown outcome MUST wait longer before each retry, up to a fixed limit.
+	ctx := context.Background()
+	acc := ownedCluster(3)
+
+	// Raise every register's promise so the victim's first round preempts.
+	blocker := caspaxos.NewProposer(9, acc)
+	if _, err := blocker.Propose(ctx, []byte("k"), caspaxos.Write([]byte("theirs"))); err != nil {
+		t.Fatal(err)
+	}
+
+	var attempts []int
+	victim := caspaxos.NewProposer(1, acc, caspaxos.WithBackoff(func(ctx context.Context, attempt int) error {
+		attempts = append(attempts, attempt)
+		return nil
+	}))
+	if _, err := victim.Propose(caspaxos.WithRetry(ctx, 3), []byte("k"), caspaxos.Write([]byte("mine"))); err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	if len(attempts) == 0 || attempts[0] != 3 {
+		t.Fatalf("backoff attempts = %v, want the first to be 3 (round 0 plus retry 3)", attempts)
+	}
+}
