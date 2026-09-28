@@ -1720,3 +1720,27 @@ Files: `cmd/cask/main.go`
 Done when: `go test -race ./cmd/cask/` passes, and a test shows that the
 host listener answers 404 for the acceptor route and `/roster` in overlay
 mode.
+
+## mvcc: report an unknown outcome when a retry after one is preempted
+
+labels: fleet, agent-5m
+
+Spec: docs/spec/fleet.md#3-storage-model
+> A write that returned a conflict MAY have been committed.
+
+`mvcc.KV.propose` retries a round that returned `ErrUnknownOutcome`. If a
+later retry returns `ErrPreempted`, `propose` returns `ErrPreempted`. But
+the earlier attempt may still hold its value on an acceptor, and a later
+round can choose it. So the write may land although the caller got
+`ErrPreempted`. The storage tests treat `ErrPreempted` from a mutation as
+"nothing written" and run the mutation again. Found while working on
+#173 and #149.
+
+Task: once any attempt in `propose` returned `ErrUnknownOutcome`, return
+`ErrUnknownOutcome` for every later failure that is not a success. Add a
+test with a proposer that returns `ErrUnknownOutcome` and then
+`ErrPreempted`, and check the error.
+
+Files: `internal/mvcc/mvcc.go`, `internal/mvcc/mvcc_test.go`
+
+Done when: the new test passes, and `devbox run test` passes.
