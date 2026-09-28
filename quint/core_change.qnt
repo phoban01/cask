@@ -36,6 +36,11 @@
 // voters that do not hold the joint roster value, and a resumed carry that
 // skips a key whose round did not commit.
 //
+// The gate finds each violation by random simulation, so a control must
+// find its bug in every gate run. Controls 3 and 4 keep only the actions
+// that lead to their bug. Each one violated NoCommittedLoss in 20 of 20
+// runs with random seeds at 30 steps and 2000 samples.
+//
 // Gate checks, read by scripts/quint-check.sh:
 // quint-check: invariants=NoCommittedLoss
 // quint-check: control=stepNoCarry:NoCommittedLoss
@@ -289,27 +294,59 @@ module core_change {
   // ---- negative control 3: list on voters without the joint value --------
 
   // A voter without the joint value still takes a stale write after the
-  // listing. So its listing can miss a key that later commits. The step
-  // leaves out writeAbort and spread: they only hide the bug, and without
-  // them the simulator finds it in every run.
-  action listAnyVoter = { nondet L = oneOf(quorums(COLD)) listWith(L, true) }
+  // listing. So its listing can miss a key that later commits.
+  //
+  // The gate runs a fixed number of random samples, and the bug needs one
+  // narrow order: a write starts on the old core, one voter takes it, the
+  // joint is published, the listing misses the key, and then the last
+  // voter takes the write. So this step keeps only the actions of that
+  // order, and each guard below keeps only real behaviour of the buggy
+  // system:
+  //   - writes start only while the old core is chosen, because a stale
+  //     write that starts later cannot commit;
+  //   - accepts pick only from the write's quorum;
+  //   - the joint is published only while a write is part way through;
+  //   - the change lists once, while that write is in flight, because a
+  //     later listing finds the key and hides the bug;
+  //   - every carry commits, because a partial carry only delays the
+  //     release.
+  // writeAbort and spread are left out: they only hide the bug.
+  action writeStartOld = all { phase == Old, writeStart }
+  action writeAcceptInQuorum = {
+    nondet a = oneOf(if (pend.active) pend.q else ACCS)
+    acceptWith(a, rgen.get(a))
+  }
+  action publishJointMidWrite = all { pend.active, pend.acked != Set(), publishJoint }
+  action listAnyVoter = {
+    nondet L = oneOf(quorums(COLD))
+    all { not(didList), pend.active, listWith(L, true) }
+  }
+  action carryCommitted = {
+    nondet k = oneOf(KEYS)
+    nondet qr = oneOf(JOINT_QUORUMS)
+    nondet qw = oneOf(JOINT_QUORUMS)
+    carryWith(k, qr, qw)
+  }
   action stepListAnyVoter = any {
-    writeStart, writeAccept, publishJoint, listAnyVoter, carry, release,
+    writeStartOld, writeAcceptInQuorum, publishJointMidWrite, listAnyVoter, carryCommitted, release,
   }
 
   // ---- negative control 4: count a key as carried before it commits ------
 
   // The driver records a key as carried after a round that wrote it back on
   // only some acceptors. A resumed change then skips the key, and the
-  // release leaves its value off a quorum of the new core.
+  // release leaves its value off a quorum of the new core. The step counts
+  // only partial rounds, because counting a committed round is correct. It
+  // uses the same write guards as control 3 and leaves out writeAbort and
+  // spread, which only hide the bug.
   action carryCountsAnyAck = {
     nondet k = oneOf(KEYS)
     nondet qr = oneOf(JOINT_QUORUMS)
-    nondet qw = oneOf(ACCS.powerset())
+    nondet qw = oneOf(ACCS.powerset().exclude(JOINT_QUORUMS))
     carryMark(k, qr, qw, true)
   }
   action stepCarryCountsAnyAck = any {
-    writeStart, writeAccept, writeAbort, publishJoint, spread, list, carryCountsAnyAck, release,
+    writeStartOld, writeAcceptInQuorum, publishJoint, list, carryCountsAnyAck, release,
   }
 
   // ---- witness runs --------------------------------------------------------
