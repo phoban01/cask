@@ -20,6 +20,7 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST,implementation,implication,test]: A mutation MUST write the object register before the index register.
     TEXT[!MUST,implementation,implication,test]: The index register MUST NOT record a sequence higher than the object register holds.
     TEXT[!MUST,implementation,implication,test]: When the index write of a mutation did not complete, the next index write for that object MUST record the object register's current sequence.
+    TEXT[!MUST,implementation,implication,test]: A mutation whose object write committed MUST retry its index write when that index write loses a round or has an unknown outcome.
     TEXT[!MUST,implementation,implication,test]: The extension server MUST reconcile the index register against the object registers at startup.
     TEXT[!MUST,implementation,test]: The extension server MUST reconcile the index register against the object registers at a fixed interval.
     TEXT[!MUST,implementation,implication,test]: A create MUST use a compare-and-set that requires the object register to be absent.

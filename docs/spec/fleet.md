@@ -61,6 +61,8 @@ The index register MUST NOT record a sequence higher than the object register ho
 
 When the index write of a mutation did not complete, the next index write for that object MUST record the object register's current sequence.
 
+A mutation whose object write committed MUST retry its index write when that index write loses a round or has an unknown outcome.
+
 The extension server MUST reconcile the index register against the object registers at startup.
 
 The extension server MUST reconcile the index register against the object registers at a fixed interval.
