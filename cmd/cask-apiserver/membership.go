@@ -53,7 +53,7 @@ type membershipConfig struct {
 //
 // A joined member is a participant: it is in the roster members but not in
 // the core. The driver never grows the core here. Voters change only through
-// changeCore, which the promote endpoint (issue #45) will call.
+// changeCore, which the promote and demote endpoints call (admin.go).
 //
 // Every data register uses the core as its acceptor set, so a core change
 // moves the data registers too (corechange.go).
@@ -128,13 +128,16 @@ func contentionBackoff() func(ctx context.Context, attempt int) error {
 	return backoff.FullJitter(5*time.Millisecond, 500*time.Millisecond)
 }
 
-// handler serves the acceptor and the roster endpoints on one listener.
+// handler serves the acceptor, the roster endpoints, and the promote and
+// demote endpoints on one listener: the consensus listener.
 func (m *membership) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle(transport.ConnectHandler(m.fence))
 	mux.HandleFunc("/roster", m.snap.Serve)
 	mux.HandleFunc("/roster/join", m.snap.ServeJoin)
 	mux.HandleFunc(dataKeysPath, m.serveDataKeys)
+	mux.HandleFunc(promotePath, m.serveVoterChange(true))
+	mux.HandleFunc(demotePath, m.serveVoterChange(false))
 	return mux
 }
 
@@ -179,7 +182,7 @@ func (m *membership) run(ctx context.Context) {
 		case req := <-m.coreReqs:
 			// A core change runs here, so the driver stays the one roster
 			// writer and does not duel with its own reconcile.
-			req.done <- m.runCoreChange(ctx, req.ctx, req.target)
+			req.done <- m.runCoreChange(ctx, req.ctx, req.plan)
 			continue
 		case <-t.C:
 		}
@@ -196,7 +199,7 @@ func (m *membership) run(ctx context.Context) {
 			if v.Joint != nil {
 				// A core change stopped part way (a deadline, a cancel, or a
 				// restart of the driver). Finish it toward its own target.
-				if r := m.runCoreChange(ctx, ctx, v.Joint.New); r.err != nil {
+				if r := m.runCoreChange(ctx, ctx, fixedTarget(v.Joint.New)); r.err != nil {
 					m.log.Warn("resume core change", "err", r.err)
 				}
 			}

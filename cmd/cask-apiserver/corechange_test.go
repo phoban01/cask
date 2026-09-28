@@ -73,18 +73,7 @@ func TestCoreGrowthCarriesDataRegisters(t *testing.T) {
 	founder, second := ms[0], ms[1]
 
 	// Write on the one-voter core, from the founder and from a participant.
-	want := map[string]string{}
-	for i := range 20 {
-		w := founder
-		if i%2 == 1 {
-			w = second
-		}
-		key, val := fmt.Sprintf("fleet/devices/d%02d", i), fmt.Sprintf("v%d", i)
-		if _, err := w.Propose(ctx, []byte(key), func([]byte) ([]byte, error) { return []byte(val), nil }); err != nil {
-			t.Fatalf("write %s: %v", key, err)
-		}
-		want[key] = val
-	}
+	want := writeKeys(t, ctx, 20, founder, second)
 
 	// Grow the core from {1} to {1, 2, 3} through the roster reconfiguration.
 	v, err := founder.changeCore(ctx, []uint64{1, 2, 3})
@@ -100,16 +89,38 @@ func TestCoreGrowthCarriesDataRegisters(t *testing.T) {
 
 	// Stop the founder. Voters 2 and 3 are a quorum of the new core.
 	stopFounder()
+	checkKeys(t, ctx, second, want, "after the founder stopped")
+}
 
+// writeKeys writes n data keys, taking the writers in turn, and returns
+// the values it wrote.
+func writeKeys(t *testing.T, ctx context.Context, n int, writers ...*membership) map[string]string {
+	t.Helper()
+	want := map[string]string{}
+	for i := range n {
+		w := writers[i%len(writers)]
+		key, val := fmt.Sprintf("fleet/devices/d%02d", i), fmt.Sprintf("v%d", i)
+		if _, err := w.Propose(ctx, []byte(key), func([]byte) ([]byte, error) { return []byte(val), nil }); err != nil {
+			t.Fatalf("write %s: %v", key, err)
+		}
+		want[key] = val
+	}
+	return want
+}
+
+// checkKeys reads every key in want through reader and fails if a value
+// is missing or wrong.
+func checkKeys(t *testing.T, ctx context.Context, reader *membership, want map[string]string, when string) {
+	t.Helper()
 	for key, val := range want {
 		rctx, rcancel := context.WithTimeout(ctx, 5*time.Second)
-		got, err := second.Propose(rctx, []byte(key), caspaxos.Identity)
+		got, err := reader.Propose(rctx, []byte(key), caspaxos.Identity)
 		rcancel()
 		if err != nil {
-			t.Fatalf("read %s after the founder stopped: %v", key, err)
+			t.Fatalf("read %s %s: %v", key, when, err)
 		}
 		if string(got) != val {
-			t.Fatalf("read %s = %q after the founder stopped, want %q: the core change lost a committed write", key, got, val)
+			t.Fatalf("read %s = %q %s, want %q: the core change lost a committed write", key, got, when, val)
 		}
 	}
 }

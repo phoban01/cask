@@ -169,6 +169,12 @@ The voter count MUST be odd.
 
 The voter count MUST NOT exceed five.
 
+A promote or demote request MUST apply its whole list of member ids in one core change.
+
+A promote request MUST name only participants.
+
+A demote request MUST name only voters.
+
 The voter set SHOULD contain at most one voter per management cluster once three or more clusters exist.
 
 The founding member MUST remain available until the voter set has grown to three.

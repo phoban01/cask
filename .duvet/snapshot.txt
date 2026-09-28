@@ -75,8 +75,11 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST,implementation,implication,test]: A resumed core change MUST carry every data register that it did not carry under the same joint configuration.
     TEXT[!MUST,implementation,test]: The extension server MUST answer a data write that a voter rejected as stale with a retryable status.
     TEXT[!MUST]: An operator MUST NOT grow the voter set by restarting members with a longer static peer list.
-    TEXT[!MUST]: The voter count MUST be odd.
-    TEXT[!MUST]: The voter count MUST NOT exceed five.
+    TEXT[!MUST,implementation,test]: The voter count MUST be odd.
+    TEXT[!MUST,implementation,test]: The voter count MUST NOT exceed five.
+    TEXT[!MUST,implementation,test]: A promote or demote request MUST apply its whole list of member ids in one core change.
+    TEXT[!MUST,implementation,test]: A promote request MUST name only participants.
+    TEXT[!MUST,implementation,test]: A demote request MUST name only voters.
     TEXT[!SHOULD]: The voter set SHOULD contain at most one voter per management cluster once three or more clusters exist.
     TEXT[!MUST]: The founding member MUST remain available until the voter set has grown to three.
     TEXT[!MUST,implementation,test]: The extension server MUST join the fleet through the dynamic roster path.

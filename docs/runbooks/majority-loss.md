@@ -36,19 +36,22 @@ Read this before you start.
 
 ## Current state
 
-The procedure below is the target. Two parts of it do not exist yet:
-
-- `cask-apiserver --force-new-fleet` is tracked in
-  [#74](https://github.com/phoban01/cask/issues/74).
-- The promote endpoint is tracked in
-  [#45](https://github.com/phoban01/cask/issues/45).
+The procedure below is the target. One part of it does not exist yet:
+`cask-apiserver --force-new-fleet` is tracked in
+[#74](https://github.com/phoban01/cask/issues/74).
 
 The apiserver joins the fleet through the dynamic roster path:
 `--bootstrap`, `--seed`, and `GET /roster` on the `--listen-consensus`
 address. `cmd/cask` uses the same code. `--cask-peers` is deprecated and
 kept for tests.
 
-Until the two missing parts land, the apiserver has no supported
+`POST /admin/promote` and `POST /admin/demote` on the `--listen-consensus`
+address change the voters (step 9). This listener has no mutual TLS yet
+([#47](https://github.com/phoban01/cask/issues/47),
+[#48](https://github.com/phoban01/cask/issues/48)). Anyone who can reach it
+can change the voters, so keep it off networks you do not trust.
+
+Until `--force-new-fleet` lands, the apiserver has no supported
 majority-loss recovery. Do not shorten `--cask-peers` by hand to force a
 quorum.
 
@@ -138,13 +141,38 @@ empty its data dir first and join it as a new member.
 ### 9. Re-promote voters
 
 Grow the voters from one to three. Then grow from three to five if you
-had five. Never grow from one to two. The promote endpoint changes the
-core by joint-consensus reconfiguration, and it refuses an even voter
-count:
+had five. Never grow from one to two. Name two participants in one
+request. The promote endpoint moves the core to the new voters in one
+joint-consensus reconfiguration. It carries every data register to the
+new core.
 
 ```sh
-curl -X POST https://<founder-addr>/admin/promote/<id>
+curl -sL -X POST http://<founder-consensus-addr>/admin/promote -d '[<id>, <id>]'
 ```
+
+The body is a JSON list of node ids. Read the ids from `members` in
+`GET /roster`. The endpoint answers when the change is released:
+
+```json
+{"core": [1, 2, 3], "cfg_gen": 4}
+```
+
+Only the driver runs a core change. The driver is the core member with
+the highest node id. Any other member answers `307` with the driver's
+address in `Location`. `curl -L` follows it with the same body.
+
+The endpoint refuses the request with `409` and does not change the core
+when:
+
+- the new voter count is even, zero, or above five;
+- an id is not a roster member, or is already a voter.
+
+`POST /admin/demote` takes a list of voters and makes them participants.
+It follows the same rules. It refuses an id that is not a voter.
+
+A `503` means that another core change is in flight, or that this change
+did not finish. The driver resumes an unfinished change by itself. Check
+`GET /roster` before you send the request again.
 
 Wait until `core` in `GET /roster` shows the new voters before the next
 step.
