@@ -1,24 +1,24 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 
+	"github.com/phoban01/cask/cmd/cask-apiserver/storage"
 	"github.com/phoban01/cask/internal/caspaxos"
 	"github.com/phoban01/cask/internal/lease"
 	"github.com/phoban01/cask/internal/mvcc"
 )
 
 // fleetStore keeps API objects in cask registers. Every object is one MVCC
-// register (per-object linearizability, resourceVersion = per-key Seq); each
-// resource type additionally keeps ONE index register holding the sorted
-// name set, CAS-maintained on create/delete, so LIST is a linearizable read
-// of index + members without any scan primitive.
+// register (per-object linearizability, resourceVersion = per-key Seq). Each
+// resource type also keeps one index register that maps every name to the
+// object's latest sequence. Create, update, and delete write the object
+// first and the index second. LIST reads the index and then each object at
+// the sequence the index recorded, with no scan primitive.
 type fleetStore struct {
 	kv       *mvcc.KV
 	sessions *lease.Sessions
@@ -36,11 +36,7 @@ var errNotFound = errors.New("apiserver: not found")
 func objectKey(resource, name string) []byte {
 	//= docs/spec/fleet.md#3-storage-model
 	//# Each object MUST be stored in one cask register keyed by resource type and name.
-	return fmt.Appendf(nil, "fleet/%s/%s", resource, name)
-}
-
-func indexKey(resource string) []byte {
-	return fmt.Appendf(nil, "fleet/%s.index", resource)
+	return storage.ObjectKey(resource, name)
 }
 
 // deviceLockName is the cask lock whose holder IS the device's global lease.
@@ -65,8 +61,8 @@ func (s *fleetStore) get(ctx context.Context, resource, name string) ([]byte, ui
 	return head.Value, head.Seq, nil
 }
 
-// create commits raw as a new object (fails if one exists) and registers the
-// name in the type index. Returns the new resourceVersion.
+// create commits raw as a new object (fails if one exists) and records the
+// new sequence in the type index. Returns the new resourceVersion.
 func (s *fleetStore) create(ctx context.Context, resource, name string, raw []byte) (uint64, error) {
 	//= docs/spec/fleet.md#3-storage-model
 	//# A create MUST use a compare-and-set that requires the object register to be absent.
@@ -79,14 +75,15 @@ func (s *fleetStore) create(ctx context.Context, resource, name string, raw []by
 	if err != nil {
 		return 0, err
 	}
-	if err := s.indexAdd(ctx, resource, name); err != nil {
+	if err := storage.WriteIndex(ctx, s.kv, resource, name); err != nil {
 		return 0, err
 	}
 	return v.Seq, nil
 }
 
 // update commits raw over the version the client read (optimistic
-// concurrency: k8s resourceVersion semantics ARE per-key CAS).
+// concurrency: k8s resourceVersion semantics ARE per-key CAS), then records
+// the new sequence in the type index.
 func (s *fleetStore) update(ctx context.Context, resource, name string, raw []byte, expectRV uint64) (uint64, error) {
 	cur, rv, err := s.get(ctx, resource, name)
 	if err != nil {
@@ -112,6 +109,9 @@ func (s *fleetStore) update(ctx context.Context, resource, name string, raw []by
 	if err != nil {
 		return 0, err
 	}
+	if err := storage.WriteIndex(ctx, s.kv, resource, name); err != nil {
+		return 0, err
+	}
 	return v.Seq, nil
 }
 
@@ -124,108 +124,36 @@ func (s *fleetStore) delete(ctx context.Context, resource, name string) error {
 	if _, err := s.kv.Delete(ctx, objectKey(resource, name)); err != nil {
 		return err
 	}
-	return s.indexRemove(ctx, resource, name)
+	return storage.WriteIndex(ctx, s.kv, resource, name)
 }
 
-// list returns every live object's name, raw bytes, and RV — index-aligned —
-// in name order.
+// list returns every object that the index names, with its raw bytes and
+// the sequence the index recorded, in name order. It reads each object at
+// that recorded sequence, not at its head.
 func (s *fleetStore) list(ctx context.Context, resource string) (names []string, raws [][]byte, rvs []uint64, err error) {
-	all, err := s.indexNames(ctx, resource)
+	idx, err := storage.ReadIndex(ctx, s.kv, resource)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	all := make([]string, 0, len(idx.Entries))
+	for name := range idx.Entries {
+		all = append(all, name)
+	}
+	sort.Strings(all)
 	for _, name := range all {
-		raw, rv, gerr := s.get(ctx, resource, name)
-		if errors.Is(gerr, errNotFound) {
-			continue // deleted between index read and member read
-		}
+		seq := idx.Entries[name]
+		v, found, gerr := s.kv.GetAt(ctx, objectKey(resource, name), seq)
 		if gerr != nil {
 			return nil, nil, nil, gerr
 		}
+		if !found || v.Tombstone {
+			return nil, nil, nil, fmt.Errorf("apiserver: %s %q has no live version at index sequence %d", resource, name, seq)
+		}
 		names = append(names, name)
-		raws = append(raws, raw)
-		rvs = append(rvs, rv)
+		raws = append(raws, v.Value)
+		rvs = append(rvs, seq)
 	}
 	return names, raws, rvs, nil
-}
-
-// --- the type index register -----------------------------------------------
-
-func (s *fleetStore) indexNames(ctx context.Context, resource string) ([]string, error) {
-	raw, found, err := s.kv.Get(ctx, indexKey(resource))
-	if err != nil || !found || len(raw) == 0 {
-		return nil, err
-	}
-	var names []string
-	if err := json.Unmarshal(raw, &names); err != nil {
-		return nil, fmt.Errorf("apiserver: decode %s index: %w", resource, err)
-	}
-	return names, nil
-}
-
-func (s *fleetStore) indexMutate(ctx context.Context, resource string, mutate func([]string) []string) error {
-	//= docs/spec/fleet.md#3-storage-model
-	//= type=exception
-	//= reason=the index holds names only, no sequences; tracked in issue #32
-	//# The index register MUST NOT record a sequence higher than the object register holds.
-	//= docs/spec/fleet.md#3-storage-model
-	//= type=exception
-	//= reason=the index holds names only, no sequences; tracked in issue #32
-	//# When the index write of a mutation did not complete, the next index write for that object MUST record the object register's current sequence.
-	for range 8 { // CAS retry against concurrent index writers
-		cur, found, err := s.kv.Get(ctx, indexKey(resource))
-		if err != nil {
-			return err
-		}
-		var names []string
-		if found && len(cur) > 0 {
-			if err := json.Unmarshal(cur, &names); err != nil {
-				return err
-			}
-		}
-		next := mutate(names)
-		sort.Strings(next)
-		raw, err := json.Marshal(next)
-		if err != nil {
-			return err
-		}
-		if bytes.Equal(cur, raw) {
-			return nil
-		}
-		var expected []byte
-		if found {
-			expected = cur
-		}
-		if _, err := s.kv.CAS(ctx, indexKey(resource), expected, raw); err == nil {
-			return nil
-		} else if !errors.Is(err, caspaxos.ErrConflict) {
-			return err
-		}
-	}
-	return fmt.Errorf("apiserver: %s index contended out", resource)
-}
-
-func (s *fleetStore) indexAdd(ctx context.Context, resource, name string) error {
-	return s.indexMutate(ctx, resource, func(names []string) []string {
-		for _, n := range names {
-			if n == name {
-				return names
-			}
-		}
-		return append(names, name)
-	})
-}
-
-func (s *fleetStore) indexRemove(ctx context.Context, resource, name string) error {
-	return s.indexMutate(ctx, resource, func(names []string) []string {
-		out := names[:0:0]
-		for _, n := range names {
-			if n != name {
-				out = append(out, n)
-			}
-		}
-		return out
-	})
 }
 
 // formatRV / parseRV translate between wire resourceVersions and Seq.

@@ -236,8 +236,8 @@ func (s *apiServer) serveDelete(w http.ResponseWriter, r *http.Request, resource
 }
 
 func (s *apiServer) serveList(w http.ResponseWriter, r *http.Request, resource string) {
-	// The list reads the index name set and then each object at its head.
-	// The index records no sequence, and the list reports no resourceVersion.
+	// The list reads the index and then each object at the sequence the
+	// index recorded. The list does not report the index sequence yet.
 	//= docs/spec/fleet.md#4-list-and-watch
 	//= type=exception
 	//= reason=the list reports no index sequence; tracked in issue #33
@@ -265,8 +265,8 @@ func (s *apiServer) serveList(w http.ResponseWriter, r *http.Request, resource s
 // promptness: every event reflects a linearizable read.
 func (s *apiServer) serveWatch(w http.ResponseWriter, r *http.Request, resource string) {
 	// The watch ignores the start resourceVersion and diffs one poll against
-	// the next. Two changes between polls merge into one event, and each
-	// event carries the object at its head, not at an index sequence.
+	// the next. Two changes between polls merge into one event. An ADDED or
+	// MODIFIED event carries the object at the sequence the index recorded.
 	//= docs/spec/fleet.md#4-list-and-watch
 	//= type=exception
 	//= reason=poll-diff can merge changes and ignores the start version; tracked in issue #34
@@ -277,7 +277,7 @@ func (s *apiServer) serveWatch(w http.ResponseWriter, r *http.Request, resource 
 	//# A watch whose start version is compacted MUST end with 410 Gone.
 	//= docs/spec/fleet.md#4-list-and-watch
 	//= type=exception
-	//= reason=the index records no sequence yet; tracked in issues #32 and #34
+	//= reason=a DELETED event carries only the name, not the object; tracked in issue #34
 	//# Each watch event MUST carry the object at the sequence the index recorded.
 	//= docs/spec/fleet.md#4-list-and-watch
 	//= type=exception
