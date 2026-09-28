@@ -4,7 +4,13 @@
 // quint-check: control=stepRestoreEveryBound:LiveBoundHoldsLock
 // quint-check: control=stepReleaseClearsKept:FenceMonotone
 // quint-check: control=stepStaleWriteLowersKept:KeptCoversLock
-// quint-check: verify-steps=8
+// quint-check: verify-steps=6
+//
+// Verify bound: each CI verify job has a 30-minute timeout. On the dev VM,
+// `quint verify` takes 3.5 minutes at 6 steps, 12.7 at 7, and 33 at 8.
+// Six steps reach every witness run up to the cutover: the release of
+// issue #200 (Bind, Effect, Release, Cutover) and the zombie's stale
+// write (Bind, Lapse, Bind, StaleWrite). The simulation runs 30 steps.
 //
 // cutover.qnt — the claim lock of one object across the cutover from the
 // CRD to cask (docs/spec/fleet.md sections 5 and 7, issues #196 and #200).
