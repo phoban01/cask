@@ -105,7 +105,8 @@ spec:
 # lets a voluntary disruption, such as a node drain, take at most one voter
 # in this cluster at a time. The demo runs one voter per cluster, so the
 # budget does not coordinate across clusters: upgrade one cluster at a
-# time and wait for its voter to be Ready before the next.
+# time and wait for its voter to be Ready before the next. See
+# docs/runbooks/rolling-upgrade.md.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

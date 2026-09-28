@@ -80,7 +80,9 @@ The script walks four acts:
   unsafe for consensus — and the zombie act restarts one on purpose.
 - **Disruption budget.** A PodDisruptionBudget with `maxUnavailable: 1`
   lets a drain take at most one voter per cluster. It does not coordinate
-  across clusters. Upgrade one cluster at a time.
+  across clusters. Upgrade one cluster at a time, as
+  [docs/runbooks/rolling-upgrade.md](../../docs/runbooks/rolling-upgrade.md)
+  describes.
 - The APIService is registered with `insecureSkipTLSVerify: true` against
   the apiserver's per-boot self-signed cert (`--self-signed-tls`); real
   deployments want real serving certs and cask's §5.4 wire hardening.
