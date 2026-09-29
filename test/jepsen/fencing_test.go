@@ -10,6 +10,7 @@ package jepsen
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -90,10 +91,17 @@ func TestLockFencingUnderPartition(t *testing.T) {
 
 			var local []acquireRec
 			for i := 0; i < opsEach; i++ {
+				// The acquire can take effect in any attempt that
+				// acquireUntilDecided makes, so its call time is the
+				// start of the first attempt.
 				call := now()
-				tok, err := lk.Acquire(ctx, "global-lock", sess)
+				tok, err := acquireUntilDecided(ctx, lk, sess)
+				if errors.Is(err, lease.ErrHeld) {
+					continue // another live session holds the lock
+				}
 				if err != nil {
-					continue // held by another, or partition transient
+					t.Errorf("c%d: acquire: %v", cid, err)
+					return
 				}
 				ret := now()
 				local = append(local, acquireRec{client: cid, token: tok, call: call, ret: ret})
@@ -159,6 +167,25 @@ func TestLockFencingUnderPartition(t *testing.T) {
 }
 
 func sessionID(c int) string { return "sess-" + string(rune('A'+c)) }
+
+// acquireUntilDecided retries Acquire until it has a definite outcome: a
+// fence, or ErrHeld. Any other error leaves the outcome open. A write in an
+// earlier attempt may have landed, and the client then holds the lock
+// without knowing it. A retry with the same session is safe. It re-reads the
+// lock and returns the current fence if the client holds it, so it never
+// mints a second fence for one tenure.
+func acquireUntilDecided(ctx context.Context, lk *lease.Locks, sess string) (uint64, error) {
+	const maxAttempts = 1000
+	var err error
+	for range maxAttempts {
+		var tok uint64
+		tok, err = lk.Acquire(ctx, "global-lock", sess)
+		if err == nil || errors.Is(err, lease.ErrHeld) {
+			return tok, err
+		}
+	}
+	return 0, err
+}
 
 // releaseUntilDone retries Release until it succeeds or the session is no
 // longer live. A dead session cannot hold the lock, so there is then nothing

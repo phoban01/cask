@@ -2040,3 +2040,29 @@ Files: `cmd/cask-apiserver/main.go`, `server.go`, `store.go`, `types.go`,
 Done when: `go -C cmd/cask-apiserver test -race ./...` and
 `devbox run duvet-ci` pass, and `grep -n legacy cmd/cask-apiserver/*.go`
 finds nothing.
+
+## jepsen: TestLockFencingUnderPartition history too thin after the unknown-outcome changes
+
+labels: agent-5m, ci, fleet
+
+Spec: docs/spec/fleet.md#10-verification
+> CI MUST run the unit tests with the race detector.
+
+`TestLockFencingUnderPartition` in `test/jepsen/fencing_test.go` failed on
+PR #191 with `history too thin (29 acquires); gate would be vacuous`. The
+test needs at least 30 successful acquires to be meaningful. Since #168
+(accept ends at the first rejection), #186 (unknown stays unknown) and
+#209 (backoff grows across retries), contended writes under partition
+return an unknown outcome more often and back off longer, so fewer
+acquires succeed in the test's fixed number of ops.
+
+Task: do not just lower the threshold. Measure the acquire count over
+200 runs on main. Then either give each client more ops or a time budget
+so the history reliably has at least 30 acquires, or retry an unknown
+outcome in the test client by re-reading the lock (the client already
+holds its session; an Acquire by the holder returns its fence). Keep the
+uniqueness and monotonicity checks.
+
+Files: `test/jepsen/fencing_test.go`
+
+Done when: `go test -race -count=200 -run TestLockFencingUnderPartition ./test/jepsen/` passes 200 of 200 and reports the minimum acquire count.
