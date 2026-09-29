@@ -10,8 +10,10 @@
 #
 # demo.sh substitutes __CLUSTER__ (this cluster's name), __ID__ (a unique
 # proposer id per apiserver), __CASK_PEERS__ (every member's node
-# IP:8001, including this one's), and the three __CONSENSUS_*__ values
-# (base64 PEM: the fleet CA and this member's certificate and key).
+# IP:8001, including this one's), the three __CONSENSUS_*__ values
+# (base64 PEM: the fleet CA and this member's certificate and key), and the
+# three __SERVING_*__ values (base64 PEM: this cluster's serving CA and the
+# serving certificate and key of the apiserver).
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -30,6 +32,20 @@ data:
   ca.crt: __CONSENSUS_CA__
   tls.crt: __CONSENSUS_CERT__
   tls.key: __CONSENSUS_KEY__
+---
+# The serving identity of this apiserver. The certificate names the
+# Service (cask-apiserver.cask-system.svc). The APIService below carries
+# the serving CA as its caBundle, so the kube-apiserver verifies the
+# apiserver before it proxies a request.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cask-serving-tls
+  namespace: cask-system
+type: kubernetes.io/tls
+data:
+  tls.crt: __SERVING_CERT__
+  tls.key: __SERVING_KEY__
 ---
 # The identity of the apiserver toward the kube-apiserver of this cluster.
 # The apiserver delegates authentication and authorization of each request
@@ -146,6 +162,8 @@ spec:
             - --consensus-cert=/etc/cask/consensus/tls.crt
             - --consensus-key=/etc/cask/consensus/tls.key
             - --consensus-ca=/etc/cask/consensus/ca.crt
+            - --tls-cert-file=/etc/cask/serving/tls.crt
+            - --tls-private-key-file=/etc/cask/serving/tls.key
           ports:
             - containerPort: 9443
             - containerPort: 8001
@@ -157,6 +175,9 @@ spec:
             - name: consensus-tls
               mountPath: /etc/cask/consensus
               readOnly: true
+            - name: serving-tls
+              mountPath: /etc/cask/serving
+              readOnly: true
           readinessProbe:
             httpGet: {path: /readyz, port: 9443, scheme: HTTPS}
             initialDelaySeconds: 1
@@ -164,6 +185,10 @@ spec:
         - name: consensus-tls
           secret:
             secretName: cask-consensus-tls
+            defaultMode: 0400
+        - name: serving-tls
+          secret:
+            secretName: cask-serving-tls
             defaultMode: 0400
   volumeClaimTemplates:
     - metadata:
@@ -212,7 +237,8 @@ spec:
   version: v1alpha1
   groupPriorityMinimum: 1000
   versionPriority: 15
-  insecureSkipTLSVerify: true # demo: the backend serves a self-signed cert (issue #41)
+  # The kube-apiserver verifies the serving certificate with this CA.
+  caBundle: __SERVING_CA__
   service:
     name: cask-apiserver
     namespace: cask-system

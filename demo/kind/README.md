@@ -91,10 +91,16 @@ The script walks four acts:
   TokenReview and SubjectAccessReview. The `cask-apiserver`
   ServiceAccount is bound to `system:auth-delegator` and may read the
   `extension-apiserver-authentication` ConfigMap.
-- The APIService is registered with `insecureSkipTLSVerify: true`. With
-  no `--tls-cert-file`, the apiserver makes a self-signed certificate in
-  memory at each start. Issue #41 replaces it with a certificate that the
-  kube-apiserver can verify.
+- **Verified serving certificate.** The script runs
+  `cask-apiserver gen-serving-certs` once per cluster. It makes a serving
+  CA and a certificate for `cask-apiserver.cask-system.svc` in
+  `demo/kind/.serving-certs/<cluster>`. The apiserver gets the certificate
+  in the `cask-serving-tls` Secret and starts with `--tls-cert-file` and
+  `--tls-private-key-file`. The APIService carries the CA as its
+  `caBundle`, so the kube-apiserver verifies the apiserver. There is no
+  `insecureSkipTLSVerify`. A real cluster can issue the Secret with any
+  CA, such as cert-manager, and put that CA in the `caBundle`.
+  `teardown.sh` deletes the files.
 - Claim TTLs in the demo are 15s so the zombie act completes quickly; the
   lease is renewed by the claim's managing apiserver every 2s reconcile tick.
 - Everything the demo shows also runs as in-process tests

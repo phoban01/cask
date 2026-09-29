@@ -58,6 +58,9 @@ type serverOptions struct {
 	// delegatedAuth is false only in tests. The server then serves every
 	// request without authentication or authorization.
 	delegatedAuth bool
+	// selfSigned is true when newFleetServer made an in-memory self-signed
+	// serving certificate because no --tls-cert-file was set.
+	selfSigned bool
 }
 
 // newServerOptions returns the recommended options of an aggregated
@@ -67,7 +70,7 @@ func newServerOptions() *serverOptions {
 	o.Etcd = nil
 	o.SecureServing.BindPort = 9443
 	// With no --tls-cert-file, the server makes a self-signed certificate
-	// in memory. It writes nothing to disk.
+	// in memory, for tests only. It writes nothing to disk.
 	o.SecureServing.ServerCert.CertDirectory = ""
 	o.SecureServing.ServerCert.PairName = "cask-apiserver"
 	return &serverOptions{recommended: o, delegatedAuth: true}
@@ -93,12 +96,19 @@ func (o *serverOptions) newFleetServer(cluster string, stores map[string]*storag
 		rec.Authentication = nil
 		rec.Authorization = nil
 	}
-	// The certificate names the Service of the demo. #41 replaces it with a
-	// certificate the kube-apiserver can verify.
+	// --tls-cert-file and --tls-private-key-file name the serving
+	// certificate. `cask-apiserver gen-serving-certs` makes one for the
+	// Service, and the APIService carries its CA as the caBundle.
 	//= docs/spec/fleet.md#8-security
-	//= type=exception
-	//= reason=the default serving certificate is self-signed; tracked in issue #41
 	//# The extension server MUST serve HTTPS with a certificate the kube-apiserver can verify.
+	cert := rec.SecureServing.ServerCert.CertKey
+	if (cert.CertFile == "") != (cert.KeyFile == "") {
+		return nil, fmt.Errorf("serving certificate: set both --tls-cert-file and --tls-private-key-file")
+	}
+	// Without the flags, the server makes a self-signed certificate in
+	// memory. The kube-apiserver cannot verify it. In-process tests use it,
+	// and main logs a warning.
+	o.selfSigned = cert.CertFile == ""
 	if err := rec.SecureServing.MaybeDefaultWithSelfSignedCerts("localhost",
 		[]string{"cask-apiserver", "cask-apiserver.cask-system", "cask-apiserver.cask-system.svc"},
 		[]net.IP{net.ParseIP("127.0.0.1")}); err != nil {

@@ -121,38 +121,68 @@ func nodeIP(ctx context.Context, r *resources.Resources) (string, error) {
 	return "", fmt.Errorf("no node has an InternalIP")
 }
 
-// consensusIdentity is one member's consensus TLS files in PEM form.
-type consensusIdentity struct{ ca, cert, key []byte }
+// tlsIdentity is a CA, a certificate, and a key in PEM form.
+type tlsIdentity struct{ ca, cert, key []byte }
 
 // issueConsensus makes a fleet CA and one consensus identity per logical
 // cluster, as `cask-apiserver gen-consensus-certs` does for demo.sh.
-func issueConsensus() (map[string]consensusIdentity, error) {
+func issueConsensus() (map[string]tlsIdentity, error) {
 	ca, err := mtls.NewCA("cask-consensus-ca", 24*time.Hour)
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[string]consensusIdentity, len(logicalClusters))
+	out := make(map[string]tlsIdentity, len(logicalClusters))
 	for _, logical := range logicalClusters {
 		cert, key, err := ca.Issue(logical, logical)
 		if err != nil {
 			return nil, err
 		}
-		out[logical] = consensusIdentity{ca: ca.CertPEM(), cert: cert, key: key}
+		out[logical] = tlsIdentity{ca: ca.CertPEM(), cert: cert, key: key}
 	}
 	return out, nil
 }
 
+// issueServing runs `cask-apiserver gen-serving-certs` in the suite image,
+// as demo.sh does. It returns a serving CA and a serving certificate for
+// the Service of the apiserver.
+func issueServing(ctx context.Context) (tlsIdentity, error) {
+	dir, err := os.MkdirTemp("", "cask-e2e-serving-")
+	if err != nil {
+		return tlsIdentity{}, err
+	}
+	defer os.RemoveAll(dir)
+	user := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "--user", user,
+		"-v", dir+":/out", image, "gen-serving-certs", "--out", "/out", "--ttl", "24h")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return tlsIdentity{}, fmt.Errorf("gen-serving-certs: %w: %s", err, out)
+	}
+	var id tlsIdentity
+	for _, f := range []struct {
+		name string
+		dst  *[]byte
+	}{{"ca.crt", &id.ca}, {"tls.crt", &id.cert}, {"tls.key", &id.key}} {
+		if *f.dst, err = os.ReadFile(filepath.Join(dir, f.name)); err != nil {
+			return tlsIdentity{}, err
+		}
+	}
+	return id, nil
+}
+
 // renderManifest fills the demo manifest placeholders for one cluster, as
 // demo.sh does, and points the pod at the suite image.
-func renderManifest(tmpl []byte, cluster string, id int, peers string, tlsID consensusIdentity) string {
+func renderManifest(tmpl []byte, cluster string, id int, peers string, consensus, serving tlsIdentity) string {
 	b64 := base64.StdEncoding.EncodeToString
 	return strings.NewReplacer(
 		"__CLUSTER__", cluster,
 		"__ID__", strconv.Itoa(id),
 		"__CASK_PEERS__", peers,
-		"__CONSENSUS_CA__", b64(tlsID.ca),
-		"__CONSENSUS_CERT__", b64(tlsID.cert),
-		"__CONSENSUS_KEY__", b64(tlsID.key),
+		"__CONSENSUS_CA__", b64(consensus.ca),
+		"__CONSENSUS_CERT__", b64(consensus.cert),
+		"__CONSENSUS_KEY__", b64(consensus.key),
+		"__SERVING_CA__", b64(serving.ca),
+		"__SERVING_CERT__", b64(serving.cert),
+		"__SERVING_KEY__", b64(serving.key),
 		demoImage, image,
 	).Replace(string(tmpl))
 }
@@ -201,8 +231,14 @@ func deployFleet() env.Func {
 			return ctx, fmt.Errorf("consensus certificates: %w", err)
 		}
 		for i, logical := range logicalClusters {
+			// Each cluster gets its own serving CA, as in the demo. The
+			// APIService carries it as the caBundle.
+			serving, err := issueServing(ctx)
+			if err != nil {
+				return ctx, fmt.Errorf("serving certificate for %s: %w", logical, err)
+			}
 			// --cluster takes the logical name, as in the demo.
-			m := renderManifest(tmpl, logical, firstID+i, strings.Join(peers, ","), ids[logical])
+			m := renderManifest(tmpl, logical, firstID+i, strings.Join(peers, ","), ids[logical], serving)
 			h := decoder.CreateHandler(clients[logical])
 			if err := decoder.DecodeEach(ctx, strings.NewReader(m), h); err != nil {
 				return ctx, fmt.Errorf("apply manifest to %s: %w", logical, err)
