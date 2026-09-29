@@ -73,7 +73,9 @@ The script walks four acts:
   apiserver gets its certificate in the `cask-consensus-tls` Secret and
   starts with `--consensus-cert`, `--consensus-key`, and `--consensus-ca`.
   The consensus port then accepts only peers with a certificate that the
-  fleet CA signed. `teardown.sh` deletes the files.
+  fleet CA signed. `teardown.sh` deletes the files. Without the three flags,
+  an apiserver with a consensus listener or `--cask-peers` does not start,
+  unless `--insecure-consensus` asks for plaintext in a test.
 - **Durability.** Each embedded acceptor persists to Pebble on the
   StatefulSet's PersistentVolumeClaim (`--data-dir`). This is not optional
   hygiene: an acceptor that restarts empty forgets its promises, which is

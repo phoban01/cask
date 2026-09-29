@@ -86,7 +86,11 @@ func main() {
 		log.Error("--index-sweep-interval must be positive", "value", *sweepIv)
 		os.Exit(1)
 	}
-	consensusTLS, err := mtls.Setup(consensusFiles, log)
+	// A member that serves or calls consensus over the network needs the
+	// three consensus TLS flags. It refuses to start without them, unless
+	// --insecure-consensus asks for plaintext. The process-local register
+	// has no consensus traffic, so it needs neither.
+	consensusTLS, err := setupConsensusTLS(consensusFiles, *consLn != "" || *peers != "" || *boot || *seed != "", log)
 	if err != nil {
 		log.Error("consensus TLS", "err", err)
 		os.Exit(1)
@@ -193,13 +197,12 @@ func main() {
 				mux.Handle(transport.ConnectHandler(local))
 				h = mux
 			}
-			// With the consensus flags, the listener serves the acceptor and
-			// the roster endpoints only to a peer with a certificate that the
-			// fleet CA signed. Without them, it serves anyone who can reach
-			// --listen-consensus.
+			// The listener serves the acceptor, the roster endpoints, and
+			// the admin endpoints only to a peer with a certificate that
+			// the fleet CA signed. setupConsensusTLS refused to start
+			// without the consensus TLS flags, so the only plaintext
+			// listener is one that --insecure-consensus asked for.
 			//= docs/spec/fleet.md#8-security
-			//= type=exception
-			//= reason=the control endpoints are open when the consensus TLS flags are absent; tracked in issue #158
 			//# The cask client API and control endpoints MUST NOT be reachable outside the pod without authentication.
 			ln, err := network.Listen(ctx, *consLn)
 			if err != nil {
@@ -364,6 +367,19 @@ func serveLegacy(ctx context.Context, cluster string, fs *fleetStore, listen str
 	}
 	server.TLSConfig = cfg
 	return server.ListenAndServeTLS("", "")
+}
+
+// setupConsensusTLS returns the consensus TLS configs. When the member has
+// consensus traffic (network is true), it fails without the three
+// consensus TLS flags, unless f.Insecure is set. Without consensus
+// traffic, it loads the flags only when some are set.
+func setupConsensusTLS(f mtls.Files, network bool, log *slog.Logger) (*mtls.Config, error) {
+	if !network && !f.Any() && !f.Insecure {
+		return nil, nil
+	}
+	//= docs/spec/fleet.md#8-security
+	//# Consensus traffic between members MUST use mutual TLS.
+	return mtls.Setup(f, log)
 }
 
 // consensusNetwork returns the network for consensus traffic: mutual TLS

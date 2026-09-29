@@ -1011,8 +1011,13 @@ before code.
 
 ### 5.4 — Wire hardening: secure the non-overlay path + client API **[gates "internal critical"]**
 
-**Status.** Not started. Gating for any deployment off a fully-trusted
-network — and for the "internal critical" rung of the trust ladder
+**Status.** Part one is done on the static-TCP path. Since #48, the
+`--consensus-cert`, `--consensus-key`, and `--consensus-ca` flags put
+mutual TLS on it. Since #158, a node without them refuses to start,
+unless `--insecure-consensus` asks for plaintext in a test. Overlay mode
+still serves consensus on the host `--listen` port (#163). Part two, the
+client API, is not started. It gates any deployment off a fully-trusted
+network, and the "internal critical" rung of the trust ladder
 (`docs/confidence.md`).
 
 **Problem.** Two distinct exposures (surfaced by the networking review,

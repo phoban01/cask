@@ -3,6 +3,7 @@ package mtls
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"io"
 	"log/slog"
@@ -174,13 +175,35 @@ func TestLoadRejectsMissingFiles(t *testing.T) {
 	}
 }
 
-func TestSetupWithoutFlagsIsPlaintext(t *testing.T) {
-	cfg, err := Setup(Files{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil || cfg != nil {
-		t.Fatalf("Setup() = %v, %v; want nil, nil", cfg, err)
+// Without the three files, Setup refuses plaintext unless the caller
+// opts in with Insecure. A partial or contradictory set of flags fails.
+func TestSetupRefusesPlaintextWithoutOptIn(t *testing.T) {
+	//= docs/spec/fleet.md#8-security
+	//= type=test
+	//# Consensus traffic between members MUST use mutual TLS.
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if cfg, err := Setup(Files{}, log); !errors.Is(err, ErrNoTLS) || cfg != nil {
+		t.Fatalf("Setup() = %v, %v; want nil, ErrNoTLS", cfg, err)
 	}
-	if _, err := Setup(Files{Cert: "c.pem"}, slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
+	if cfg, err := Setup(Files{Insecure: true}, log); err != nil || cfg != nil {
+		t.Fatalf("Setup(Insecure) = %v, %v; want nil, nil", cfg, err)
+	}
+	if _, err := Setup(Files{Cert: "c.pem"}, log); err == nil {
 		t.Fatal("Setup with one flag succeeded; want an error")
+	}
+	m := issue(t, newCA(t), "east")
+	dir := t.TempDir()
+	f := Files{
+		Cert: write(t, dir, "tls.crt", m.cert),
+		Key:  write(t, dir, "tls.key", m.key),
+		CA:   write(t, dir, "ca.crt", m.ca),
+	}
+	if cfg, err := Setup(f, log); err != nil || cfg == nil {
+		t.Fatalf("Setup(files) = %v, %v; want configs", cfg, err)
+	}
+	f.Insecure = true
+	if _, err := Setup(f, log); err == nil {
+		t.Fatal("Setup with files and Insecure succeeded; want an error")
 	}
 }
 

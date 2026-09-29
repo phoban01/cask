@@ -78,23 +78,10 @@ func main() {
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	// The static topology serves consensus and the client API on --listen.
-	// With the consensus flags, that listener needs a client certificate
-	// from the fleet CA, and every peer call presents one. The Nebula
-	// overlay already authenticates peers with its own certificates, so the
-	// flags do not apply there.
-	var consensusTLS *mtls.Config
-	if *nebConf != "" || *mintURL != "" {
-		if consensusFiles.Any() {
-			log.Error("--consensus-cert, --consensus-key, and --consensus-ca apply to the TCP transport; the Nebula overlay authenticates peers with its own certificates")
-			os.Exit(1)
-		}
-	} else {
-		var err error
-		if consensusTLS, err = mtls.Setup(consensusFiles, log); err != nil {
-			log.Error("consensus TLS", "err", err)
-			os.Exit(1)
-		}
+	consensusTLS, err := setupConsensusTLS(consensusFiles, *nebConf != "" || *mintURL != "", log)
+	if err != nil {
+		log.Error("consensus TLS", "err", err)
+		os.Exit(1)
 	}
 	var network transport.Network = transport.TCP{}
 	if consensusTLS != nil {
@@ -270,6 +257,33 @@ func main() {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
+}
+
+// setupConsensusTLS returns the consensus TLS configs for the static
+// topology. That topology serves consensus and the client API on --listen,
+// so it refuses to start without the three consensus TLS flags, unless
+// f.Insecure is set. With the flags, the listener needs a client
+// certificate from the fleet CA, and every peer call presents one.
+//
+// In overlay mode (--nebula-config or --mint), the Nebula overlay
+// authenticates peers with its own certificates. The consensus TLS flags
+// and --insecure-consensus do not apply there, and it returns nil.
+func setupConsensusTLS(f mtls.Files, overlay bool, log *slog.Logger) (*mtls.Config, error) {
+	if overlay {
+		if f.Any() || f.Insecure {
+			return nil, errors.New("--consensus-cert, --consensus-key, --consensus-ca, and --insecure-consensus apply to the TCP transport; the Nebula overlay authenticates peers with its own certificates")
+		}
+		// Overlay mode still serves the consensus mux in plaintext on the
+		// host --listen port, next to the client API.
+		//= docs/spec/fleet.md#8-security
+		//= type=exception
+		//= reason=overlay mode also serves consensus on the host --listen port in plaintext; tracked in issue #163
+		//# Consensus traffic between members MUST use mutual TLS.
+		return nil, nil
+	}
+	//= docs/spec/fleet.md#8-security
+	//# Consensus traffic between members MUST use mutual TLS.
+	return mtls.Setup(f, log)
 }
 
 // engine is the consensus operation mvcc and lease drive — satisfied by both a
