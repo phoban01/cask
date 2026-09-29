@@ -34,11 +34,6 @@ until these are done:
   annotations, the ownerReferences, and the finalizers. The claim
   controller also writes status through it. The generic server in
   [#191](https://github.com/phoban01/cask/pull/191) fixes this (#38).
-- **The readiness gate.** The issue asks for `--expect-import`. That flag
-  does not exist. [#40](https://github.com/phoban01/cask/issues/40) adds
-  it: readiness fails until the import marker is present. Until then,
-  step 9 is the gate: you register the APIService by hand after the
-  import.
 - **resourceVersion above the etcd revision.** The import starts each
   index register at sequence 1
   ([#51](https://github.com/phoban01/cask/issues/51)). A resourceVersion
@@ -269,11 +264,14 @@ Continue when this answers `NotFound`.
 Make the export file readable inside one apiserver pod. A file under
 1 MiB fits in a ConfigMap. A larger file needs a volume.
 
-Add `--import-file` to that one apiserver and restart it:
+Add `--import-file` to that one apiserver. Also add `--expect-import`
+with the revision from step 3. Then restart it:
 
 ```sh
-kubectl --context <cluster> -n cask-system patch statefulset/cask-apiserver --type=json \
-  -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--import-file=/import/fleet-export.jsonl"}]'
+kubectl --context <cluster> -n cask-system patch statefulset/cask-apiserver --type=json -p '[
+  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--import-file=/import/fleet-export.jsonl"},
+  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--expect-import"},
+  {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--expect-import-revision=<revision>"}]'
 kubectl --context <cluster> -n cask-system rollout status statefulset/cask-apiserver --timeout=10m
 ```
 
@@ -296,16 +294,45 @@ loop. Read the log, fix the cause, and start step 8 again. A second run
 with the same file is safe.
 
 Remove `--import-file` after the import. A later restart does not need it.
+Keep `--expect-import`. The marker stays in cask, so the check passes at
+once after a restart.
+
+Add `--expect-import` and `--expect-import-revision` to the apiserver in
+each other cluster of the fleet too, in the same way.
 
 ### 9. Register the APIService
 
-Only now apply the APIService in the source cluster. Use the APIService
-object from `demo/kind/manifests/apiserver.yaml` as the pattern.
+With `--expect-import`, an apiserver reports not ready until three things
+are true:
+
+- The import marker is in cask.
+- The marker names the `cask-export/v1` format, the `fleet.cask.dev`
+  group, and the revision from step 3.
+- Every Device or DeviceClaim that an object names in its
+  `ownerReferences` exists in cask with the same uid.
+
+A pod that is not ready gets no traffic from its Service. So the
+APIService cannot become Available before the import is complete. You do
+not have to hold it back by hand.
+
+Apply the APIService in the source cluster. Use the APIService object
+from `demo/kind/manifests/apiserver.yaml` as the pattern.
 
 ```sh
 kubectl --context <source> apply -f apiservice.yaml
 kubectl --context <source> wait --for=condition=Available apiservice/v1alpha1.fleet.cask.dev --timeout=5m
 ```
+
+If the wait times out, read the readiness checks of the apiserver:
+
+```sh
+kubectl --context <source> -n cask-system exec cask-apiserver-0 -- \
+  wget -qO- --no-check-certificate 'https://localhost:9443/readyz?verbose'
+```
+
+A failed `cask-import` check names the missing marker, the wrong
+revision, or the missing owners. A failed `cask-storage` check means the
+apiserver cannot reach a majority of the voters.
 
 Do the same in each other cluster of the fleet that does not serve the
 group yet.

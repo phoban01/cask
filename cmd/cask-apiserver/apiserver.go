@@ -161,14 +161,10 @@ func (o *serverOptions) newFleetServer(cluster string, stores map[string]*storag
 		return nil, fmt.Errorf("install %s: %w", v1alpha1.GroupName, err)
 	}
 	// The checks join the readyz checks of the generic server. main passes
-	// storageCheck.
+	// storageCheck, and importCheck with --expect-import.
 	if err := srv.AddReadyzChecks(ready...); err != nil {
 		return nil, fmt.Errorf("readyz checks: %w", err)
 	}
-	//= docs/spec/fleet.md#2-resources
-	//= type=exception
-	//= reason=no import marker and no readiness check; tracked in issue #40
-	//# The extension server MUST report not ready until any pending migration import is complete.
 	return srv, nil
 }
 

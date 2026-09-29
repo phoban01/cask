@@ -69,7 +69,7 @@ func (s *apiServer) routes() *http.ServeMux {
 	//# The extension server MUST report not ready until its storage is reachable.
 	//= docs/spec/fleet.md#2-resources
 	//= type=exception
-	//= reason=no import marker and no readiness check; tracked in issue #40
+	//= reason=the legacy mux behind --legacy-http has no readiness check on the import; tracked in issue #190
 	//# The extension server MUST report not ready until any pending migration import is complete.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 	return mux
