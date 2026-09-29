@@ -15,6 +15,10 @@
 // Cluster names carry a prefix so the suite does not touch the demo
 // clusters. The default prefix is "e2e-". Set CASK_E2E_PREFIX to use a
 // different prefix, for example to run two suites at the same time.
+//
+// Set CASK_E2E_KEEP_CLUSTERS=1 to keep the clusters after the run. CI sets
+// it so that it can export the cluster logs. The caller must then delete
+// the clusters.
 package e2e
 
 import (
@@ -33,6 +37,10 @@ const defaultPrefix = "e2e-"
 
 // prefixEnv names the environment variable that overrides defaultPrefix.
 const prefixEnv = "CASK_E2E_PREFIX"
+
+// keepEnv names the environment variable that keeps the clusters after
+// the run.
+const keepEnv = "CASK_E2E_KEEP_CLUSTERS"
 
 // logicalClusters are the logical names of the fleet clusters. They match
 // the cluster names in demo/kind.
@@ -90,7 +98,9 @@ func TestMain(m *testing.M) {
 	}
 	setup = append(setup, buildImage(), deployFleet())
 	testenv.Setup(setup...)
-	testenv.Finish(finish...)
+	if os.Getenv(keepEnv) == "" {
+		testenv.Finish(finish...)
+	}
 
 	os.Exit(testenv.Run(m))
 }

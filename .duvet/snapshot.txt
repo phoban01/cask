@@ -135,5 +135,5 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST,implementation]: End-to-end tests MUST NOT use Ginkgo.
     TEXT[!MUST,implementation]: End-to-end tests MUST NOT use envtest.
     TEXT[!MUST,implementation]: CI MUST run the unit tests with the race detector.
-    TEXT[!MUST]: CI MUST run the Quint checks, the Duvet report, the simulator gate, and the end-to-end suite.
+    TEXT[!MUST,implementation]: CI MUST run the Quint checks, the Duvet report, the simulator gate, and the end-to-end suite.
     TEXT[!MUST,implementation]: A change that lowers Duvet coverage MUST fail CI.
