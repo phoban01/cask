@@ -2066,3 +2066,71 @@ uniqueness and monotonicity checks.
 Files: `test/jepsen/fencing_test.go`
 
 Done when: `go test -race -count=200 -run TestLockFencingUnderPartition ./test/jepsen/` passes 200 of 200 and reports the minimum acquire count.
+
+## migrate: roll back a cutover with the same uids
+
+labels: migration
+
+Spec: docs/spec/fleet.md#7-migration
+> Every imported object MUST preserve its uid.
+
+Found while writing the cutover runbook (#52). After the CRD is deleted, only an etcd restore brings back the same uids. The import marker also refuses a second import file, so a fleet can import only once.
+
+Task: document the rollback limits in section 7. Design a reverse export from cask into a CRD that keeps uid and creationTimestamp (server-side apply with a status subresource cannot set uid; say what can and cannot be preserved). Decide whether a second import with a new file is allowed, and how.
+
+Files: docs/spec/fleet.md, docs/runbooks/cutover.md
+
+Done when: the spec states the rollback guarantees and the runbook matches.
+
+## membership: members refuse a peer with an incompatible version
+
+labels: membership
+
+Spec: docs/spec/fleet.md#9-operations
+> A rolling upgrade MUST keep a majority of voters available at all times.
+
+Found while writing the rolling-upgrade runbook (#96, PR #195). Members do not check each other's version, so a rolling upgrade that changes the wire or register format can mix incompatible members.
+
+Task: add a protocol version to the roster member record and to the consensus handshake. A member refuses a peer outside its supported range and logs why. Document the supported skew in the runbook.
+
+Files: internal/roster, internal/transport, cmd/cask-apiserver/membership.go, docs/runbooks/rolling-upgrade.md
+
+Done when: a test starts two members with incompatible versions and the join is refused with a clear error.
+
+## membership: remove a lost member through the admin endpoint
+
+labels: membership
+
+Spec: docs/spec/fleet.md#6-membership
+> The voter set MUST change only by joint-consensus reconfiguration of the roster.
+
+Found while writing the rolling-upgrade runbook (#96). There is no endpoint that removes a permanently lost member from the roster. Demote only moves a voter to participant.
+
+Task: add POST /admin/remove with a list of member ids on the consensus listener, behind mutual TLS. A voter goes through a joint core change with the carry (Remove already does this since #124); a participant is a plain member change. Refuse removing the last voter or leaving an even voter count.
+
+Files: cmd/cask-apiserver/admin.go, admin_test.go, docs/runbooks/rolling-upgrade.md
+
+Done when: a test removes a hung voter from a three-voter core, the core becomes the two survivors plus a promoted participant, and every key reads back.
+
+## apiserver: a client update must not lower a Device's advertised lease fence
+
+labels: apiserver
+
+Spec: docs/spec/fleet.md#5-claims-and-fencing
+> A status write MUST NOT lower an advertised fence.
+
+Found in PR #206. `status.lastFence` is now protected, but a client PUT on
+a Device can still lower `status.lease.fence`. With the generic server
+(#191) the status subresource separates spec from status, so a normal
+update keeps status; check whether that already closes this, and close
+the gap for the status subresource itself (a status update that lowers
+`lease.fence` must be refused unless it clears the lease through the
+claim controller's release path).
+
+Task: add a strategy check (or storage precondition) that refuses a
+status write lowering `status.lease.fence`, and a test that a client
+status update at a lower fence gets 409 or 422.
+
+Files: `cmd/cask-apiserver/registry.go` (after #191), `claims.go`
+
+Done when: the test passes and the section 5 sentence has a test citation for this path.
