@@ -334,7 +334,9 @@ func main() {
 	}
 	// A claim delete releases the claim inside the delete of the store,
 	// so the device keeps the fence before the claim goes.
-	srv, err := serverOpts.newFleetServer(*cluster, stores, claims.release)
+	// The server reports not ready while a majority of the acceptors is
+	// out of reach.
+	srv, err := serverOpts.newFleetServer(*cluster, stores, claims.release, newStorageCheck(kv))
 	if err != nil {
 		log.Error("generic server", "err", err)
 		os.Exit(1)
