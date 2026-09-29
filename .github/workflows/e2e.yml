@@ -1,0 +1,104 @@
+name: e2e
+
+# The end-to-end suite in test/e2e. It starts three kind clusters, builds
+# the cask-apiserver image with demo/kind/Dockerfile, and deploys one
+# apiserver per cluster. See test/e2e/main_test.go.
+#
+# Resources: three one-node kind clusters use about 3 GB of memory. The
+# standard ubuntu-latest runner for a public repository has 4 vCPU and
+# 16 GB, which is enough. Do not move this job to a smaller runner.
+#
+# The suite creates its own clusters through e2e-framework. This job only
+# installs the kind and kubectl binaries. It does not create a cluster.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  KIND_VERSION: v0.33.0
+  KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+  KUBECTL_VERSION: v1.37.1
+  KUBECTL_SHA256: 65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8
+  # The CI prefix keeps these clusters apart from any other kind cluster.
+  CASK_E2E_PREFIX: e2e-ci-
+  # Keep the clusters after the run, so that a failed run can export
+  # their logs. The last step deletes them.
+  CASK_E2E_KEEP_CLUSTERS: "1"
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            cmd/cask-apiserver/go.sum
+
+      - name: Install kind and kubectl
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP/bin"
+          curl -fsSLo kind "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  kind" | sha256sum -c -
+          curl -fsSLo kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          echo "${KUBECTL_SHA256}  kubectl" | sha256sum -c -
+          chmod +x kind kubectl
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Show versions
+        run: |
+          kind version
+          kubectl version --client
+          docker version --format '{{.Server.Version}}'
+          free -h
+          nproc
+
+      #= docs/spec/fleet.md#10-verification
+      ## CI MUST run the Quint checks, the Duvet report, the simulator gate, and the end-to-end suite.
+      - name: Run the e2e suite
+        # scripts/e2e.sh passes -count=1 and -timeout 30m. The output goes
+        # to a file too, because a failed test logs the apiserver logs.
+        run: scripts/e2e.sh -v 2>&1 | tee "$RUNNER_TEMP/e2e-test.log"
+
+      - name: Export cluster logs
+        if: failure() || cancelled()
+        run: |
+          mkdir -p "$RUNNER_TEMP/e2e-logs"
+          for c in $(kind get clusters); do
+            case "$c" in
+              "$CASK_E2E_PREFIX"*) kind export logs "$RUNNER_TEMP/e2e-logs/$c" --name "$c" || true ;;
+            esac
+          done
+
+      - name: Upload logs
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: |
+            ${{ runner.temp }}/e2e-test.log
+            ${{ runner.temp }}/e2e-logs
+          if-no-files-found: ignore
+
+      - name: Delete clusters
+        if: always()
+        run: |
+          for c in $(kind get clusters); do
+            case "$c" in
+              "$CASK_E2E_PREFIX"*) kind delete cluster --name "$c" ;;
+            esac
+          done
