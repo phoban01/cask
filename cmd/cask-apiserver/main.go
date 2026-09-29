@@ -21,6 +21,7 @@ import (
 	"github.com/phoban01/cask/internal/transport"
 	"github.com/spf13/pflag"
 	genericapiserver "k8s.io/apiserver/pkg/server"
+	"k8s.io/apiserver/pkg/server/healthz"
 )
 
 func main() {
@@ -51,6 +52,8 @@ func main() {
 		dataDir  = flag.String("data-dir", "", "directory for durable consensus state (Pebble); empty = in-memory (an embedded acceptor that restarts empty forgets its promises — demo only)")
 		sweepIv  = flag.Duration("index-sweep-interval", time.Minute, "how often to repair index entries that a crash left behind (each wait adds up to 10% jitter)")
 		impFile  = flag.String("import-file", "", "cask-export/v1 file to import before serving (see cask-migrate export); safe to repeat")
+		expImp   = flag.Bool("expect-import", false, "report not ready until an import has completed: the import marker is in cask and every fleet owner that an object names exists; set it on every apiserver of a fleet that cuts over from a CRD")
+		expRev   = flag.Uint64("expect-import-revision", 0, "with --expect-import, the source etcd revision that the import marker must name (the revision in the export file header); 0 accepts any")
 		impGrace = flag.Duration("import-grace", defaultImportGrace, "extra session time for each Bound claim that the import restores; it covers the import and the start of the claim's controller")
 		selfTLS  = flag.Bool("self-signed-tls", false, "serve the legacy mux over HTTPS with an in-memory self-signed cert; with --legacy-http only")
 	)
@@ -285,16 +288,6 @@ func main() {
 		}
 	}
 
-	// The import writes a marker last, but no readiness gate reads it yet,
-	// so nothing checks imported owners before the server serves.
-	//= docs/spec/fleet.md#7-migration
-	//= type=exception
-	//= reason=tracked in issue #40
-	//# The APIService MUST NOT become available while any imported object that other objects reference by ownerReference is missing.
-	//= docs/spec/fleet.md#7-migration
-	//= type=exception
-	//= reason=no readiness gate reads the import marker; tracked in issue #40
-	//# The APIService MUST NOT become available before the import has completed.
 	// cask-migrate export, the import, and the cutover runbook exist. The
 	// export CronJob and the rehearsal do not exist yet. The freeze is a
 	// manual step in docs/runbooks/cutover.md. No code enforces it.
@@ -315,6 +308,10 @@ func main() {
 	//= reason=no rehearsal test on kind; tracked in issue #54
 	//# The cutover MUST be rehearsed on a copy of the management cluster before it runs on the real one.
 	if *legacy {
+		if *expImp {
+			log.Error("--expect-import needs the generic server: the legacy mux has no readiness checks")
+			os.Exit(1)
+		}
 		if err := serveLegacy(ctx, *cluster, fs, *listen, *selfTLS, log); err != nil {
 			log.Error("server stopped", "err", err)
 			os.Exit(1)
@@ -332,11 +329,21 @@ func main() {
 		locks:    locks,
 		log:      log,
 	}
+	// SIGTERM ends the context. The server then drains its requests.
+	runCtx := genericapiserver.SetupSignalContext()
+	// The server reports not ready while a majority of the acceptors is
+	// out of reach. With --expect-import, it also reports not ready until
+	// the import has completed.
+	ready := []healthz.HealthChecker{newStorageCheck(kv)}
+	if *expImp {
+		ic := newImportCheck(kv, stores, *expRev)
+		go ic.run(runCtx, time.Second)
+		ready = append(ready, ic)
+		log.Info("readiness waits for the import", "revision", *expRev)
+	}
 	// A claim delete releases the claim inside the delete of the store,
 	// so the device keeps the fence before the claim goes.
-	// The server reports not ready while a majority of the acceptors is
-	// out of reach.
-	srv, err := serverOpts.newFleetServer(*cluster, stores, claims.release, newStorageCheck(kv))
+	srv, err := serverOpts.newFleetServer(*cluster, stores, claims.release, ready...)
 	if err != nil {
 		log.Error("generic server", "err", err)
 		os.Exit(1)
@@ -345,8 +352,6 @@ func main() {
 		log.Warn("no --tls-cert-file: serving a self-signed certificate that the kube-apiserver cannot verify; " +
 			"for tests only, see cask-apiserver gen-serving-certs")
 	}
-	// SIGTERM ends the context. The server then drains its requests.
-	runCtx := genericapiserver.SetupSignalContext()
 	go claims.run(runCtx, 2*time.Second)
 	log.Info("cask-apiserver serving", "group", apiGroup+"/"+apiVersion, "cluster", *cluster,
 		"port", serverOpts.recommended.SecureServing.BindPort, "delegated-auth", serverOpts.delegatedAuth)

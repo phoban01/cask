@@ -6,7 +6,7 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST,implementation,test,exception]: The extension server MUST delegate authentication and authorization to the local kube-apiserver.
     TEXT[!MUST,test,exception]: A client MUST be able to use kubectl, client-go informers, field selectors, and watch bookmarks against fleet resources without fleet-specific code.
     TEXT[!MUST,implementation,test,exception]: The extension server MUST report not ready until its storage is reachable.
-    TEXT[!MUST,exception]: The extension server MUST report not ready until any pending migration import is complete.
+    TEXT[!MUST,implementation,test,exception]: The extension server MUST report not ready until any pending migration import is complete.
 
   SECTION: [3. Storage model](#3-storage-model)
     TEXT[!MUST,implementation,test]: Each object MUST be stored in one cask register keyed by resource type and name.
@@ -99,8 +99,8 @@ SPECIFICATION: [Cask fleet objects](docs/spec/fleet.md)
     TEXT[!MUST,implementation,test,exception]: The migration MUST preserve each object's uid.
     TEXT[!MUST,implementation,test,exception]: The migration MUST preserve each object's creationTimestamp.
     TEXT[!MUST,exception]: Writers MUST be frozen from the start of the export until the APIService is available.
-    TEXT[!MUST,exception]: The APIService MUST NOT become available before the import has completed.
-    TEXT[!MUST,exception]: The APIService MUST NOT become available while any imported object that other objects reference by ownerReference is missing.
+    TEXT[!MUST,implementation,test]: The APIService MUST NOT become available before the import has completed.
+    TEXT[!MUST,implementation,test]: The APIService MUST NOT become available while any imported object that other objects reference by ownerReference is missing.
     TEXT[!MUST,exception]: The initial index sequence for each resource type MUST be greater than the source etcd revision at export time.
     TEXT[!MUST,implementation,implication,test]: The fences that the export records for a Device MUST include the lastFence in its status.
     TEXT[!MUST,implementation,implication,test]: The import MUST NOT seed an object's lock at a fence below the highest fence that the export recorded for that object.
