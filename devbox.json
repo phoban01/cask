@@ -51,6 +51,7 @@
       "e2e":           ["scripts/e2e.sh"],
       "issues":        ["scripts/file-issues.sh docs/issues/fleet.md"],
       "verify":        [
+        "test -z \"$(gofmt -l .)\" || { gofmt -l .; echo gofmt needs to run; exit 1; }",
         "go test -race ./...",
         "go -C cmd/cask-apiserver test -race ./...",
         "scripts/quint-check.sh",
