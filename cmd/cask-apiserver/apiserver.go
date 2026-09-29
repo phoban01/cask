@@ -26,6 +26,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	openapinamer "k8s.io/apiserver/pkg/endpoints/openapi"
 	genericapiserver "k8s.io/apiserver/pkg/server"
+	"k8s.io/apiserver/pkg/server/healthz"
 	genericoptions "k8s.io/apiserver/pkg/server/options"
 	"k8s.io/apiserver/pkg/util/compatibility"
 )
@@ -86,9 +87,11 @@ func (o *serverOptions) addFlags(fs *pflag.FlagSet) {
 
 // newFleetServer builds the generic server over the cask stores of
 // Device and DeviceClaim. beforeClaimDelete runs inside each claim delete,
-// before the claim goes; an error stops the delete.
+// before the claim goes; an error stops the delete. The server reports
+// ready only when every check in ready passes.
 func (o *serverOptions) newFleetServer(cluster string, stores map[string]*storage.Store,
-	beforeClaimDelete func(context.Context, *v1alpha1.DeviceClaim) error) (*genericapiserver.GenericAPIServer, error) {
+	beforeClaimDelete func(context.Context, *v1alpha1.DeviceClaim) error,
+	ready ...healthz.HealthChecker) (*genericapiserver.GenericAPIServer, error) {
 	//= docs/spec/fleet.md#2-resources
 	//# The extension server MUST be built on the generic server in k8s.io/apiserver.
 	rec := o.recommended
@@ -157,11 +160,11 @@ func (o *serverOptions) newFleetServer(cluster string, stores map[string]*storag
 	if err := srv.InstallAPIGroup(&group); err != nil {
 		return nil, fmt.Errorf("install %s: %w", v1alpha1.GroupName, err)
 	}
-	// Readiness does not check the cask storage yet.
-	//= docs/spec/fleet.md#2-resources
-	//= type=exception
-	//= reason=no readiness check on storage; tracked in issue #39
-	//# The extension server MUST report not ready until its storage is reachable.
+	// The checks join the readyz checks of the generic server. main passes
+	// storageCheck.
+	if err := srv.AddReadyzChecks(ready...); err != nil {
+		return nil, fmt.Errorf("readyz checks: %w", err)
+	}
 	//= docs/spec/fleet.md#2-resources
 	//= type=exception
 	//= reason=no import marker and no readiness check; tracked in issue #40

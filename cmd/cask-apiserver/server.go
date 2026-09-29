@@ -62,10 +62,10 @@ func (s *apiServer) routes() *http.ServeMux {
 	mux.HandleFunc(groupPrefix+"/devices/", s.item("devices"))
 	mux.HandleFunc(groupPrefix+"/deviceclaims", s.collection("deviceclaims"))
 	mux.HandleFunc(groupPrefix+"/deviceclaims/", s.item("deviceclaims"))
-	// /healthz always answers ok. There is no readyz check yet.
+	// /healthz always answers ok. The legacy mux has no readyz check.
 	//= docs/spec/fleet.md#2-resources
 	//= type=exception
-	//= reason=no readiness check on storage; tracked in issue #39
+	//= reason=the legacy mux behind --legacy-http has no readiness check on storage; tracked in issue #190
 	//# The extension server MUST report not ready until its storage is reachable.
 	//= docs/spec/fleet.md#2-resources
 	//= type=exception

@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/apiserver/pkg/server/healthz"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 )
@@ -97,30 +98,53 @@ func (f *fakeKubeAPIServer) askedAbout(user string) bool {
 // controller.
 type testServer struct {
 	url    string
+	kv     *mvcc.KV
 	claims *claimController
 	kube   *fakeKubeAPIServer
 }
 
-// startTestServer starts the generic server for cluster over a
-// one-acceptor cask. With delegated set, it delegates authentication and
-// authorization to a fake kube-apiserver.
-func startTestServer(t *testing.T, cluster string, delegated bool) *testServer {
-	t.Helper()
-	return startTestServerWith(t, cluster, delegated, nil)
+// testServerConfig changes what startTestServerWith starts.
+type testServerConfig struct {
+	// acceptors are the cask acceptors. Empty means one in-memory
+	// acceptor.
+	acceptors []caspaxos.AcceptorClient
+	// checks returns the readyz checks over the cask KV. Nil means the
+	// storage check only.
+	checks func(kv *mvcc.KV) []healthz.HealthChecker
+	// options changes the server options before the server starts. Nil
+	// changes nothing.
+	options func(*serverOptions)
+	// noWait returns as soon as /readyz answers, ready or not.
+	noWait bool
 }
 
-// startTestServerWith is startTestServer with a hook that changes the
-// server options before the server starts. A nil hook changes nothing.
-func startTestServerWith(t *testing.T, cluster string, delegated bool, hook func(*serverOptions)) *testServer {
+// startTestServer starts the generic server for cluster over a
+// one-acceptor cask. With delegated set, it delegates authentication and
+// authorization to a fake kube-apiserver. It returns when the server is
+// ready.
+func startTestServer(t *testing.T, cluster string, delegated bool) *testServer {
 	t.Helper()
-	acc := caspaxos.NewAcceptor(store.NewMem())
-	prop := caspaxos.NewProposer(1, []caspaxos.AcceptorClient{acc})
+	return startTestServerWith(t, cluster, delegated, testServerConfig{})
+}
+
+// startTestServerWith is startTestServer with the changes in c.
+func startTestServerWith(t *testing.T, cluster string, delegated bool, c testServerConfig) *testServer {
+	t.Helper()
+	if len(c.acceptors) == 0 {
+		c.acceptors = []caspaxos.AcceptorClient{caspaxos.NewAcceptor(store.NewMem())}
+	}
+	if c.checks == nil {
+		c.checks = func(kv *mvcc.KV) []healthz.HealthChecker {
+			return []healthz.HealthChecker{newStorageCheck(kv)}
+		}
+	}
+	prop := caspaxos.NewProposer(1, c.acceptors)
 	kv := mvcc.New(prop, hlc.New(func() int64 { return time.Now().UnixNano() }), 1)
 	sessions := lease.NewSessions(prop, func() int64 { return time.Now().UnixNano() })
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
 	stores := fleetStores(kv)
-	ts := &testServer{claims: &claimController{
+	ts := &testServer{kv: kv, claims: &claimController{
 		cluster:  cluster,
 		store:    storageClaims{devices: stores["devices"], claims: stores["deviceclaims"]},
 		sessions: sessions,
@@ -162,10 +186,10 @@ current-context: kube
 		rec.Authorization.RemoteKubeConfigFile = kubeconfig
 	}
 
-	if hook != nil {
-		hook(opts)
+	if c.options != nil {
+		c.options(opts)
 	}
-	srv, err := opts.newFleetServer(cluster, stores, ts.claims.release)
+	srv, err := opts.newFleetServer(cluster, stores, ts.claims.release, c.checks(kv)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,20 +202,38 @@ current-context: kube
 	})
 	ts.url = "https://" + ln.Addr().String()
 
-	// /readyz needs no authorization, but a server that has not started
-	// refuses the connection.
-	hc := &http.Client{Transport: insecureTransport(), Timeout: time.Second}
+	if c.noWait {
+		ts.waitReadyz(t, func(int) bool { return true })
+	} else {
+		ts.waitReadyz(t, func(code int) bool { return code == http.StatusOK })
+	}
+	return ts
+}
+
+// readyz returns the status code of /readyz, or 0 when the server does
+// not answer. /readyz needs no authorization.
+func (ts *testServer) readyz() int {
+	hc := &http.Client{Transport: insecureTransport(), Timeout: 5 * time.Second}
+	resp, err := hc.Get(ts.url + "/readyz")
+	if err != nil {
+		return 0
+	}
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+// waitReadyz polls /readyz until ok accepts its status code. A server
+// that has not started refuses the connection, and ok never sees that.
+func (ts *testServer) waitReadyz(t *testing.T, ok func(code int) bool) {
+	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		resp, err := hc.Get(ts.url + "/readyz")
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				return ts
-			}
+		code := ts.readyz()
+		if code != 0 && ok(code) {
+			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("server not ready: %v", err)
+			t.Fatalf("readyz: gave up at status %d", code)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

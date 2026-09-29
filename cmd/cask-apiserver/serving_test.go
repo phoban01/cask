@@ -127,11 +127,11 @@ func TestServingCertVerifiedByCA(t *testing.T) {
 		t.Fatal(err)
 	}
 	var opts *serverOptions
-	ts := startTestServerWith(t, "east", false, func(o *serverOptions) {
+	ts := startTestServerWith(t, "east", false, testServerConfig{options: func(o *serverOptions) {
 		o.recommended.SecureServing.ServerCert.CertKey.CertFile = filepath.Join(dir, "tls.crt")
 		o.recommended.SecureServing.ServerCert.CertKey.KeyFile = filepath.Join(dir, "tls.key")
 		opts = o
-	})
+	}})
 	if opts.selfSigned {
 		t.Error("server with --tls-cert-file reports a self-signed certificate")
 	}
@@ -178,7 +178,7 @@ func TestServingCertVerifiedByCA(t *testing.T) {
 // certificate and says so, so main can warn.
 func TestServingCertSelfSignedFallback(t *testing.T) {
 	var opts *serverOptions
-	startTestServerWith(t, "east", false, func(o *serverOptions) { opts = o })
+	startTestServerWith(t, "east", false, testServerConfig{options: func(o *serverOptions) { opts = o }})
 	if !opts.selfSigned {
 		t.Fatal("server without --tls-cert-file does not report a self-signed certificate")
 	}

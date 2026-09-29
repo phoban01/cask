@@ -34,10 +34,9 @@ Some parts of this procedure do not exist yet:
   ([#62](https://github.com/phoban01/cask/issues/62)). Until it lands,
   step 1 uses a read through each cluster's API and `GET /roster`. After
   #62, use `cask_quorum_reachable` and `cask_voters_reachable`.
-- **Readiness.** The pod's readiness probe does not check storage
-  ([#39](https://github.com/phoban01/cask/issues/39)). `/healthz` answers
-  `ok` as soon as the server listens. A Ready pod does not prove that
-  its voter takes part in the quorum.
+- **Readiness.** The pod's readiness probe checks that the apiserver can
+  read through a majority of the voters. A Ready pod does not prove that
+  its own voter takes part in the quorum.
 - **Demo script.** No script runs this runbook on the kind demo
   ([#194](https://github.com/phoban01/cask/issues/194)).
 - **Demo topology.** The kind demo still starts each apiserver with a
@@ -145,7 +144,9 @@ back.
 kubectl --context <cluster> wait --for=condition=Available apiservice/v1alpha1.fleet.cask.dev --timeout=5m
 ```
 
-A Ready pod is not enough (#39). Go on to step 4.
+An Available APIService shows that the apiserver reaches a majority. It
+does not show that this cluster's voter is back in the quorum. Go on to
+step 4.
 
 ### 4. Check the quorum again
 
