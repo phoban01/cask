@@ -34,6 +34,19 @@ if [ ! -f "$CERTS/ca.crt" ]; then
   docker run --rm --user "$(id -u):$(id -g)" -v "$CERTS:/out" "$IMG" \
     gen-consensus-certs --out /out "${CLUSTERS[@]}"
 fi
+
+# The kube-apiserver of each cluster verifies the apiserver before it
+# proxies a request. The image makes one serving CA and one serving
+# certificate per cluster. The APIService carries the CA as its caBundle.
+SERVING="$PWD/.serving-certs"
+for c in "${CLUSTERS[@]}"; do
+  if [ ! -f "$SERVING/$c/ca.crt" ]; then
+    step "Making the serving CA and certificate for $c"
+    mkdir -p "$SERVING/$c"
+    docker run --rm --user "$(id -u):$(id -g)" -v "$SERVING/$c:/out" "$IMG" \
+      gen-serving-certs --out /out
+  fi
+done
 b64() { base64 < "$1" | tr -d '\n'; }
 
 step "Creating kind clusters: ${CLUSTERS[*]}"
@@ -60,6 +73,9 @@ for c in "${CLUSTERS[@]}"; do
     -e "s|__CONSENSUS_CA__|$(b64 "$CERTS/ca.crt")|" \
     -e "s|__CONSENSUS_CERT__|$(b64 "$CERTS/$c.crt")|" \
     -e "s|__CONSENSUS_KEY__|$(b64 "$CERTS/$c.key")|" \
+    -e "s|__SERVING_CA__|$(b64 "$SERVING/$c/ca.crt")|" \
+    -e "s|__SERVING_CERT__|$(b64 "$SERVING/$c/tls.crt")|" \
+    -e "s|__SERVING_KEY__|$(b64 "$SERVING/$c/tls.key")|" \
     manifests/apiserver.yaml | kubectl --context "kind-$c" apply -f -
   id=$((id + 1))
 done

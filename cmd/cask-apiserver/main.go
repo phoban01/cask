@@ -31,6 +31,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "gen-serving-certs" {
+		if err := genServingCerts(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "gen-serving-certs:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	var (
 		legacy   = flag.Bool("legacy-http", false, "DEPRECATED, kept for one release: serve the old net/http mux on --listen instead of the generic server; it has no authentication")
 		listen   = flag.String("listen", ":9443", "address to serve the legacy mux on; with --legacy-http only (the generic server uses --bind-address and --secure-port)")
@@ -332,6 +339,10 @@ func main() {
 		log.Error("generic server", "err", err)
 		os.Exit(1)
 	}
+	if serverOpts.selfSigned {
+		log.Warn("no --tls-cert-file: serving a self-signed certificate that the kube-apiserver cannot verify; " +
+			"for tests only, see cask-apiserver gen-serving-certs")
+	}
 	// SIGTERM ends the context. The server then drains its requests.
 	runCtx := genericapiserver.SetupSignalContext()
 	go claims.run(runCtx, 2*time.Second)
@@ -354,7 +365,7 @@ func serveLegacy(ctx context.Context, cluster string, fs *fleetStore, listen str
 	// The cert is self-signed, so the APIService needs insecureSkipTLSVerify.
 	//= docs/spec/fleet.md#8-security
 	//= type=exception
-	//= reason=self-signed cert only; tracked in issue #41
+	//= reason=the legacy mux behind --legacy-http has a self-signed cert only; tracked in issue #190
 	//# The extension server MUST serve HTTPS with a certificate the kube-apiserver can verify.
 	if !selfTLS {
 		return server.ListenAndServe()

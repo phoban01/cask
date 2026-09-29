@@ -106,6 +106,13 @@ type testServer struct {
 // authorization to a fake kube-apiserver.
 func startTestServer(t *testing.T, cluster string, delegated bool) *testServer {
 	t.Helper()
+	return startTestServerWith(t, cluster, delegated, nil)
+}
+
+// startTestServerWith is startTestServer with a hook that changes the
+// server options before the server starts. A nil hook changes nothing.
+func startTestServerWith(t *testing.T, cluster string, delegated bool, hook func(*serverOptions)) *testServer {
+	t.Helper()
 	acc := caspaxos.NewAcceptor(store.NewMem())
 	prop := caspaxos.NewProposer(1, []caspaxos.AcceptorClient{acc})
 	kv := mvcc.New(prop, hlc.New(func() int64 { return time.Now().UnixNano() }), 1)
@@ -155,6 +162,9 @@ current-context: kube
 		rec.Authorization.RemoteKubeConfigFile = kubeconfig
 	}
 
+	if hook != nil {
+		hook(opts)
+	}
 	srv, err := opts.newFleetServer(cluster, stores, ts.claims.release)
 	if err != nil {
 		t.Fatal(err)
