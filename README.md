@@ -132,9 +132,9 @@ acceptor storage (Pebble) is the gating roadmap item
 devbox run build                      # or: go build -o bin/cask ./cmd/cask
 
 # a 3-node cluster
-bin/cask --id 1 --listen :8001 --peers :8001,:8002,:8003 &
-bin/cask --id 2 --listen :8002 --peers :8001,:8002,:8003 &
-bin/cask --id 3 --listen :8003 --peers :8001,:8002,:8003 &
+bin/cask --id 1 --listen :8001 --peers :8001,:8002,:8003 --insecure-consensus &
+bin/cask --id 2 --listen :8002 --peers :8001,:8002,:8003 --insecure-consensus &
+bin/cask --id 3 --listen :8003 --peers :8001,:8002,:8003 --insecure-consensus &
 
 curl -XPUT  localhost:8001/kv/greeting -d 'hello'     # write via node 1
 curl        localhost:8002/kv/greeting                # read via node 2 -> hello
@@ -147,17 +147,22 @@ This is the **static-membership** path. Inter-node consensus rides
 **ConnectRPC** (protobuf) by default; `--transport http` selects the interim
 JSON path. The client KV/lock API stays HTTP/JSON.
 
-> **Security posture (read before exposing a port).** On this static-TCP path
-> consensus is **plaintext and unauthenticated** — anyone who can inject traffic
-> between nodes can forge Prepare/Accept replies and break consensus safety. It
-> is for local/dev/CI and trusted-network use only. For any real deployment use
-> the Nebula overlay below, where consensus rides an encrypted, mutually
-> cert-authenticated mesh. The **client API** (`/kv`, `/lock`, `/session`) and
-> the control endpoints (`/health`, `/roster`) are unauthenticated everywhere
-> today — cask has no auth layer yet (a deliberate current limitation, see
-> `docs/confidence.md`), so bind them to localhost or the overlay, never a
-> public interface. Wire hardening (TLS-or-remove on the TCP path; client-API
-> auth) is tracked as a roadmap item.
+> **Security posture (read before exposing a port).** On this static-TCP path,
+> a node refuses to start without mutual TLS. Set `--consensus-cert`,
+> `--consensus-key`, and `--consensus-ca` to give it a certificate from a fleet
+> CA. The example above passes `--insecure-consensus` instead. That flag makes
+> consensus **plaintext and unauthenticated**: anyone who can inject traffic
+> between nodes can forge Prepare/Accept replies and break consensus safety.
+> Use it for tests and localhost only. The Nebula overlay below needs neither
+> flag, because consensus rides an encrypted, mutually cert-authenticated mesh.
+> In overlay mode the host `--listen` port still serves the consensus mux in
+> plaintext ([#163](https://github.com/phoban01/cask/issues/163)).
+> With the TLS flags, the **client API** (`/kv`, `/lock`, `/session`) shares
+> the `--listen` port, so a client also needs a certificate from the fleet CA.
+> With `--insecure-consensus` or on the overlay, the client API and the control
+> endpoints (`/health`, `/roster`) have no authentication (see
+> `docs/confidence.md`). Bind them to localhost or the overlay, never a public
+> interface. Client-API auth is a roadmap item.
 
 ### Self-forming over a Nebula overlay
 

@@ -51,7 +51,7 @@ step "Starting 3-node cask cluster ($CASK_PEERS)"
 i=1
 for port in 8001 8002 8003; do
   mkdir -p "$WORK/cask$i"
-  "$WORK/cask" --id "$i" --listen "127.0.0.1:$port" --peers "$CASK_PEERS" \
+  "$WORK/cask" --id "$i" --listen "127.0.0.1:$port" --peers "$CASK_PEERS" --insecure-consensus \
     --data-dir "$WORK/cask$i" >"$WORK/cask$i.log" 2>&1 &
   CASK_PIDS+=($!)
   i=$((i + 1))

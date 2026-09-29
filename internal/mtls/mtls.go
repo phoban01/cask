@@ -22,18 +22,24 @@ import (
 	"os"
 )
 
-// Files names the PEM files that hold a member's consensus identity.
+// Files names the PEM files that hold a member's consensus identity. It
+// also holds the opt-out that lets a test run consensus in plaintext.
 type Files struct {
 	Cert string // the member certificate (--consensus-cert)
 	Key  string // the private key of Cert (--consensus-key)
 	CA   string // the fleet CA certificate (--consensus-ca)
+	// Insecure (--insecure-consensus) allows plaintext consensus traffic
+	// when none of the three files is set. It is for tests only.
+	Insecure bool
 }
 
-// Register adds --consensus-cert, --consensus-key, and --consensus-ca to fs.
+// Register adds --consensus-cert, --consensus-key, --consensus-ca, and
+// --insecure-consensus to fs.
 func (f *Files) Register(fs *flag.FlagSet) {
 	fs.StringVar(&f.Cert, "consensus-cert", "", "PEM certificate this member presents on consensus traffic, as server and as client; set with --consensus-key and --consensus-ca")
 	fs.StringVar(&f.Key, "consensus-key", "", "PEM private key for --consensus-cert")
 	fs.StringVar(&f.CA, "consensus-ca", "", "PEM fleet CA; a peer must present a certificate that this CA signed")
+	fs.BoolVar(&f.Insecure, "insecure-consensus", false, "TESTS ONLY: serve and call consensus in plaintext, with no authentication, when the three consensus TLS flags are absent")
 }
 
 // Any reports whether at least one of the three files is set.
@@ -45,13 +51,28 @@ type Config struct {
 	Client *tls.Config // for every call to a peer
 }
 
-// Setup loads the configs named by f. With no file set, it logs a warning
-// and returns nil: consensus traffic then stays plaintext. With some but
-// not all files set, it fails, so a typo never turns TLS off.
+// ErrNoTLS is the error from Setup when no consensus TLS flag is set and
+// Files.Insecure is false.
+var ErrNoTLS = errors.New("mtls: consensus traffic needs mutual TLS: set --consensus-cert, --consensus-key, and --consensus-ca; to run in plaintext for a test, set --insecure-consensus")
+
+// Setup loads the configs named by f. A member calls it when it serves or
+// calls consensus over the network.
+//
+// With no file set, it fails with ErrNoTLS, unless f.Insecure is set. With
+// f.Insecure, it logs a warning and returns nil: consensus traffic then
+// stays plaintext. With some but not all files set, it fails, so a typo
+// never turns TLS off. With files and f.Insecure both set, it fails,
+// because the two flags ask for opposite things.
 func Setup(f Files, log *slog.Logger) (*Config, error) {
 	if !f.Any() {
-		log.Warn("CONSENSUS TRAFFIC IS PLAINTEXT AND UNAUTHENTICATED: anyone who reaches the consensus port can read and write fleet state; set --consensus-cert, --consensus-key, and --consensus-ca")
+		if !f.Insecure {
+			return nil, ErrNoTLS
+		}
+		log.Warn("--insecure-consensus: CONSENSUS TRAFFIC IS PLAINTEXT AND UNAUTHENTICATED: anyone who reaches the consensus port can read and write fleet state; use it for tests only, and set --consensus-cert, --consensus-key, and --consensus-ca for anything else")
 		return nil, nil
+	}
+	if f.Insecure {
+		return nil, errors.New("mtls: --insecure-consensus conflicts with --consensus-cert, --consensus-key, and --consensus-ca; set one or the other")
 	}
 	return Load(f)
 }

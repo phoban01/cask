@@ -125,13 +125,11 @@ func planVoters(cur roster.Value, ids []uint64, promote bool) ([]uint64, error) 
 // POST /admin/demote.
 func (m *membership) serveVoterChange(promote bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// The endpoints share the consensus listener. With the consensus
-		// TLS flags, only a client with a certificate from the fleet CA
-		// reaches them. Without the flags, anyone who can reach the
-		// listener can change the voter set.
+		// The endpoints share the consensus listener. Only a client with a
+		// certificate from the fleet CA reaches them. A member without the
+		// consensus TLS flags does not start, unless --insecure-consensus
+		// asks for plaintext in a test.
 		//= docs/spec/fleet.md#8-security
-		//= type=exception
-		//= reason=promote and demote are open when the consensus TLS flags are absent; tracked in issue #158
 		//# The cask client API and control endpoints MUST NOT be reachable outside the pod without authentication.
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
