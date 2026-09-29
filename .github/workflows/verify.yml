@@ -26,6 +26,14 @@ jobs:
           cache-dependency-path: |
             go.sum
             cmd/cask-apiserver/go.sum
+      - name: gofmt
+        # Walks both modules. A Duvet citation must sit inside a function
+        # body, where gofmt leaves it alone.
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needs to run on:"; echo "$unformatted"; exit 1
+          fi
       # cmd/cask-apiserver is its own module. A root "./..." does not
       # reach it, so build and test each module.
       - run: go build ./...

@@ -65,9 +65,9 @@ type Manager struct {
 	sessions   *lease.Sessions
 	locks      *lease.Locks
 	sessionID  string
-	sessionTTL int64             // in the lease clock's units (nanos in production)
-	clock      func() int64      // must be the same clock the sessions use
-	maxOffset  int64             // assumed bound on inter-node clock skew
+	sessionTTL int64        // in the lease clock's units (nanos in production)
+	clock      func() int64 // must be the same clock the sessions use
+	maxOffset  int64        // assumed bound on inter-node clock skew
 
 	// sessionExpiry is the freshest session expiry this node has CONFIRMED
 	// (returned by a committed Grant). The read guard compares against this,

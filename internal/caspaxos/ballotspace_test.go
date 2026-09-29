@@ -29,7 +29,7 @@ func appendChange(marker string) caspaxos.ChangeFunc {
 // identically: the full proposer's write survives and the owner is fenced out.
 func TestFullProposerPreemptsOwnerNoLostUpdate(t *testing.T) {
 	cases := []struct {
-		name          string
+		name            string
 		ownerID, fullID uint64
 	}{
 		// The dangerous order: pre-fix, the owner wins the tiebreak and the
